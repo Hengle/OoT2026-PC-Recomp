@@ -99,7 +99,7 @@ class Fairy:
         bi = BITMAPINFOHEADER(ctypes.sizeof(BITMAPINFOHEADER), self.n, -self.n, 1, 32, 0, 0, 0, 0, 0, 0)
         self.bits = ctypes.c_void_p()
         self.bmp = gdi32.CreateDIBSection(self.mem, ctypes.byref(bi), 0, ctypes.byref(self.bits), None, 0)
-        gdi32.SelectObject(self.mem, self.bmp)
+        self.old_bmp = gdi32.SelectObject(self.mem, self.bmp)
         self.shown = False
         self.tick()
 
@@ -151,6 +151,7 @@ class Fairy:
         self.alive = False
         try:
             user32.DestroyWindow(self.hwnd)
+            gdi32.SelectObject(self.mem, self.old_bmp)
             gdi32.DeleteObject(self.bmp)
             gdi32.DeleteDC(self.mem)
             user32.ReleaseDC(None, self.screen)

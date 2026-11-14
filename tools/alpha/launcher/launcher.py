@@ -256,7 +256,7 @@ def settings():
     except (OSError, AttributeError):
         de = False
     s = dict(game_dir=str(Path.home() / 'Games' / 'Ocarina Reborn'), language='de' if de else 'en-US', workers='auto',
-             ui_language='de' if de else 'en', audio='default')
+             ui_language='de' if de else 'en', audio='default', navi_enabled=True)
     try:
         s.update(json.loads(SETTINGS.read_text()))
     except (OSError, ValueError):
@@ -480,12 +480,23 @@ class App(tk.Tk):
 
     def start_fairy(self):
         """the fairy over the launcher (fairy.py); without it (an old Windows, no asset) the launcher is as it was"""
-        if self.fairy and self.fairy.alive:
+        if not self.cfg.get('navi_enabled', True) or (self.fairy and self.fairy.alive):
             return
         try:
             self.fairy = fairy.Fairy(self, ASSETS / 'fairy.bin')
         except Exception as e:
             log(f'fairy not shown: {type(e).__name__}: {e}')
+
+    def toggle_fairy(self):
+        enabled = not self.cfg.get('navi_enabled', True)
+        self.cfg['navi_enabled'] = enabled
+        save_settings(self.cfg)
+        if enabled:
+            self.start_fairy()
+        elif self.fairy:
+            self.fairy.close()
+            self.fairy = None
+        self.stage.render()
 
     def toggle_max(self):
         self.state('normal' if self.state() == 'zoomed' else 'zoomed')
@@ -838,7 +849,16 @@ class App(tk.Tk):
         widths = [pad * 2 + isz + gap + ctx.text_width(t, 21) for _, _, t in items]
         total = sum(widths) + chev * 2 + 8 * s
         x0 = max(W / 2 - total / 2, title_end + 30 * s)
-        right_room = (3 * 66 + 150) * s
+        navi_on = bool(self.cfg.get('navi_enabled', True))
+        navi_label = T('Navi an', 'Navi on') if navi_on else T('Navi aus', 'Navi off')
+        nw = 48 * s + max(ctx.text_width(T('Navi an', 'Navi on'), 16), ctx.text_width(T('Navi aus', 'Navi off'), 16))
+        music_label = T('Musik aus', 'Music off') if self.muted else T('Musik an', 'Music on')
+        mw = 48 * s + ctx.text_width(music_label, 16) if self.music.ok else 0
+        update_label = f'Update {self.update_info["version"]}' if self.update_info and not self.busy else ''
+        uw = 56 * s + ctx.text_width(update_label, 16, 'semibold') if update_label else 0
+        # Reserve the actual controls' width, including when an update is available.
+        right_room = ((3 * 66 + 14) * s if self.chrome.ok else 0) + nw + 22 * s
+        right_room += (mw + 10 * s if mw else 0) + (uw + 10 * s if uw else 0)
         x0 = min(x0, W - right_room - total)
         cy, ch = hh / 2 - 2 * s, 58 * s
         ctx.panel(x0, cy - ch / 2, total, ch, r=29, fill=ui.CELL, alpha=0.8, border=ui.LINE, balpha=0.9)
@@ -870,16 +890,15 @@ class App(tk.Tk):
                 ctx.icon(bx + bw / 2, hh * 0.31, name, 17 if name != 'close' else 18, ui.SUB)
                 ctx.hot(bx, 0, bw, hh * 0.62, cmd, hover=look)
             bx -= 14 * s
-        if self.update_info and not self.busy:
-            label = T(f'Update {self.update_info["version"]}', f'Update {self.update_info["version"]}')
-            uw = 56 * s + ctx.text_width(label, 16, 'semibold')
+        if update_label:
             bx -= uw + 10 * s
-            ctx.button(bx, hh / 2 - 19 * s, uw, 38 * s, label, self.offer_update, kind='primary', icon='download', size=16, r=19)
+            ctx.button(bx, hh / 2 - 19 * s, uw, 38 * s, update_label, self.offer_update, kind='primary', icon='download', size=16, r=19)
         if self.music.ok:
-            label = T('Musik aus', 'Music off') if self.muted else T('Musik an', 'Music on')
-            mw = 48 * s + ctx.text_width(label, 16)
-            ctx.button(bx - mw, hh / 2 - 19 * s, mw, 38 * s, label, self.toggle_music, kind='quiet',
+            bx -= mw + 10 * s
+            ctx.button(bx, hh / 2 - 19 * s, mw, 38 * s, music_label, self.toggle_music, kind='quiet',
                        icon='mute' if self.muted else 'speaker', size=16, weight='regular')
+        ctx.button(bx - nw, hh / 2 - 19 * s, nw, 38 * s, navi_label, self.toggle_fairy, kind='quiet',
+                   icon='checked' if navi_on else 'checkbox', size=16, weight='regular')
         return hh
 
     def content(self, ctx, margin=54):
