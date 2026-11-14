@@ -2242,6 +2242,9 @@ def main(a=None):
     if os.path.exists(src):
         copy_writable(src, os.path.join(work, "image", "chunks.txt"))
     env = {"OOT_WORK": work, "OOT_EXEFS": exefs, "OOT_ROMFS": romfs, "OOT_DUMP": out, "RX_RELEASE": "1", "A64_HOT_CHUNK": "1"}
+    # This builder selects its own compatible profile below. A stale RX_PGO inherited
+    # from another installation must not leak through when no profile is shipped.
+    env["RX_PGO"] = ""
     if os.path.exists(os.path.join(work, "hot_funcs.txt")):
         env["A64_HOT_FUNCS"] = os.path.join(work, "hot_funcs.txt")
     if os.path.exists(os.path.join(work, "ocarina_reborn_pieces.prof")) and profile_readable(os.path.join(work, "ocarina_reborn_pieces.prof")):

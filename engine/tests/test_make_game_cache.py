@@ -101,6 +101,7 @@ class NupCacheTests(unittest.TestCase):
                         path.write_bytes(data)
                 return
             if "nx2/lift.py" in cmd:
+                self.build_environment = dict(env)
                 raise Prepared
             self.fail("Unexpected build subprocess: %r" % cmd)
 
@@ -140,6 +141,31 @@ class NupCacheTests(unittest.TestCase):
                 self.output = output.getvalue()
                 for launch in blocked:
                     launch.assert_not_called()
+
+    def test_missing_profile_overrides_stale_inherited_path(self):
+        stale = str(self.root / 'old builder' / 'ocarina-reborn_pieces.prof')
+        with mock.patch.dict(os.environ, {"RX_PGO": stale}):
+            with self.assertRaises(Prepared):
+                self.run_to_lift(None, update=True)
+            self.assertEqual(os.environ["RX_PGO"], stale)  # Only the child build is changed.
+        self.assertEqual(self.build_environment["RX_PGO"], "")
+
+    def test_current_profile_replaces_inherited_path(self):
+        profile = self.work / 'ocarina_reborn_pieces.prof'
+        profile.write_bytes(b'authored profile fixture')
+        with mock.patch.dict(os.environ, {"RX_PGO": 'missing-old-profile.prof'}), \
+                mock.patch.object(make_game, 'profile_readable', return_value=True):
+            with self.assertRaises(Prepared):
+                self.run_to_lift(None, update=True)
+        self.assertEqual(self.build_environment["RX_PGO"], str(profile))
+
+    def test_incompatible_profile_does_not_restore_stale_inherited_path(self):
+        (self.work / 'ocarina_reborn_pieces.prof').write_bytes(b'authored incompatible profile')
+        with mock.patch.dict(os.environ, {"RX_PGO": 'missing-old-profile.prof'}), \
+                mock.patch.object(make_game, 'profile_readable', return_value=False):
+            with self.assertRaises(Prepared):
+                self.run_to_lift(None, update=True)
+        self.assertEqual(self.build_environment["RX_PGO"], "")
 
     def test_failed_scratch_exefs_cleanup_stops_before_copy_or_extraction(self):
         scratch = self.work / "exefs"

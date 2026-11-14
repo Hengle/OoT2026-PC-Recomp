@@ -714,6 +714,8 @@ def rebrand(H, icon):
     engine_stability.apply(H)
     import engine_resource_memory
     engine_resource_memory.apply(H)
+    import engine_build_profile
+    engine_build_profile.apply(H)
     rename_files(H)
     (H / 'NOTICE-OCARINA-REBORN.txt').write_text(
         'Ocarina Reborn builds the game with Hookshot (https://github.com/NotRexed/Hookshot), GPL-3.0 (LICENSE).\n'

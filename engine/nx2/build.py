@@ -59,6 +59,17 @@ OBJ_CACHE = os.path.join(kit.WORK, "objcache")
 PGO = os.environ.get("RX_PGO", "")
 
 
+def profile_use_flags(profile):
+    """A missing optional profile must not turn a normal optimised build into a failure."""
+    try:
+        with open(profile, "rb") as f:
+            digest = hashlib.sha1(f.read(), usedforsecurity=False).hexdigest()[:16]
+    except OSError as e:
+        print("WARNING: optional build profile is unavailable (%s); building without PGO." % e, flush=True)
+        return []
+    return ["-fprofile-instr-use=" + profile, "-DHOOKSHOT_PROFILE_SHA1=" + digest]
+
+
 # (linux) Linux builds: an ELF executable and ocarina_reborn_vk.so, the Win32 calls of host/ and gpu/vk on POSIX
 # (host/posix: its windows.h is found first), the window and sound on SDL2. HOOKSHOT_SYSROOT=<dir>: compile and link
 # against that root (the AppImage's: glibc 2.35, so the game runs on older systems than the one that built it).
@@ -1064,8 +1075,7 @@ def main():
     elif PGO:
         # (the profile's contents in the flags the object key hashes: its path alone stays the same across releases, so an update with a
         # new profile kept the hot code built from the old one)
-        with open(PGO, "rb") as f:
-            hot_fl = hot_fl + ["-fprofile-instr-use=" + PGO, "-DHOOKSHOT_PROFILE_SHA1=" + hashlib.sha1(f.read(), usedforsecurity=False).hexdigest()[:16]]
+        hot_fl = hot_fl + profile_use_flags(PGO)
     jobs = [(cc, s, os.path.join(obj_dir, os.path.basename(s)[:-2] + ".o"),
              hot_fl if os.path.basename(s).startswith("code_hot") else fl,
              shim_deps if os.path.dirname(s) == NX2_RT else deps) for s in srcs]
