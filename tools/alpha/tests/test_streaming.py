@@ -69,7 +69,8 @@ for i in range(20):
             self.assertEqual(target.read_bytes(),current)
             before=target.read_bytes();engine_streaming.apply(root)
             self.assertEqual(before,target.read_bytes())
-            self.assertEqual((root/'gpu/vk/ocr_upload_batch.h').read_bytes(),(ROOT/'engine/gpu/vk/ocr_upload_batch.h').read_bytes())
+            # Git checks out tool files as CRLF on Windows, engine headers as LF.
+            self.assertEqual((root/'gpu/vk/ocr_upload_batch.h').read_text(),(ROOT/'engine/gpu/vk/ocr_upload_batch.h').read_text())
 
 WORKERS=r'''
 #include <windows.h>
