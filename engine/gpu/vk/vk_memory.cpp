@@ -27,6 +27,7 @@
 #include <windows.h>
 
 #include "vk_internal.h"
+#include "ocr_resource_policy.h"
 #include "vk_texture.h"   // (upload_command_buffer)
 #include "vk_gprof.h"      // (RX_VK_PASS_TIMING)
 #include "import_hold.h"
@@ -939,10 +940,23 @@ uint64_t cap_spare_max() {
         const uint64_t ram_mb = !ram || ram <= (9ull << 30) ? 64 : ram <= (17ull << 30) ? 128 : ram <= (33ull << 30) ? 256 : 512;
         return vram_usage(&used, &allowed) && allowed <= (6ull << 30) + (512ull << 20) ? 32ull << 20 : ram_mb << 20;
     }();
-    return v;
+    // All callers hold cap_free_mu. Sample at most four times a second.
+    static auto next = std::chrono::steady_clock::time_point{};
+    static ocr_resources::IdleReserve state;
+    static uint64_t limit = v;
+    const auto now = std::chrono::steady_clock::now();
+    if (now >= next) {
+        next = now + std::chrono::milliseconds(250);
+        MEMORYSTATUSEX ms{}; ms.dwLength = sizeof(ms);
+        const char* e = getenv("OCR_RAM_RESERVE_MB");
+        const uint64_t reserve = (uint64_t)std::max(512, e ? atoi(e) : 1024) << 20;
+        const uint64_t candidate = GlobalMemoryStatusEx(&ms) ? ocr_resources::idle_limit(v, ms.ullAvailPageFile, ms.ullAvailPhys, reserve) : limit;
+        limit = state.update(candidate, (uint64_t)std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()).count());
+    }
+    return limit;
 }
 void cap_buf_free(VkBuffer buffer, VmaAllocation alloc, void* map, uint64_t size, bool from_worker = false) {
-    std::lock_guard lk(cap_free_mu);
+    std::unique_lock lk(cap_free_mu);
     if (from_worker && cap_shutting_down.load()) return;
     // (hookshot, RX 7800 XT: buffers up to 256 MB are kept for the next capture, not only up to 64 MB: a new one costs ~100 ms of
     // vkAllocateMemory on AMD's driver. RX_VK_CAPTURE_KEEP_OLD=1: as before)
@@ -952,6 +966,7 @@ void cap_buf_free(VkBuffer buffer, VmaAllocation alloc, void* map, uint64_t size
         cap_free.push_back({buffer, alloc, map, size});
         cap_free_bytes += size;
     } else {
+        lk.unlock(); // Driver frees must not block capture pool access.
         destroy_buffer(buffer, alloc);
     }
 }
@@ -1063,6 +1078,26 @@ void cap_prewarm_class(uint64_t size) {
     try { std::thread(ocr_cap_worker).detach(); }
     catch (...) { cap_prewarm_busy = 0; cap_prewarm_pending = 0; }
 }
+// Only spares live here: capture generations still referenced by the GPU never enter this list.
+void cap_trim_spares(std::unique_lock<std::mutex>& lock) {
+    const uint64_t limit = cap_spare_max();
+    std::vector<FreeBuf> retired;
+    uint64_t released = 0;
+    while (cap_free_bytes > limit && !cap_free.empty()) {
+        auto it = std::max_element(cap_free.begin(), cap_free.end(),
+            [](const FreeBuf& a, const FreeBuf& b) { return a.size < b.size; });
+        released += it->size;
+        cap_free_bytes -= it->size;
+        retired.push_back(*it);
+        cap_free.erase(it);
+    }
+    if (retired.empty()) return;
+    lock.unlock();
+    for (const auto& f : retired) destroy_buffer(f.buffer, f.alloc);
+    logf("[OcarinaReborn/MEM] released %llu MB of idle capture buffers (limit %llu MB)",
+         (unsigned long long)(released >> 20), (unsigned long long)(limit >> 20));
+    lock.lock();
+}
 bool cap_buf_get(uint64_t need, VkBuffer& buffer, VmaAllocation& alloc, void*& map, uint64_t& size) {
     const uint64_t target = cap_buf_size(need);
     std::unique_lock lk(cap_free_mu);
@@ -1081,9 +1116,11 @@ bool cap_buf_get(uint64_t need, VkBuffer& buffer, VmaAllocation& alloc, void*& m
         map = cap_free[best].map; size = cap_free[best].size;
         cap_free_bytes -= size;
         cap_free.erase(cap_free.begin() + (ptrdiff_t)best);
+        cap_trim_spares(lk); // take the requested buffer first, avoiding a free/reallocate cycle
         cap_prewarm_class(target);
         return map != nullptr;
     }
+    cap_trim_spares(lk);
     cap_prewarm_class(target);
     lk.unlock();
     size = target;
@@ -2118,11 +2155,19 @@ struct TlPool {
 };
 thread_local TlPool tl_pools[1024];   // (a parallel replay thread's: by 64 KB page, read without the lock)
 
-Pool* pool_of(uint64_t guest, uint64_t size) {
+Pool* pool_of(uint64_t guest, uint64_t size, bool existing_only = false) {
     if (!size || size > UINT64_MAX - guest) return nullptr;
     if (last_pool && guest >= last_pool->lo && guest + size <= last_pool->hi) return last_pool;
     Pool*& slot = pool_cache[(guest >> 16) & 4095];
     if (slot && guest >= slot->lo && guest + size <= slot->hi) return last_pool = slot;
+    if (existing_only) {
+        // Do not wait for background imports or pin/merge new guest memory for a one-off upload.
+        auto it = imported.upper_bound(guest);
+        if (it == imported.begin()) return nullptr;
+        --it;
+        if (it->second.lo > guest || it->second.hi < guest + size) return nullptr;
+        return last_pool = slot = &it->second;
+    }
     Pool* found = pool_lookup(guest, size);
     if (found) slot = found;
     return found;
@@ -2986,12 +3031,12 @@ bool memory_rb_refresh(VkCommandBuffer up) {
     return true;
 }
 
-BufferRef gpu_buffer(uint64_t gpu, uint64_t size) {
+BufferRef gpu_buffer(uint64_t gpu, uint64_t size, bool existing_only) {
     uint64_t avail = 0;
     if (!host->gpu_ptr(gpu, &avail) || avail < size) return {};
     const uint64_t guest = host->gpu_guest(gpu);
     std::lock_guard lk(pools_mu);
-    Pool* p = pool_of(guest, size);
+    Pool* p = pool_of(guest, size, existing_only);
     if (!p) return {};
     if (p->last_value < mem_rec_value) p->last_value = mem_rec_value;   // (in use: not given back under it, imports_give_back)
     note_in_place_read();   // (the pool itself, read by the GPU where the caller's work runs)

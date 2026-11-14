@@ -443,73 +443,83 @@ def apply_mem(H):
 # (A HOLD, not a cut for one pass: the guard of 1.0.1 lowered the budget for the pass it ran in only; the next pass had the
 # normal budget again, the textures came back, the guard cut again. Two players' sessions (RX 9060 XT 01:15-01:32: 97 cuts,
 # 32 of 42 windows with frames over 100 ms right after one; RX 7900 XTX 04:52) stuttered from that seesaw)
-RAM_GUARD = (
-    '#ifdef _WIN32\n'
-    '    {   // (Ocarina Reborn) RAM guard: engine_v21.py RAM_GUARD\n'
-    '        static const uint64_t reserve = (uint64_t)(getenv("OCR_RAM_RESERVE_MB") ? std::max(512, atoi(getenv("OCR_RAM_RESERVE_MB"))) : 1024) << 20;\n'
-    '        static uint64_t held = 0;   // (0: no hold)\n'
-    '        static uint64_t said_at = 0, pressure_at = 0;\n'
-    '        MEMORYSTATUSEX ms{};\n'
-    '        ms.dwLength = sizeof ms;\n'
-    '        if (GlobalMemoryStatusEx(&ms)) {\n'
-    '            // (Auto texture memory on a PC with little RAM: at most 40% of the RAM. AMD counts video memory toward the\n'
-    '            // process\' commit, so a 16 GB PC with a 16 GB card had an 11 GB budget, 8.9 GB of textures, 14 of 15 GB VRAM,\n'
-    '            // and lost the device (RX 6950 XT, 16 GB RAM, 2026-11-12). 32 GB of RAM keeps 12.8 GB: unchanged there)\n'
-    '            if (!ocr_texture_budget_gb() && !getenv("RX_VK_TEX_MAX_MB")) {\n'
-    '                const uint64_t ram_cap = ms.ullTotalPhys / 5 * 2;\n'
-    '                static bool said_cap = false;\n'
-    '                if (budget > ram_cap) {\n'
-    '                    if (!said_cap) said_cap = true, logf("[OcarinaReborn/MEM] Auto texture memory: %llu MB of RAM, budget %llu -> %llu MB",\n'
-    '                                                         (unsigned long long)(ms.ullTotalPhys >> 20), (unsigned long long)(budget >> 20),\n'
-    '                                                         (unsigned long long)(ram_cap >> 20));\n'
-    '                    budget = ram_cap;\n'
-    '                }\n'
-    '            }\n'
-    '            if (frame_no % 600 == 0)\n'
-    '                logf("[OcarinaReborn/MEM] system: commit free %llu MB, RAM free %llu MB, reserve %llu MB",\n'
-    '                     (unsigned long long)(ms.ullAvailPageFile >> 20), (unsigned long long)(ms.ullAvailPhys >> 20),\n'
-    '                     (unsigned long long)(reserve >> 20));\n'
-    '            const uint64_t floor = std::min<uint64_t>(1536ull << 20, budget), step = 256ull << 20;\n'
-    '            // (and physical RAM: with commit to spare, Windows still pages the game out when RAM runs short, and the whole\n'
-    '            // game stops 1-3 s at a time: RTX 4070 SUPER, 31 GB RAM, private bytes 17 -> 29 GB over a session, dozens of\n'
-    '            // 2-3 s freezes, the game reading no controller meanwhile, 2026-11-12. Under 1.5 GB of RAM free counts as short)\n'
-    '            const uint64_t phys_reserve = std::max<uint64_t>(reserve, 1536ull << 20);\n'
-    '            const uint64_t short_commit = ms.ullAvailPageFile < reserve ? reserve - ms.ullAvailPageFile : 0;\n'
-    '            const uint64_t short_phys = ms.ullAvailPhys < phys_reserve ? phys_reserve - ms.ullAvailPhys : 0;\n'
-    '            // (and the video memory Windows allows the game: over 92% of it, the driver moves memory out to RAM and the game\n'
-    '            // stops for 1-3 s at a time, with CPU and GPU idle: RTX 4070 SUPER 2026-11-12, 10.2 of 10.6 GB, freezes of 2 s while\n'
-    '            // its textures were already held at 2.5 GB by the RAM guard. Let go again under 85%)\n'
-    '            uint64_t vused = 0, vallowed = 0;\n'
-    '            const bool vknown = vram_usage(&vused, &vallowed) && vallowed;\n'
-    '            const uint64_t vcap = vknown ? vallowed / 100 * 92 : 0;\n'
-    '            const uint64_t short_vram = vknown && vused > vcap ? vused - vcap : 0;\n'
-    '            const bool roomy = ms.ullAvailPageFile > reserve + (1024ull << 20) && ms.ullAvailPhys > phys_reserve + (1024ull << 20) &&\n'
-    '                               (!vknown || vused < vallowed / 100 * 85);\n'
-    '            if (short_commit || short_phys || short_vram) {   // (short: the hold one step lower, at most the shortfall)\n'
-    '                const uint64_t short_by = std::max(std::max(short_commit, short_phys), short_vram), from = held ? held : std::min(budget, total_bytes);\n'
-    '                const uint64_t lower = std::max(from > short_by ? from - short_by : 0, from > step ? from - step : 0);\n'
-    '                pressure_at = frame_no;\n'
-    '                const uint64_t was = held;\n'
-    '                held = std::max(lower, floor);\n'
-    '                if (held != was && (frame_no - said_at >= 600 || !said_at))\n'
-    '                    said_at = frame_no, logf("[OcarinaReborn/MEM] RAM guard: %llu MB of commit left, %llu MB of RAM free, "\n'
-    '                                             "VRAM %llu of %llu MB: textures held at %llu MB", (unsigned long long)(ms.ullAvailPageFile >> 20),\n'
-    '                                             (unsigned long long)(ms.ullAvailPhys >> 20), (unsigned long long)(vused >> 20),\n'
-    '                                             (unsigned long long)(vallowed >> 20), (unsigned long long)(held >> 20));\n'
-    '            } else if (held && roomy && frame_no - pressure_at >= 300 && frame_no - said_at >= 300) {\n'
-    '                // (room again: let go slowly, 128 MB every 5 s at the most, so it does not swing back at once)\n'
-    '                said_at = frame_no;\n'
-    '                held += 128ull << 20;\n'
-    '                if (held >= budget) {\n'
-    '                    held = 0;\n'
-    '                    logf("[OcarinaReborn/MEM] RAM guard: %llu MB of commit left again, textures back to their budget",\n'
-    '                         (unsigned long long)(ms.ullAvailPageFile >> 20));\n'
-    '                }\n'
-    '            }\n'
-    '            if (held) budget = std::min(budget, held);\n'
-    '        }\n'
-    '    }\n'
-    '#endif\n')
+RAM_GUARD = r'''#ifdef _WIN32
+    {   // (Ocarina Reborn) RAM guard: engine_v21.py RAM_GUARD
+        static const uint64_t reserve = (uint64_t)(getenv("OCR_RAM_RESERVE_MB") ? std::max(512, atoi(getenv("OCR_RAM_RESERVE_MB"))) : 1024) << 20;
+        static uint64_t held = 0;   // (0: no hold)
+        static uint64_t said_at = 0;
+        static auto pressure_at = std::chrono::steady_clock::time_point{};
+        static auto changed_at = std::chrono::steady_clock::time_point{};
+        const auto now = std::chrono::steady_clock::now();
+        MEMORYSTATUSEX ms{};
+        ms.dwLength = sizeof ms;
+        if (GlobalMemoryStatusEx(&ms)) {
+            // (Auto texture memory on a PC with little RAM: at most 40% of the RAM. AMD counts video memory toward the
+            // process' commit, so a 16 GB PC with a 16 GB card had an 11 GB budget, 8.9 GB of textures, 14 of 15 GB VRAM,
+            // and lost the device (RX 6950 XT, 16 GB RAM, 2026-11-12). 32 GB of RAM keeps 12.8 GB: unchanged there)
+            if (!ocr_texture_budget_gb() && !getenv("RX_VK_TEX_MAX_MB")) {
+                const uint64_t ram_cap = ms.ullTotalPhys / 5 * 2;
+                static bool said_cap = false;
+                if (budget > ram_cap) {
+                    if (!said_cap) said_cap = true, logf("[OcarinaReborn/MEM] Auto texture memory: %llu MB of RAM, budget %llu -> %llu MB",
+                                                         (unsigned long long)(ms.ullTotalPhys >> 20), (unsigned long long)(budget >> 20),
+                                                         (unsigned long long)(ram_cap >> 20));
+                    budget = ram_cap;
+                }
+            }
+            if (frame_no % 600 == 0)
+                logf("[OcarinaReborn/MEM] system: commit free %llu MB, RAM free %llu MB, reserve %llu MB",
+                     (unsigned long long)(ms.ullAvailPageFile >> 20), (unsigned long long)(ms.ullAvailPhys >> 20),
+                     (unsigned long long)(reserve >> 20));
+            const uint64_t floor = std::min<uint64_t>(1536ull << 20, budget), step = 256ull << 20;
+            // (and physical RAM: with commit to spare, Windows still pages the game out when RAM runs short, and the whole
+            // game stops 1-3 s at a time: RTX 4070 SUPER, 31 GB RAM, private bytes 17 -> 29 GB over a session, dozens of
+            // 2-3 s freezes, the game reading no controller meanwhile, 2026-11-12. Under 1.5 GB of RAM free counts as short)
+            const uint64_t phys_reserve = std::max<uint64_t>(reserve, 1536ull << 20);
+            const uint64_t short_commit = ms.ullAvailPageFile < reserve ? reserve - ms.ullAvailPageFile : 0;
+            const uint64_t short_phys = ms.ullAvailPhys < phys_reserve ? phys_reserve - ms.ullAvailPhys : 0;
+            // (and the video memory Windows allows the game: over 92% of it, the driver moves memory out to RAM and the game
+            // stops for 1-3 s at a time, with CPU and GPU idle: RTX 4070 SUPER 2026-11-12, 10.2 of 10.6 GB, freezes of 2 s while
+            // its textures were already held at 2.5 GB by the RAM guard. Let go again under 85%)
+            uint64_t vused = 0, vallowed = 0;
+            const bool vknown = vram_usage(&vused, &vallowed) && vallowed;
+            const uint64_t vcap = vknown ? vallowed / 100 * 92 : 0;
+            const uint64_t short_vram = vknown && vused > vcap ? vused - vcap : 0;
+            const bool roomy = ms.ullAvailPageFile > reserve + (1024ull << 20) && ms.ullAvailPhys > phys_reserve + (1024ull << 20) &&
+                               (!vknown || vused < vallowed / 100 * 85);
+            if (short_commit || short_phys || short_vram) {   // (short: the hold one step lower, at most the shortfall)
+                const uint64_t short_by = std::max(std::max(short_commit, short_phys), short_vram), from = held ? held : std::min(budget, total_bytes);
+                const uint64_t lower = std::max(from > short_by ? from - short_by : 0, from > step ? from - step : 0);
+                pressure_at = now;
+                // Give retired images/driver accounting time to catch up. High FPS must not squeeze faster.
+                // At critical pressure retain the old prompt response; recovery always needs five quiet seconds.
+                const bool critical = ms.ullAvailPageFile < (256ull << 20) || ms.ullAvailPhys < (512ull << 20) ||
+                                      (vknown && vused > vallowed / 100 * 97);
+                const uint64_t was = held;
+                if (!held || critical || now - changed_at >= std::chrono::milliseconds(500)) {
+                    held = std::max(lower, floor);
+                    changed_at = now;
+                }
+                if (held != was && (frame_no - said_at >= 600 || !said_at))
+                    said_at = frame_no, logf("[OcarinaReborn/MEM] RAM guard: %llu MB of commit left, %llu MB of RAM free, "
+                                             "VRAM %llu of %llu MB: textures held at %llu MB", (unsigned long long)(ms.ullAvailPageFile >> 20),
+                                             (unsigned long long)(ms.ullAvailPhys >> 20), (unsigned long long)(vused >> 20),
+                                             (unsigned long long)(vallowed >> 20), (unsigned long long)(held >> 20));
+            } else if (held && roomy && now - pressure_at >= std::chrono::seconds(5) && now - changed_at >= std::chrono::seconds(5)) {
+                // (room again: let go slowly, 128 MB every 5 s at the most, so it does not swing back at once)
+                changed_at = now;
+                held += 128ull << 20;
+                if (held >= budget) {
+                    held = 0;
+                    logf("[OcarinaReborn/MEM] RAM guard: %llu MB of commit left again, textures back to their budget",
+                         (unsigned long long)(ms.ullAvailPageFile >> 20));
+                }
+            }
+            if (held) budget = std::min(budget, held);
+        }
+    }
+#endif
+'''
 
 
 def apply_perf(H):

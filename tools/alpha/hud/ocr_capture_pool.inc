@@ -68,6 +68,26 @@ void cap_prewarm_class(uint64_t size) {
     try { std::thread(ocr_cap_worker).detach(); }
     catch (...) { cap_prewarm_busy = 0; cap_prewarm_pending = 0; }
 }
+// Only spares live here: capture generations still referenced by the GPU never enter this list.
+void cap_trim_spares(std::unique_lock<std::mutex>& lock) {
+    const uint64_t limit = cap_spare_max();
+    std::vector<FreeBuf> retired;
+    uint64_t released = 0;
+    while (cap_free_bytes > limit && !cap_free.empty()) {
+        auto it = std::max_element(cap_free.begin(), cap_free.end(),
+            [](const FreeBuf& a, const FreeBuf& b) { return a.size < b.size; });
+        released += it->size;
+        cap_free_bytes -= it->size;
+        retired.push_back(*it);
+        cap_free.erase(it);
+    }
+    if (retired.empty()) return;
+    lock.unlock();
+    for (const auto& f : retired) destroy_buffer(f.buffer, f.alloc);
+    logf("[OcarinaReborn/MEM] released %llu MB of idle capture buffers (limit %llu MB)",
+         (unsigned long long)(released >> 20), (unsigned long long)(limit >> 20));
+    lock.lock();
+}
 bool cap_buf_get(uint64_t need, VkBuffer& buffer, VmaAllocation& alloc, void*& map, uint64_t& size) {
     const uint64_t target = cap_buf_size(need);
     std::unique_lock lk(cap_free_mu);
@@ -86,9 +106,11 @@ bool cap_buf_get(uint64_t need, VkBuffer& buffer, VmaAllocation& alloc, void*& m
         map = cap_free[best].map; size = cap_free[best].size;
         cap_free_bytes -= size;
         cap_free.erase(cap_free.begin() + (ptrdiff_t)best);
+        cap_trim_spares(lk); // take the requested buffer first, avoiding a free/reallocate cycle
         cap_prewarm_class(target);
         return map != nullptr;
     }
+    cap_trim_spares(lk);
     cap_prewarm_class(target);
     lk.unlock();
     size = target;

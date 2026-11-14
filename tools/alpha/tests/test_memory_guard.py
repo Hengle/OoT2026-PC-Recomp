@@ -74,13 +74,13 @@ class NativeMemoryGuard(unittest.TestCase):
             self.skipTest('clang++ needed for native test')
         with tempfile.TemporaryDirectory(prefix='ocr-memory-test-') as directory:
             tmp = Path(directory)
-            source = HARNESS.replace('/* GUARD */', engine.RAM_GUARD)
+            source = HARNESS.replace('/* GUARD */', engine.RAM_GUARD.replace('std::chrono::steady_clock::now()', 'fake_now()'))
             (tmp / 'test.cpp').write_text(source, encoding='utf-8')
             exe = tmp / 'test.exe'
             built = subprocess.run([compiler, '-std=c++17', '-O2', '-Wall', '-Wextra', '-Werror',
                                     '-static', str(tmp / 'test.cpp'), '-o', str(exe)], capture_output=True, text=True)
             self.assertEqual(built.returncode, 0, built.stdout + built.stderr)
-            for case in ['off-cap', 'off-commit', 'off-ram', 'manual', 'healthy', 'unavailable', 'floor', 'recovery']:
+            for case in ['off-cap', 'off-commit', 'off-ram', 'manual', 'healthy', 'unavailable', 'floor', 'recovery', 'rate', 'critical']:
                 with self.subTest(case=case):
                     env = dict(os.environ)
                     env.pop('RX_VK_TEX_MAX_MB', None)
@@ -96,6 +96,7 @@ HARNESS = r'''
 #include <cstdio>
 #include <cstring>
 #include <cassert>
+#include <chrono>
 struct MEMORYSTATUSEX {
     unsigned dwLength;
     uint64_t ullTotalPhys, ullAvailPhys, ullAvailPageFile;
@@ -108,6 +109,8 @@ static int GlobalMemoryStatusEx(MEMORYSTATUSEX* out) { *out = memory; return ava
 static int ocr_texture_budget_gb() { return manual_gb; }
 static bool vram_usage(uint64_t* used, uint64_t* allowed) { *used = 14*GB; *allowed = 24*GB; return true; }
 static void logf(const char*, ...) {}
+static uint64_t clock_ms = 10000;
+static auto fake_now() { return std::chrono::steady_clock::time_point(std::chrono::milliseconds(clock_ms)); }
 static uint64_t run(uint64_t budget, uint64_t total_bytes, uint64_t frame_no) {
 /* GUARD */
     return budget;
@@ -141,13 +144,31 @@ int main(int argc, char** argv) {
     } else if (!strcmp(test, "recovery")) {
         memory.ullAvailPageFile = 0;
         auto first = run(8*GB, 6*GB, 600);
+        clock_ms += 500;
         auto held = run(8*GB, first, 890);
         assert(held < first);
         memory.ullAvailPageFile = 8*GB;
         assert(run(8*GB, held, 901) == held); // last log was 600, last pressure was 890
-        assert(run(8*GB, held, 1189) == held);
-        assert(run(8*GB, held, 1190) == held + 128*MB);
-        assert(run(8*GB, held, 1200) == held + 128*MB);
+        clock_ms += 4999;
+        assert(run(8*GB, held, 50000) == held); // even at very high FPS, five real seconds required
+        clock_ms += 1;
+        assert(run(8*GB, held, 50010) == held + 128*MB);
+        clock_ms += 10;
+        assert(run(8*GB, held, 50020) == held + 128*MB);
+    } else if (!strcmp(test, "rate")) {
+        memory.ullAvailPageFile = 512*MB;
+        auto held = run(8*GB, 6*GB, 10);
+        for (int i=0; i<499; ++i) {
+            ++clock_ms;
+            assert(run(8*GB, 6*GB, 20+i*10) == held);
+        }
+        ++clock_ms;
+        assert(run(8*GB, 6*GB, 6000) == held - 256*MB);
+    } else if (!strcmp(test, "critical")) {
+        memory.ullAvailPageFile = 128*MB;
+        auto held = run(8*GB, 6*GB, 10);
+        ++clock_ms;
+        assert(run(8*GB, 6*GB, 20) == held - 256*MB); // no cooldown at imminent exhaustion
     } else return 2;
     puts("memory policy OK");
 }

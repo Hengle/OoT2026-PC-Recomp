@@ -27,9 +27,14 @@ uint64_t cap_free_bytes = 0;
 std::atomic<bool> cap_shutting_down{false};
 std::atomic<bool> warming{true}, allocating{false};
 std::atomic<int> delay_ms{2}, made{0};
-uint64_t cap_spare_max() { return 512ull << 20; }
+uint64_t cap_spare_max() { return available < (1ull << 30) ? 32ull << 20 : 512ull << 20; }
 bool cap_prewarm_on() { return warming; }
-void destroy_buffer(VkBuffer, VmaAllocation) {}
+static std::vector<VkBuffer> destroyed;
+void destroy_buffer(VkBuffer buffer, VmaAllocation) {
+    assert(cap_free_mu.try_lock()); // slow driver frees must occur outside the pool lock
+    cap_free_mu.unlock();
+    destroyed.push_back(buffer);
+}
 bool create_buffer_cached(uint64_t, int, VkBuffer& b, VmaAllocation& a, void** m, bool) {
     allocating = true;
     std::this_thread::sleep_for(std::chrono::milliseconds(delay_ms.load()));
@@ -65,7 +70,9 @@ int main() {
     available = 512ull << 20;
     assert(cap_buf_get(30ull << 20, b, a, map, size));
     idle();
-    assert(cap_free_bytes == (384ull << 20)); // low-memory safety: no speculative refill
+    assert(cap_free_bytes <= (32ull << 20)); // idle large reserves actually released under pressure
+    assert(destroyed.size() == 3);
+    assert(std::find(destroyed.begin(), destroyed.end(), b) == destroyed.end()); // requested buffer reused, not freed
     warming = false;
     delay_ms = 80;
     std::thread request([&] { assert(cap_buf_get(4ull << 20, b, a, map, size)); });

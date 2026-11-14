@@ -34,6 +34,7 @@
 #include <vector>
 
 #include "vk_texture.h"
+#include "ocr_resource_policy.h"
 #include "vk_menu.h"
 #include "vk_draw.h"
 #include "vk_programs.h"
@@ -288,6 +289,7 @@ struct Pooled {
 std::mutex pool_mu;
 std::unordered_map<uint64_t, std::vector<Pooled>> target_pool;   // by pool_key_of
 uint64_t pool_bytes, pool_n, st_pool_reused, st_pool_made, st_pool_destroyed;
+uint64_t ocr_idle_cap = UINT64_MAX; // renderer thread, refreshed before trimming completed resources
 bool pool_pressed;   // (VRAM near what the driver allows: texture_frame's budget)
 bool compact_on() {   // (hookshot: the textures in a pool of their own, compacted: compact_step. On unless RX_VK_COMPACT=0)
     static const bool v = vram_compact::enabled(getenv("RX_VK_COMPACT"));
@@ -333,7 +335,7 @@ void pool_put(Dead& d) {
 /// presents: destroyed, at most 16 a present (64 while VRAM is short). Returns how many
 size_t pool_trim() {
     std::lock_guard lk(pool_mu);
-    const uint64_t cap = pool_pressed ? 0 : pool_cap();
+    const uint64_t cap = pool_pressed ? 0 : std::min(pool_cap(), ocr_idle_cap);
     const size_t most = pool_pressed ? 64 : 16;
     size_t n = 0;
     for (auto it = target_pool.begin(); it != target_pool.end() && n < most;) {
@@ -1175,7 +1177,17 @@ bool upload_unswizzle_gpu(Texture& tex, uint64_t total, const Ranges* dirty) {
     default: return false;
     }
     if (!unswizzle_ready()) return false;
-    const BufferRef src = gpu_buffer(tex.gpu, total);
+    // Importing a ~15 MB upload pinned/merged 40-72 MB on AMD and stalled replay for 20-40 ms.
+    // Existing imports are still used; modest uploads otherwise take the bounded parallel CPU path.
+    static const uint64_t cpu_max = (uint64_t)(getenv("OCR_UPLOAD_NO_IMPORT_MB")
+        ? std::max(0, atoi(getenv("OCR_UPLOAD_NO_IMPORT_MB"))) : 32) << 20;
+    const BufferRef src = gpu_buffer(tex.gpu, total, total <= cpu_max);
+    if (!src && total <= cpu_max) {
+        static std::atomic<unsigned> avoided{0};
+        const unsigned n = ++avoided;
+        if (n <= 4 || n % 128 == 0) logf("[OcarinaReborn/LOAD] upload without new host import: %llu KB (%u so far)",
+            (unsigned long long)(total >> 10), n);
+    }
     const uint64_t align = std::max<uint64_t>(dev.props.limits.minStorageBufferOffsetAlignment, 16);
     if (!src || (src.offset % align)) return false;
     for (uint32_t level = 0; level < tex.levels; level++) {   // (every level must be possible before any is done)
@@ -1610,8 +1622,11 @@ bool upload_inner(Texture& tex, const Ranges* dirty) {
                     // course maps the title loads at each scene change, 6 of 349 MB, took ~100 ms each on one. Their
                     // storage is sparse: each thread gathers its own rows, 8 MB at a time, rather than all of it
                     // being copied first (a 349 MB scratch beside the 349 MB staged))
-                    const uint32_t nthreads = block_bytes >= (16u << 20) && g.td == 1 && !g.tile_d
-                                                  ? std::clamp(std::thread::hardware_concurrency() / 2, 1u, 8u) : 1u;
+                    // 1440p RGBA uploads (~14 MB) previously missed the 16 MB parallel threshold.
+                    static const uint64_t parallel_min = (uint64_t)(getenv("RX_VK_UPLOAD_PARALLEL_MB")
+                        ? std::max(1, atoi(getenv("RX_VK_UPLOAD_PARALLEL_MB"))) : 4) << 20;
+                    const uint32_t nthreads = ocr_resources::upload_threads(block_bytes, nrow, g.td, g.tile_d,
+                        std::thread::hardware_concurrency(), parallel_min);
                     uint64_t avail = 0;
                     const uint8_t* direct = host->gpu_ptr(tex.gpu + from, &avail);
                     const bool gather_parts = nthreads > 1 && !(direct && avail >= need) && from < total;
@@ -4107,6 +4122,23 @@ void texture_frame(uint64_t completed) {
     completed_value = completed;
     frame_no++;
     drawn_writeback_frame();
+    // Release optional reserves before squeezing live textures. GPU-in-flight checks below are unchanged.
+    static auto memory_check = std::chrono::steady_clock::time_point{};
+    static ocr_resources::IdleReserve idle_reserve;
+    const auto memory_now = std::chrono::steady_clock::now();
+    if (memory_now >= memory_check) {
+        memory_check = memory_now + std::chrono::milliseconds(250);
+        MEMORYSTATUSEX ms{}; ms.dwLength = sizeof(ms);
+        const char* e = getenv("OCR_RAM_RESERVE_MB");
+        const uint64_t reserve = (uint64_t)std::max(512, e ? atoi(e) : 1024) << 20;
+        const uint64_t candidate = GlobalMemoryStatusEx(&ms)
+            ? ocr_resources::idle_limit(UINT64_MAX, ms.ullAvailPageFile, ms.ullAvailPhys, reserve) : ocr_idle_cap;
+        const uint64_t cap = idle_reserve.update(candidate, (uint64_t)std::chrono::duration_cast<std::chrono::milliseconds>(memory_now.time_since_epoch()).count());
+        if (cap != ocr_idle_cap) logf("[OcarinaReborn/MEM] idle reserves: %s (commit free %llu MB, RAM free %llu MB)",
+            cap == UINT64_MAX ? "normal" : cap <= (32ull << 20) ? "low (32 MB targets/captures)" : "reduced (64 MB)",
+            (unsigned long long)(ms.ullAvailPageFile >> 20), (unsigned long long)(ms.ullAvailPhys >> 20));
+        ocr_idle_cap = cap;
+    }
     {   // (staging arenas the GPU is done with, beyond 256 MB of them, and any over 64 MB: freed. A scene change stages
         // hundreds of MB to over a GB (the course maps, the terrain's ASTC arrays), and that host memory was kept)
         // (hookshot: 64 on a card of 6 GB or less. On one with resizable BAR the arenas are VRAM: VMA puts a host-visible buffer the GPU
@@ -4124,7 +4156,7 @@ void texture_frame(uint64_t completed) {
             // behind the BAR. A load makes one again. RX_VK_STAGING_IDLE_S=<n>: that long, 0: kept)
             static const int64_t idle_s = getenv("RX_VK_STAGING_IDLE_S") ? atoll(getenv("RX_VK_STAGING_IDLE_S")) : 30;
             const bool stale = idle_s && std::chrono::steady_clock::now() - it->used_at > std::chrono::seconds(idle_s);
-            if (idle && (it->size > kArena || kept + it->size > keep || stale)) {
+            if (idle && (it->size > kArena || kept + it->size > std::min(keep, std::max(kArena, ocr_idle_cap)) || stale)) {
                 destroy_buffer(it->buffer, it->allocation);
                 it = arenas.erase(it);
                 continue;
@@ -4327,7 +4359,10 @@ void texture_frame(uint64_t completed) {
     {   // (Ocarina Reborn) RAM guard: engine_v21.py RAM_GUARD
         static const uint64_t reserve = (uint64_t)(getenv("OCR_RAM_RESERVE_MB") ? std::max(512, atoi(getenv("OCR_RAM_RESERVE_MB"))) : 1024) << 20;
         static uint64_t held = 0;   // (0: no hold)
-        static uint64_t said_at = 0, pressure_at = 0;
+        static uint64_t said_at = 0;
+        static auto pressure_at = std::chrono::steady_clock::time_point{};
+        static auto changed_at = std::chrono::steady_clock::time_point{};
+        const auto now = std::chrono::steady_clock::now();
         MEMORYSTATUSEX ms{};
         ms.dwLength = sizeof ms;
         if (GlobalMemoryStatusEx(&ms)) {
@@ -4367,17 +4402,24 @@ void texture_frame(uint64_t completed) {
             if (short_commit || short_phys || short_vram) {   // (short: the hold one step lower, at most the shortfall)
                 const uint64_t short_by = std::max(std::max(short_commit, short_phys), short_vram), from = held ? held : std::min(budget, total_bytes);
                 const uint64_t lower = std::max(from > short_by ? from - short_by : 0, from > step ? from - step : 0);
-                pressure_at = frame_no;
+                pressure_at = now;
+                // Give retired images/driver accounting time to catch up. High FPS must not squeeze faster.
+                // At critical pressure retain the old prompt response; recovery always needs five quiet seconds.
+                const bool critical = ms.ullAvailPageFile < (256ull << 20) || ms.ullAvailPhys < (512ull << 20) ||
+                                      (vknown && vused > vallowed / 100 * 97);
                 const uint64_t was = held;
-                held = std::max(lower, floor);
+                if (!held || critical || now - changed_at >= std::chrono::milliseconds(500)) {
+                    held = std::max(lower, floor);
+                    changed_at = now;
+                }
                 if (held != was && (frame_no - said_at >= 600 || !said_at))
                     said_at = frame_no, logf("[OcarinaReborn/MEM] RAM guard: %llu MB of commit left, %llu MB of RAM free, "
                                              "VRAM %llu of %llu MB: textures held at %llu MB", (unsigned long long)(ms.ullAvailPageFile >> 20),
                                              (unsigned long long)(ms.ullAvailPhys >> 20), (unsigned long long)(vused >> 20),
                                              (unsigned long long)(vallowed >> 20), (unsigned long long)(held >> 20));
-            } else if (held && roomy && frame_no - pressure_at >= 300 && frame_no - said_at >= 300) {
+            } else if (held && roomy && now - pressure_at >= std::chrono::seconds(5) && now - changed_at >= std::chrono::seconds(5)) {
                 // (room again: let go slowly, 128 MB every 5 s at the most, so it does not swing back at once)
-                said_at = frame_no;
+                changed_at = now;
                 held += 128ull << 20;
                 if (held >= budget) {
                     held = 0;
