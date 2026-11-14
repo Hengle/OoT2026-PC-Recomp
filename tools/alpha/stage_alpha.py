@@ -714,6 +714,8 @@ def rebrand(H, icon):
     engine_stability.apply(H)
     import engine_resource_memory
     engine_resource_memory.apply(H)
+    import engine_streaming
+    engine_streaming.apply(H)
     import engine_build_profile
     engine_build_profile.apply(H)
     rename_files(H)

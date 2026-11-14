@@ -67,13 +67,29 @@ HARNESS = r'''
 #include <span>
 #include <thread>
 #include <vector>
+#include <atomic>
+#include <new>
 #include "ocr_resource_policy.h"
+#include "ocr_upload_batch.h"
 #include "video_core/textures/decoders.h"
+std::atomic<size_t> peak_allocation{0};
+std::atomic<bool> track_allocations{false};
+void* operator new(size_t n) {
+    if (track_allocations) { size_t old=peak_allocation;while(old<n && !peak_allocation.compare_exchange_weak(old,n)){} }
+    if(void* p=malloc(n?n:1))return p;throw std::bad_alloc();
+}
+void operator delete(void* p) noexcept {free(p);}
+void operator delete(void* p,size_t) noexcept {free(p);}
 #define CHECK(x) do { if (!(x)) { printf("FAIL %d: %s\n", __LINE__, #x); return 1; } } while(0)
 struct Host {
     const uint8_t* data;
     void gpu_read(uint64_t offset, void* out, uint64_t count) { memcpy(out,data+offset,count); }
 };
+const uint8_t* memory_as_submitted(uint64_t at, const uint8_t* p, uint64_t n, std::vector<uint8_t>& scratch) {
+    // Simulate a captured page whose live backing was rewritten since submission.
+    if (at <= 8192 && at+n > 8192) scratch[8192-at] = 71;
+    return p;
+}
 int main() {
     using namespace ocr_resources;
     CHECK(upload_threads(14*MB,23,1,0,16)==7);
@@ -108,19 +124,46 @@ int main() {
         for (auto& v:input) { random=random*1664525+1013904223; v=uint8_t(random>>24); }
         Host host_value{input.data()}; auto* host=&host_value;
         struct {uint64_t gpu;} tex{0};
-        const uint64_t total=input.size();
-        for (unsigned row0 : {0u,nrows/2}) for (bool gather_parts : {false,true}) {
+        const uint64_t full_size=input.size();
+        for (bool truncated : {false, true}) {
+        const uint64_t total=full_size-(truncated ? row_bytes/2 : 0);
+        auto reference_input=input;
+        std::fill(reference_input.begin()+total,reference_input.end(),0);
+        reference_input[8192]=71;
+        for (unsigned row0 : {0u,nrows/2}) for (bool gather_parts : {false,true}) for (unsigned cpus : {1u,16u}) {
+            if (truncated && !gather_parts) continue;
             const unsigned nrow=nrows-row0, th=dims.second-row0*rows_per;
-            const uint64_t from=(uint64_t)row0*row_bytes, need=total-from;
+            const uint64_t from=(uint64_t)row0*row_bytes, need=full_size-from;
             const uint64_t bytes=(uint64_t)g.tw*th*src_bpb;
-            const unsigned nthreads=upload_threads(bytes,nrow,1,0,16);
+            const unsigned nthreads=upload_threads(bytes,nrow,1,0,cpus);
             std::vector<uint8_t> reference(bytes), output(bytes+64,0xcc);
-            auto* blocks=output.data(); const auto* src=input.data()+from;
+            auto* blocks=output.data(); const auto* src=reference_input.data()+from;
             Tegra::Texture::UnswizzleTexture(reference, std::span<const uint8_t>(src,need),src_bpb,g.tw,th,1,tile_h,0,1);
             /* PARALLEL */
             CHECK(!memcmp(reference.data(),blocks,bytes));
             CHECK(std::all_of(output.begin()+bytes,output.end(),[](auto c){return c==0xcc;}));
         }
+    }
+    }
+    {
+        const struct {unsigned tw,tile_h;}g{8192,4};
+        const unsigned src_bpb=4,rows_per=128,th=11168,nrow=(th+127)/128,nthreads=1;
+        const uint64_t row_bytes=4*MB,from=0,need=nrow*row_bytes,total=need,bytes=(uint64_t)g.tw*th*src_bpb;
+        std::vector<uint8_t> input(need), output(bytes);
+        for(uint64_t i=0;i<need;++i)input[i]=uint8_t((i*13+i/1237)%251);
+        input[8192]=71;
+        Host host_value{input.data()};auto* host=&host_value;const struct {uint64_t gpu;}tex{0};
+        auto* blocks=output.data();const auto* src=input.data();const bool gather_parts=true;
+        Tegra::Texture::UnswizzleTexture(output,input,src_bpb,g.tw,th,1,g.tile_h,0,1);
+        auto checksum=[&]{uint64_t hash=0;for(auto c:output)hash=hash*131+c;return hash;};
+        const auto expected=checksum();std::fill(output.begin(),output.end(),0);
+        peak_allocation=0;track_allocations=true;
+        /* PARALLEL */
+        track_allocations=false;
+        CHECK(checksum()==expected);
+        CHECK(peak_allocation<=8*MB);
+        printf("349 MiB single-worker decode: largest scratch allocation %zu MiB (old full-span scratch: %llu MiB)\n",
+            size_t(peak_allocation/MB),(unsigned long long)(need/MB));
     }
     puts("decoder: exact bytes and bounds for full/partial rows, direct/gathered data, odd dimensions and 5 pixel sizes; pressure limits passed");
 }

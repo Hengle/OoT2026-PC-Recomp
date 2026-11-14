@@ -35,6 +35,7 @@
 
 #include "vk_texture.h"
 #include "ocr_resource_policy.h"
+#include "ocr_upload_batch.h"
 #include "vk_menu.h"
 #include "vk_draw.h"
 #include "vk_programs.h"
@@ -279,16 +280,21 @@ std::deque<Dead> dead;
 // of the same create info takes it; it is put into GENERAL from UNDEFINED and cleared as a new one is (create), so nothing it held
 // shows. Only images made for a target (texture_get's !for_sampling) are pooled. The pool is bounded (RX_VK_TARGET_POOL_MB, default
 // 256; 0: none, every image destroyed as before; and none while VRAM is near what the driver allows), and an image unused in it for
-// 120 presents is destroyed, at most 16 a present ----
+// two seconds is destroyed, at most 16 a present, globally oldest first ----
 struct Pooled {
     VkImage image;
     VmaAllocation allocation;
     std::unordered_map<uint64_t, VkImageView> views;
-    uint64_t bytes, since;
+    uint64_t bytes, since, order;
 };
 std::mutex pool_mu;
 std::unordered_map<uint64_t, std::vector<Pooled>> target_pool;   // by pool_key_of
 uint64_t pool_bytes, pool_n, st_pool_reused, st_pool_made, st_pool_destroyed;
+uint64_t pool_order;
+uint64_t pool_now_ms() {
+    return (uint64_t)std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now().time_since_epoch()).count();
+}
 uint64_t ocr_idle_cap = UINT64_MAX; // renderer thread, refreshed before trimming completed resources
 bool pool_pressed;   // (VRAM near what the driver allows: texture_frame's budget)
 bool compact_on() {   // (hookshot: the textures in a pool of their own, compacted: compact_step. On unless RX_VK_COMPACT=0)
@@ -328,30 +334,37 @@ void pool_destroy(Pooled& p) {
 /// (texture_frame) a dead render target's image the GPU is done with, into the pool
 void pool_put(Dead& d) {
     std::lock_guard lk(pool_mu);
-    target_pool[d.pool_key].push_back(Pooled{d.image, d.allocation, std::move(d.view_map), d.bytes, frame_no});
+    target_pool[d.pool_key].push_back(Pooled{d.image, d.allocation, std::move(d.view_map), d.bytes, pool_now_ms(), ++pool_order});
     pool_bytes += d.bytes, pool_n++;
 }
-/// (texture_frame, each present) the pool over its bound, or all of it while VRAM is short, and what waits in it unused for 120
-/// presents: destroyed, at most 16 a present (64 while VRAM is short). Returns how many
+/// Completed images only: keep recent shapes within the existing memory cap.
+/// Age is wall time, so a 120 FPS display does not halve cache lifetime.
 size_t pool_trim() {
-    std::lock_guard lk(pool_mu);
-    const uint64_t cap = pool_pressed ? 0 : std::min(pool_cap(), ocr_idle_cap);
-    const size_t most = pool_pressed ? 64 : 16;
-    size_t n = 0;
-    for (auto it = target_pool.begin(); it != target_pool.end() && n < most;) {
-        auto& v = it->second;
-        for (size_t i = 0; i < v.size() && n < most;) {   // (the oldest of a shape first: the front)
-            if (pool_bytes <= cap && frame_no - v[i].since <= 120) {
-                ++i;
-                continue;
-            }
-            pool_destroy(v[i]);
-            pool_bytes -= std::min(pool_bytes, v[i].bytes), pool_n--, n++;
-            v.erase(v.begin() + (ptrdiff_t)i);
+    std::vector<Pooled> release;
+    {
+        std::lock_guard lk(pool_mu);
+        const uint64_t cap = pool_pressed ? 0 : std::min(pool_cap(), ocr_idle_cap);
+        const size_t most = pool_pressed ? 64 : 16;
+        const uint64_t now = pool_now_ms();
+        while (release.size() < most && !target_pool.empty()) {
+            auto oldest = target_pool.end();
+            // Each shape is insertion ordered; only its first entry can be globally oldest.
+            for (auto it = target_pool.begin(); it != target_pool.end(); ++it)
+                if (oldest == target_pool.end() || it->second.front().order < oldest->second.front().order)
+                    oldest = it;
+            auto& entries = oldest->second;
+            const auto& first = entries.front();
+            if (pool_bytes <= cap && now - first.since <= 2000) break;
+            release.push_back(std::move(entries.front()));
+            pool_bytes -= std::min(pool_bytes, release.back().bytes);
+            --pool_n;
+            entries.erase(entries.begin());
+            if (entries.empty()) target_pool.erase(oldest);
         }
-        it = v.empty() ? target_pool.erase(it) : std::next(it);
     }
-    return n;
+    // Driver frees must not hold the lock used by parallel texture lookup/creation.
+    for (auto& image : release) pool_destroy(image);
+    return release.size();
 }
 
 // ---- the recording's upload command buffer ----
@@ -928,16 +941,13 @@ const uint8_t* guest_bytes(uint64_t gpu, uint64_t n, std::vector<uint8_t>& scrat
         scratch.resize(n);
         const uint32_t nt = std::clamp(std::thread::hardware_concurrency() / 2, 1u, 6u);
         const uint64_t per = ((n + nt - 1) / nt + 0xFFFF) & ~0xFFFFull;
-        std::vector<std::thread> pool;
         auto part = [&](uint32_t t) {
             const uint64_t a = (uint64_t)t * per, b = std::min(n, a + per);
             for (uint64_t at = a; at < b; at += 0x10000)
                 if (!host->gpu_read(gpu + at, scratch.data() + at, std::min<uint64_t>(0x10000, b - at)))
                     std::memset(scratch.data() + at, 0, std::min<uint64_t>(0x10000, b - at));
         };
-        for (uint32_t t = 1; t < nt; t++) pool.emplace_back(part, t);
-        part(0);
-        for (std::thread& t : pool) t.join();
+        ocr_upload::run(nt, part);
         return scratch.data();
     }
     scratch.assign(n, 0);
@@ -1487,14 +1497,7 @@ bool upload_all_zero(Texture& tex, uint64_t total, const Ranges* dirty, bool wid
             if (acc) found.store(true, std::memory_order_relaxed);
         }
     };
-    if (nthreads > 1) {
-        std::vector<std::thread> th;
-        for (uint32_t t = 1; t < nthreads; t++) th.emplace_back(part, t);
-        part(0);
-        for (auto& x : th) x.join();
-    } else {
-        part(0);
-    }
+    ocr_upload::run(nthreads, part);
     const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
     static std::atomic<int> told{0};
     if (found.load()) {
@@ -1629,7 +1632,9 @@ bool upload_inner(Texture& tex, const Ranges* dirty) {
                         std::thread::hardware_concurrency(), parallel_min);
                     uint64_t avail = 0;
                     const uint8_t* direct = host->gpu_ptr(tex.gpu + from, &avail);
-                    const bool gather_parts = nthreads > 1 && !(direct && avail >= need) && from < total;
+                    // Bound sparse/truncated 2D scratch even on a single CPU worker.
+                    const bool gather_parts = g.td == 1 && !g.tile_d &&
+                        !(direct && avail >= need && from < total && total - from >= need);
                     const uint8_t* src = nullptr;
                     if (gather_parts) {
                     } else if (from < total && total - from >= need) {
@@ -1640,7 +1645,7 @@ bool upload_inner(Texture& tex, const Ranges* dirty) {
                         src = scratch.data();
                     }
                     const auto u0 = std::chrono::steady_clock::now();
-                    if (nthreads > 1) {
+                    if (nthreads > 1 || gather_parts) {
                         const uint64_t out_row = (uint64_t)g.tw * rows_per * src_bpb;   // (bytes per GOB-block row)
                         const uint32_t per = (nrow + nthreads - 1) / nthreads;
                         const uint32_t chunk = (uint32_t)std::max<uint64_t>(1, (8u << 20) / row_bytes);
@@ -1661,6 +1666,10 @@ bool upload_inner(Texture& tex, const Ranges* dirty) {
                                         host->gpu_read(tex.gpu + at + o, mine.data() + o, k);
                                     }
                                     rows = mine.data();
+                                    // Preserve the submission snapshot, including gathered pages.
+                                    if (tex.gpu + at < (1ull << 40) && at < total)
+                                        rows = memory_as_submitted(tex.gpu + at, rows,
+                                            std::min(rows_n, total - at), mine);
                                 } else {
                                     rows = src + (uint64_t)a * row_bytes, rows_n = need - (uint64_t)a * row_bytes;
                                 }
@@ -1669,10 +1678,7 @@ bool upload_inner(Texture& tex, const Ranges* dirty) {
                                     std::span<const uint8_t>(rows, rows_n), (u32)src_bpb, g.tw, h, 1, g.tile_h, 0, 1);
                             }
                         };
-                        std::vector<std::thread> pool;
-                        for (uint32_t t = 1; t < nthreads; t++) pool.emplace_back(part, t);
-                        part(0);
-                        for (std::thread& t : pool) t.join();
+                        ocr_upload::run(nthreads, part);
                         static const bool check = env_on("RX_VK_UNSWIZZLE_CHECK");   // (against one thread)
                         if (check && src) {
                             std::vector<uint8_t> ref(block_bytes);
