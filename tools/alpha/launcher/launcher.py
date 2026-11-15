@@ -325,6 +325,15 @@ def layout(ctx, top, blocks, bottom_margin=30):
 # (Ocarina Reborn) the low-end rows on the Memory tab: the launcher keeps them and hands them to the engine at Play
 # (low_end_env). Each is an engine switch with a real effect: engine_v21.py RAM_GUARD, and Hookshot's own RX_VK_* switches
 LOW_END_ROWS = (
+    ('streaming_mode', 'Nachladen und Speicher', 'Streaming and memory',
+     ['Bisheriges Verhalten', 'Ausgewogen (empfohlen)', 'Weniger Speicher'],
+     ['Legacy behavior', 'Balanced (recommended)', 'Lower memory'],
+     'Ausgewogen begrenzt den Auto-Texturcache passend zum RAM und verteilt das Aufräumen fertiger GPU-Ressourcen. '
+     'Weniger Speicher hält einen kleineren Cache; beim Zurücklaufen kann mehr nachgeladen werden. '
+     'Die Texturqualität bleibt gleich. Ein fest gewähltes Texturspeicher-Limit bleibt bestehen. Spiel neu starten.',
+     'Balanced sizes the Auto texture cache to system RAM and spreads cleanup of completed GPU resources across frames. '
+     'Lower memory keeps a smaller cache, so revisiting areas may require more loading. '
+     'Texture quality stays the same. An explicit texture-memory limit is respected. Restart the game.', 'low'),
     ('ram_guard', 'RAM-Schutz', 'RAM guard',
      ['Notfall (512 MB Reserve)', 'Standard (1 GB Reserve)', 'Stark (3 GB Reserve)'], ['Emergency (512 MB reserve)', 'Standard (1 GB reserve)', 'Strong (3 GB reserve)'],
      'Bei knappem RAM oder Windows-Speicher gibt das Spiel ungenutzte Texturen frei. Auch Notfall hält einen Mindestschutz aktiv; '
@@ -374,13 +383,14 @@ LOW_END_ROWS += (
      'characters show up as a flat silhouette or not at all the first time. Experimental: can stall briefly on some drivers. '
      'Restart the game.', 'medium'),
 )
-LOW_END_DEFAULTS = {'ram_guard': 1, 'tex_max_dim': 0, 'low_spec': 0, 'vram_compact': 0, 'fps_target': 0, 'fast_pipelines': 0}
+LOW_END_DEFAULTS = {'streaming_mode': 1, 'ram_guard': 1, 'tex_max_dim': 0, 'low_spec': 0, 'vram_compact': 0, 'fps_target': 0, 'fast_pipelines': 0}
 
 
 def low_end_env(cfg):
     """the low-end rows as the engine's switches (only what differs from the engine's own defaults)"""
     get = lambda k: int(cfg.get(k, LOW_END_DEFAULTS[k]))
     env = {'OCR_RAM_RESERVE_MB': str((512, 1024, 3072)[min(get('ram_guard'), 2)])}
+    env['OCR_STREAMING_MODE'] = str(max(0, min(get('streaming_mode'), 2)))
     if get('tex_max_dim') == 1:
         env['RX_VK_TEX_MAX_DIM'] = '1024'
     if get('low_spec'):

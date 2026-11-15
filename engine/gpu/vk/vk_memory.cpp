@@ -835,6 +835,7 @@ struct Capture {
     size_t nbytes = 0;
     std::vector<uint32_t> late;      // (indices into pages: copied again by the replay once late_value is done)
     uint64_t late_value = 0;
+    uint64_t late_part = 0, late_whole = 0; // capture-time write-back dependencies
     // (hookshot) "shadow staging": the texture pages of this capture, copied from guest memory into ordinary cached RAM too, for
     // take_capture's texture shadow to read instead of the buffer above (often write-combined here: CPU reads ~0.3 GB/s).
     // sidx[i] = the staging slot of pages[i] (4 KB a slot), or -1: that page is read from the buffer. Empty sidx: no staging.
@@ -1791,7 +1792,7 @@ std::unique_ptr<Capture> capture_make() {
         if (!spare.empty()) c = std::move(spare.back()), spare.pop_back();
     }
     if (!c) c = std::make_unique<Capture>();
-    c->pages.clear(), c->copied.clear(), c->slots.clear(), c->nbytes = 0, c->late.clear(), c->late_value = 0;
+    c->pages.clear(), c->copied.clear(), c->slots.clear(), c->nbytes = 0, c->late.clear(), c->late_value = 0, c->late_part = 0, c->late_whole = 0;
     if (c->map) cap_buf_free(c->buffer, c->alloc, c->map, c->bsize), c->buffer = VK_NULL_HANDLE, c->map = nullptr;
     stage_put(*c);
     // (only the pools mirrored in VRAM, the ones the mirrors are filled from, and only their part of the write marks:
@@ -1854,12 +1855,15 @@ std::unique_ptr<Capture> capture_make() {
                     const uint64_t pv = wb_pages.get(pages[i]);
                     if (pv > done) {
                         v = std::max(v, pv);
+                        const uint64_t pp = wb_parts.get(pages[i]);
+                        if (pp) c->late_part = std::max(c->late_part, pp);
+                        else c->late_whole = std::max(c->late_whole, pv);
                         if (cap_wait == 2) c->late.push_back((uint32_t)i);
                     }
                 }
         }
         if (v && cap_wait == 2) c->late_value = v;
-        else if (v) vk_timeline_wait(v);
+        else if (v) vk_timeline_wait(v, c->late_part, c->late_whole);
     }
     if (n > 0) shadow_written(pages, n);
     if (n > 0) {
@@ -1986,7 +1990,7 @@ bool take_capture(std::unique_ptr<Capture> c, uint64_t value, uint64_t completed
         // RX_VK_MIRROR_MB=1024 on an 8 GB card it was most of a capture's 2.4-3 ms, six submits a frame: Hyrule Field at
         // 35-45 fps instead of 55, issue 995)
         const auto tw = std::chrono::steady_clock::now();
-        vk_timeline_wait(c->late_value);
+        vk_timeline_wait(c->late_value, c->late_part, c->late_whole);
         st_tk_late += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - tw).count();
         st_late_wait_ns.fetch_add(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - tw).count(),
                                   std::memory_order_relaxed);   // (hookshot: the frame trace's late_wait_ms)

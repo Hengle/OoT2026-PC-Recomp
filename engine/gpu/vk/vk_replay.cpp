@@ -299,10 +299,12 @@ void wait_value(uint64_t v) {
     vkWaitSemaphores(dev.device, &wi, UINT64_MAX);
 }
 bool wait_recorded(uint64_t f, uint64_t timeout_ns, int* ok);
+bool capture_wait_part(uint64_t value, uint64_t part, uint64_t whole);
 } // namespace
 uint64_t vk_timeline_completed() { return timeline ? completed() : 0; }
-void vk_timeline_wait(uint64_t v) {   // (at most 250 ms: a submission held back behind the caller's thread goes on without it)
+void vk_timeline_wait(uint64_t v, uint64_t part, uint64_t whole) {   // (at most 250 ms: a submission held back behind the caller's thread goes on without it)
     if (!timeline || completed() >= v) return;
+    if (capture_wait_part(v, part, whole)) return;
     // (a burst recording whose write-back stamped wb_pages with burst_value does not advance `timeline` while an older queue
     // submission is stopped at an event wait; wait on `rec_timeline` where that recording actually signalled completion)
     int ok = 0;
@@ -2392,6 +2394,35 @@ static void wait_rec_seq(uint64_t seq, uint64_t timeout_ns, int* ok) {
         FpsWait fw(fps_stats::kGpuWait);   // (the FPS counter's Breakdown)
         *ok = vkWaitSemaphores(dev.device, &wi, timeout_ns) == VK_SUCCESS;
     }
+}
+// Ocarina Reborn: a capture only needs the recording that copied its mirrored pages.
+// Never wait for a missing mapping here: this can be the replay thread which must
+// submit that recording. Unknown mappings and direct-memory hazards use the old path.
+bool capture_wait_part(uint64_t value, uint64_t part, uint64_t whole) {
+    static const bool enabled = !getenv("OCR_CAPTURE_PART_WAIT") || atoi(getenv("OCR_CAPTURE_PART_WAIT")) != 0;
+    if (!enabled || !rec_timeline || async_on() || !sync_waits_on() || per_queue_fences_off() ||
+        !part || whole > completed() || memory_in_place_part() > part) return false;
+    uint64_t seq = 0;
+    {
+        std::lock_guard mk(rec_map_mu);
+        const auto it = part_rec.find(part);
+        if (it == part_rec.end()) return false;
+        seq = it->second;
+    }
+    int ok = 0;
+    wait_rec_seq(seq, 250000000ull, &ok);
+    static std::atomic<uint64_t> calls{0}, timeouts{0};
+    const uint64_t count = ++calls;
+    if (!ok) {
+        if (++timeouts <= 8) logf("vk: a capture's wait for write-back %llu timed out (recording %llu, done %llu)",
+            (unsigned long long)value, (unsigned long long)seq, (unsigned long long)completed());
+    }
+    if (count == 1 || count % 3000 == 0)
+        logf("[OcarinaReborn/PERF] capture recording waits: %llu, timed out: %llu (full submission retained for direct-memory hazards)",
+            (unsigned long long)count, (unsigned long long)timeouts.load());
+    // A timeout already consumed the same 250 ms budget as the original path.
+    // Do not add another full-submission wait after it.
+    return true;
 }
 uint64_t fence();
 /// (hookshot) A fence of one queue (nvnQueueFenceSync): the value of that queue's last submission

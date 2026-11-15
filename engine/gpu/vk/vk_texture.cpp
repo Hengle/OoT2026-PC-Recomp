@@ -35,6 +35,7 @@
 
 #include "vk_texture.h"
 #include "ocr_resource_policy.h"
+#include "ocr_streaming_policy.h"
 #include "ocr_upload_batch.h"
 #include "vk_menu.h"
 #include "vk_draw.h"
@@ -4212,12 +4213,25 @@ void texture_frame(uint64_t completed) {
     }
     bc_scratch_idle();
     compact_step(completed);   // (hookshot, RX_VK_COMPACT: while its pass is open nothing of the textures' pool is freed)
+    // Completed resources are safe to destroy, but hundreds of driver frees in
+    // one frame cause a periodic hitch. Spread optional cleanup; low-memory and
+    // GPU-pressure conditions still drain immediately. Never relax last_value.
+    const auto cleanup_start = std::chrono::steady_clock::now();
+    unsigned cleanup_retired = 0;
+    uint64_t cleanup_pending_bytes = 0;
+    for (const auto& resource : dead) cleanup_pending_bytes += resource.bytes;
+    const bool cleanup_pressure = ocr_idle_cap <= (64ull << 20) || pool_pressed;
     for (auto it = dead.begin(); it != dead.end();) {
+        if (ocr_streaming::defer_cleanup(cleanup_retired,
+            std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - cleanup_start).count(),
+            dead.size(), cleanup_pending_bytes, cleanup_pressure, ocr_streaming::mode())) break;
         if (compact.in_pass) break;   // (hookshot, RX_VK_COMPACT: nothing is freed while a pass is open; a frame or two)
         if (it->value > completed) {
             ++it;
             continue;
         }
+        ++cleanup_retired;
+        cleanup_pending_bytes -= std::min(cleanup_pending_bytes, it->bytes);
         if (it->pool_key) {   // (a render target's image: kept for the next of its shape, above)
             pool_put(*it);
             it = dead.erase(it);
@@ -4386,6 +4400,20 @@ bool ocr_ram_limited = false, ocr_ram_urgent = false;
                     budget = ram_cap;
                 }
             }
+            // Explicit texture-memory selections keep their meaning. Auto leaves
+            // headroom before the reactive RAM guard has to evict under pressure.
+            if (!ocr_texture_budget_gb() && !getenv("RX_VK_TEX_MAX_MB") && !vram_env) {
+                const uint64_t before = budget;
+                budget = ocr_streaming::texture_limit(budget, ms.ullTotalPhys, ocr_streaming::mode());
+                ocr_ram_limited = budget < before;
+                static bool reported = false;
+                if (!reported) {
+                    reported = true;
+                    logf("[OcarinaReborn/PERF] streaming mode %d: Auto texture budget %llu -> %llu MB, system RAM %llu MB",
+                        ocr_streaming::mode(), (unsigned long long)(before >> 20), (unsigned long long)(budget >> 20),
+                        (unsigned long long)(ms.ullTotalPhys >> 20));
+                }
+            }
             if (frame_no % 600 == 0)
                 logf("[OcarinaReborn/MEM] system: commit free %llu MB, RAM free %llu MB, reserve %llu MB",
                      (unsigned long long)(ms.ullAvailPageFile >> 20), (unsigned long long)(ms.ullAvailPhys >> 20),
@@ -4413,7 +4441,7 @@ bool ocr_ram_limited = false, ocr_ram_urgent = false;
             // Do not collapse a growing scene's cache to the loading screen's footprint.
             // Keep the recently used working set during ordinary host pressure. The
             // original emergency behavior and the configured/hardware ceiling still win.
-            if (!ocr_ram_urgent && ms.ullAvailPhys >= (1024ull << 20) && ms.ullAvailPageFile >= (512ull << 20)) {
+            if ((held || short_commit || short_phys) && !ocr_ram_urgent && ms.ullAvailPhys >= (1024ull << 20) && ms.ullAvailPageFile >= (512ull << 20)) {
                 uint64_t recent = 0;
                 for (const auto& kv : textures) {
                     const auto& tex = *kv.second;
@@ -4450,7 +4478,7 @@ bool ocr_ram_limited = false, ocr_ram_urgent = false;
                 }
             }
             if (held) {
-                ocr_ram_limited = held < budget;
+                ocr_ram_limited = ocr_ram_limited || held < budget;
                 budget = std::min(budget, held);
             }
         }

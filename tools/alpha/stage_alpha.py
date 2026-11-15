@@ -714,6 +714,10 @@ def rebrand(H, icon):
     engine_stability.apply(H)
     import engine_resource_memory
     engine_resource_memory.apply(H)
+    import engine_capture_pacing
+    engine_capture_pacing.apply(H)
+    import engine_streaming_balance
+    engine_streaming_balance.apply(H)
     import engine_streaming
     engine_streaming.apply(H)
     import engine_theme
