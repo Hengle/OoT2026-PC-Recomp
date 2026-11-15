@@ -348,7 +348,8 @@ void programs_load_decide(bool native_mesh) {
     bool marker = load_default::marker_there(load_fallback_path());
     MEMORYSTATUSEX memory{}; memory.dwLength = sizeof memory;
     if (!getenv("RX_VK_LOAD") && GlobalMemoryStatusEx(&memory) &&
-        ocr_prepare::avoid_resident_fallback(native_mesh, marker, memory.ullTotalPhys)) {
+        ocr_prepare::avoid_resident_fallback(native_mesh,
+            marker && ocr_prepare::slow_load_marker(load_fallback_path()), memory.ullTotalPhys)) {
         marker = false;
         logf("vk: memory-aware startup: keeping lazy program loads on a <=20 GiB PC; a previous slow-load marker would retain every listed program");
     }

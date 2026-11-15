@@ -19,6 +19,7 @@ class PreparationTests(unittest.TestCase):
 #include <cstring>
 #include <cstdio>
 #include "ocr_prepare_policy.h"
+#include "load_default.h"
 using namespace ocr_prepare;
 std::unordered_set<uint64_t> learned;
 std::vector<uint64_t> shipped;
@@ -36,6 +37,18 @@ int main(){
  CHECK(avoid_resident_fallback(true,true,16ull*1024*MiB));
  CHECK(!avoid_resident_fallback(true,true,32ull*1024*MiB));
  CHECK(!avoid_resident_fallback(false,true,16ull*1024*MiB));
+ CHECK(!slow_load_marker("missing-marker.txt"));
+ CHECK(load_default::marker_write("marker.txt",150,600));
+ CHECK(slow_load_marker("marker.txt"));
+ CHECK(load_default::marker_write_lacked("marker.txt",501));
+ CHECK(!slow_load_marker("marker.txt"));
+ bool marker=load_default::marker_there("marker.txt");
+ if(avoid_resident_fallback(true,marker && slow_load_marker("marker.txt"),16ull*1024*MiB))marker=false;
+ CHECK(!load_default::choose(nullptr,true,marker).create);
+ FILE* f=fopen("marker.txt","wb");CHECK(f);fputs("unknown future reason",f);fclose(f);
+ CHECK(!slow_load_marker("marker.txt"));
+ f=fopen("marker.txt","wb");CHECK(f);fclose(f);CHECK(!slow_load_marker("marker.txt"));
+ CHECK(!load_default::choose(nullptr,true,true,true).create);
  auto p=computes_plan(nullptr,true); CHECK(!p.all && p.keys.empty());
  shipped={11,22,22};p=computes_plan(nullptr,true);CHECK(!p.all && p.keys.size()==2 && p.shipped==2);
  learned={22,33};p=computes_plan(nullptr,true);CHECK(!p.all && p.keys.size()==3 && p.fresh==1);
@@ -50,7 +63,7 @@ int main(){
             p=Path(tmp);(p/'test.cpp').write_text(harness)
             r=subprocess.run([compiler,'-std=c++17','-O2','-static','-I'+str(ROOT/'engine/gpu/vk'),str(p/'test.cpp'),'-o',str(p/'test.exe')],capture_output=True,text=True)
             self.assertEqual(r.returncode,0,r.stdout+r.stderr)
-            r=subprocess.run([str(p/'test.exe')],capture_output=True,text=True,timeout=10)
+            r=subprocess.run([str(p/'test.exe')],cwd=p,capture_output=True,text=True,timeout=10)
             self.assertEqual(r.returncode,0,r.stdout+r.stderr)
 
     def test_fresh_and_repeat_generator(self):
