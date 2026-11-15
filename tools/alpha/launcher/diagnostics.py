@@ -174,11 +174,17 @@ def finish(run, code, game):
         record['result'] = 'native_failure_recorded'
     elif record['renderer_startup_error']:
         record['result'] = 'renderer_initialization_failed'
+    elif record['gpu_errors'].get('gpu_hangs', 0):
+        record['result'] = 'gpu_hang_watchdog'
     elif 'FATAL:' in text or 'CRASH:' in text:
         record['result'] = 'runtime_failure_recorded'
     else:
         record['result'] = 'nonzero_exit_without_recorded_cause'
-    if code == 3:
+    if record['gpu_errors'].get('gpu_hangs', 0):
+        record['note'] = ('GPU watchdog failure recorded. ' +
+                          ('No driver-reported device loss. ' if not record['gpu_errors']['device_lost_errors'] else '') +
+                          'The underlying cause is not established.')
+    elif code == 3:
         record['note'] = 'Exit 3 alone does not identify a Vulkan, memory or driver failure.'
     run['path'].write_text(json.dumps(record, indent=2, ensure_ascii=False), encoding='utf-8')
     # Keep the last 20 runs, including their paired native report.

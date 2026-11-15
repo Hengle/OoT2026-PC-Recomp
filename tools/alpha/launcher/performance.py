@@ -89,20 +89,36 @@ def renderer_failure_advice(failure, de=True):
 
 
 def gpu_failures(lines):
-    """Specific Vulkan results, independent of FPS samples or the process exit code."""
-    result = dict(device_memory_errors=0, device_lost_errors=0)
+    """Explicit Vulkan results or watchdog failures, independent of FPS and exit code."""
+    result = dict(device_memory_errors=0, device_lost_errors=0, gpu_hangs=0)
+    fatal_hang = False
     for line in lines:
         match = GPU_SUBMIT_ERROR.search(line)
         if (match and match[1] == '-2') or 'VK_ERROR_OUT_OF_DEVICE_MEMORY' in line:
             result['device_memory_errors'] += 1
         if (match and match[1] == '-4') or 'VK_ERROR_DEVICE_LOST' in line:
             result['device_lost_errors'] += 1
+        if re.search(r'vk: GPU hang: the timeline at \d+, \d+ sent', line):
+            result['gpu_hangs'] += 1
+        # The fatal message is printed through both the host log and stderr. Count
+        # it only as fallback evidence when the preceding watchdog marker is gone.
+        fatal_hang |= bool(re.search(r'vk: FATAL: the GPU hung: no submission finished in \d+ s', line))
+    if fatal_hang and not result['gpu_hangs']:
+        result['gpu_hangs'] = 1
     return result
 
 
 def gpu_failure_advice(summary, de=True):
     t = lambda d, e: d if de else e
     advice = []
+    if summary.get('gpu_hangs', 0):
+        advice.append(('warn', t(
+            'Der GPU-Watchdog hat das Spiel beendet, nachdem eingereichte Grafikbefehle nicht mehr fertig wurden. '
+            'Ein solcher Hänger kann auch ohne Device-Lost-Meldung auftreten. Bitte dieselbe Stelle ohne Frame Generation testen '
+            'und ein neues Debug-Paket senden. Der Log allein belegt weder die Ursache noch einen Hardwaredefekt.',
+            'The GPU watchdog stopped the game because submitted graphics work stopped completing. '
+            'This can happen without a driver-reported device loss. Please test the same area with frame generation off '
+            'and send a fresh Debug Package. This log alone does not identify the cause or prove a hardware fault.')))
     if summary.get('device_memory_errors', 0):
         advice.append(('warn', t(
             'Der Renderer meldete erschöpften GPU-Speicher (VK_ERROR_OUT_OF_DEVICE_MEMORY). '
