@@ -22,6 +22,13 @@ inline uint64_t texture_limit(uint64_t normal, uint64_t ram, int policy) {
     const uint64_t rounded = share / (256 * MiB) * (256 * MiB);
     return std::min(normal, std::clamp(rounded, 1024 * MiB, ceiling));
 }
+inline uint64_t target_cache_limit(uint64_t normal, int policy) {
+    return policy == 2 ? std::min(normal, 64 * MiB) : normal;
+}
+inline size_t preallocated_blocks(size_t normal, uint64_t block_bytes, int policy) {
+    if (policy != 2 || !block_bytes) return normal;
+    return std::min(normal, static_cast<size_t>((256 * MiB) / block_bytes));
+}
 inline bool defer_cleanup(unsigned retired, int64_t elapsed_us, size_t pending, uint64_t pending_bytes,
                           bool pressure, int policy) {
     // Always make progress, and drain promptly under pressure or a growing backlog.

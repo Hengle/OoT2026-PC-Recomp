@@ -15,6 +15,7 @@
 #include "ocarina_reborn_env.h"
 #endif
 #include "vram_compact.h"
+#include "ocr_streaming_policy.h"
 #include "vk_work.h"   // (last: RX_VK_RECORDER=defer drains before the destructions and the invalidate below)
 
 namespace mkwvk {
@@ -91,7 +92,11 @@ static size_t blocks_at_start(bool holds_textures) {
     for (uint32_t h = 0; h < dev.memory.memoryHeapCount; h++)
         if (dev.memory.memoryHeaps[h].flags & VK_MEMORY_HEAP_DEVICE_LOCAL_BIT) heap = std::max<uint64_t>(heap, dev.memory.memoryHeaps[h].size);
     if (const char* e = getenv("RX_VK_IMAGE_PREALLOC")) return (size_t)std::max(0, atoi(e));
-    return (size_t)vram_compact::blocks_at_start(heap, kImageBlock, holds_textures);
+    // Lower-memory mode reserves less unused memory at startup. The pool
+    // may still grow when needed; explicit RX_VK_IMAGE_PREALLOC above wins.
+    return ocr_streaming::preallocated_blocks(
+        (size_t)vram_compact::blocks_at_start(heap, kImageBlock, holds_textures),
+        kImageBlock, ocr_streaming::mode());
 }
 /// The pool with n blocks made now, or empty when there is no room for them (its blocks made as needed); the blocks made
 static size_t make_pool(VmaPoolCreateInfo pi, size_t n, VmaPool& pool) {

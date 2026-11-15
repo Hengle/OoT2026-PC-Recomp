@@ -4,7 +4,7 @@ import shutil, subprocess, tempfile, unittest, sys, ctypes, _ctypes
 ALPHA = Path(__file__).resolve().parents[1]
 ROOT = ALPHA.parents[1]
 sys.path.insert(0, str(ALPHA))
-import engine_resource_memory, engine_streaming
+import engine_resource_memory, engine_streaming, engine_target_cache
 
 def section(text, signature):
     a=text.index(signature); b=text.index('{',a)+1; depth=1
@@ -60,12 +60,14 @@ for i in range(20):
         # Source ZIPs do not contain Git history; still verify repeat application and the header.
         baseline=current
         if shutil.which('git'):
-            result=subprocess.run(['git','show','2d3598d:engine/gpu/vk/vk_texture.cpp'],cwd=ROOT,capture_output=True)
+            result=subprocess.run(['git','show','348200b:engine/gpu/vk/vk_texture.cpp'],cwd=ROOT,capture_output=True)
             if result.returncode==0: baseline=result.stdout
         with tempfile.TemporaryDirectory() as tmp:
             root=Path(tmp);(root/'gpu/vk').mkdir(parents=True)
             target=root/'gpu/vk/vk_texture.cpp';target.write_bytes(baseline)
+            shutil.copy2(ROOT/'engine/gpu/vk/vk_vma.cpp',root/'gpu/vk/vk_vma.cpp')
             engine_streaming.apply(root)
+            engine_target_cache.apply(root)
             self.assertEqual(target.read_bytes(),current)
             before=target.read_bytes();engine_streaming.apply(root)
             self.assertEqual(before,target.read_bytes())
@@ -159,17 +161,30 @@ void put(uint64_t key,uint64_t id,uint64_t bytes=MB){Dead d{id,id,bytes,key,{{1,
 bool take(uint64_t key){VkImage i;VmaAllocation a;std::unordered_map<uint64_t,VkImageView> views;return pool_take(key,i,a,views);}
 int main(){
     put(3,1);++now_ms;put(1,2);++now_ms;put(2,3);
-    CHECK(pool_trim()==1 && destroyed.count(1));
+    CHECK(pool_bytes==2*MB && destroyed.count(1) && pool_trim()==0);
     CHECK(take(1) && take(2) && !take(3) && pool_bytes==0 && pool_n==0);
     put(4,4);frame_no+=10000;now_ms+=1999;CHECK(pool_trim()==0);
     now_ms+=2;CHECK(pool_trim()==1 && destroyed.count(4));
     put(1,5);put(1,6);CHECK(take(1)); // newest matching shape reused first
     now_ms+=2001;CHECK(pool_trim()==1 && destroyed.count(5) && !destroyed.count(6));
     for(unsigned i=0;i<70;++i)put(i%9,100+i,1);
-    pool_pressed=true;CHECK(pool_trim()==64 && pool_n==6);CHECK(pool_trim()==6);
+    pool_pressed=true;CHECK(pool_trim()==70 && pool_n==0);CHECK(pool_trim()==0);
     pool_pressed=false;ocr_idle_cap=MB;put(1,200);put(2,201);
-    CHECK(pool_trim()==1 && destroyed.count(200) && pool_bytes==MB);
+    CHECK(pool_trim()==0 && destroyed.count(200) && pool_bytes==MB);
     CHECK(take(2) && pool_n==0 && pool_bytes==0 && target_pool.empty());
-    puts("targets: global oldest eviction, newest reuse, 2-second lifetime, pressure limits, accounting and frees outside lock passed");
+    // A burst must never outrun the byte limit between trim passes.
+    configured_cap=256*MB;ocr_idle_cap=UINT64_MAX;
+    for(unsigned i=0;i<2000;++i){put(i%17,1000+i,4*MB);CHECK(pool_bytes<=configured_cap && pool_n<=512);}
+    CHECK(pool_n==64 && pool_bytes==256*MB);
+    ocr_idle_cap=32*MB;CHECK(pool_trim()==56 && pool_bytes==32*MB);
+    pool_pressed=true;CHECK(pool_trim()==8 && pool_n==0);
+    put(7,5000);CHECK(destroyed.count(5000) && target_pool.empty());
+    pool_pressed=false;ocr_idle_cap=UINT64_MAX;configured_cap=MB;
+    put(7,5001,2*MB);CHECK(destroyed.count(5001) && pool_bytes==0);
+    for(unsigned i=0;i<1024;++i)put(i,6000+i,1);
+    CHECK(pool_n==512 && pool_bytes==512); // metadata remains bounded too
+    now_ms+=2001;while(pool_n)pool_trim();
+    CHECK(target_pool.empty() && pool_bytes==0);
+    puts("targets: bounded admission, burst and pressure limits, reuse, age, accounting and frees outside lock passed");
 }
 '''

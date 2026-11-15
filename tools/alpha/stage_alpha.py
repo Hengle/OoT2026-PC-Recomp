@@ -720,6 +720,8 @@ def rebrand(H, icon):
     engine_streaming_balance.apply(H)
     import engine_streaming
     engine_streaming.apply(H)
+    import engine_target_cache
+    engine_target_cache.apply(H)
     import engine_theme
     engine_theme.apply(H)
     import engine_build_profile

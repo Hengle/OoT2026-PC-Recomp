@@ -329,10 +329,10 @@ LOW_END_ROWS = (
      ['Bisheriges Verhalten', 'Ausgewogen (empfohlen)', 'Weniger Speicher'],
      ['Legacy behavior', 'Balanced (recommended)', 'Lower memory'],
      'Ausgewogen begrenzt den Auto-Texturcache passend zum RAM und verteilt das Aufräumen fertiger GPU-Ressourcen. '
-     'Weniger Speicher hält einen kleineren Cache; beim Zurücklaufen kann mehr nachgeladen werden. '
+     'Weniger Speicher hält kleinere Caches und reserviert beim Start weniger Grafikspeicher; beim Zurücklaufen kann mehr nachgeladen werden. '
      'Die Texturqualität bleibt gleich. Ein fest gewähltes Texturspeicher-Limit bleibt bestehen. Spiel neu starten.',
      'Balanced sizes the Auto texture cache to system RAM and spreads cleanup of completed GPU resources across frames. '
-     'Lower memory keeps a smaller cache, so revisiting areas may require more loading. '
+     'Lower memory keeps smaller caches and reserves less video memory at startup; revisiting areas may require more loading. '
      'Texture quality stays the same. An explicit texture-memory limit is respected. Restart the game.', 'low'),
     ('ram_guard', 'RAM-Schutz', 'RAM guard',
      ['Notfall (512 MB Reserve)', 'Standard (1 GB Reserve)', 'Stark (3 GB Reserve)'], ['Emergency (512 MB reserve)', 'Standard (1 GB reserve)', 'Strong (3 GB reserve)'],

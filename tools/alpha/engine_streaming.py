@@ -109,5 +109,13 @@ def apply(root):
     shutil.copy2(HERE/'hud/ocr_upload_batch.h', root/'gpu/vk/ocr_upload_batch.h')
     p = root/'gpu/vk/vk_texture.cpp'
     text = p.read_text(encoding='utf-8')
-    for old, new in CHANGES: text = replace_once(text, old, new)
+    for old, new in CHANGES:
+        if old == '#include "ocr_resource_policy.h"' and '#include "ocr_upload_batch.h"' in text:
+            continue
+        # The later target-cache patch replaces these functions. Preserve it on
+        # repeated staging; all unrelated anchors are still checked normally.
+        if '// OCR_TARGET_CACHE_BOUND:' in text and (
+                old.startswith('std::move(d.view_map)') or old.startswith('/// (texture_frame,')):
+            continue
+        text = replace_once(text, old, new)
     p.write_text(text, encoding='utf-8', newline='\n')

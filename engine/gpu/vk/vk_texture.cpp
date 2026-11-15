@@ -304,7 +304,7 @@ bool compact_on() {   // (hookshot: the textures in a pool of their own, compact
 }
 uint64_t pool_cap() {
     static const uint64_t mb = getenv("RX_VK_TARGET_POOL_MB") ? (uint64_t)std::max(0, atoi(getenv("RX_VK_TARGET_POOL_MB"))) : 256;
-    return mb << 20;
+    return ocr_streaming::target_cache_limit(mb << 20, ocr_streaming::mode());
 }
 uint64_t pool_key_of(const VkImageCreateInfo& ci) {
     uint64_t k = mix((uint64_t)ci.flags, (uint64_t)ci.imageType << 32 | (uint64_t)ci.format);
@@ -334,9 +334,36 @@ void pool_destroy(Pooled& p) {
 }
 /// (texture_frame) a dead render target's image the GPU is done with, into the pool
 void pool_put(Dead& d) {
-    std::lock_guard lk(pool_mu);
-    target_pool[d.pool_key].push_back(Pooled{d.image, d.allocation, std::move(d.view_map), d.bytes, pool_now_ms(), ++pool_order});
-    pool_bytes += d.bytes, pool_n++;
+    // OCR_TARGET_CACHE_BOUND: admission is bounded, not just the later trim.
+    // This function is reached only after the existing GPU-completion gate.
+    Pooled item{d.image, d.allocation, std::move(d.view_map), d.bytes, pool_now_ms(), 0};
+    std::vector<Pooled> release;
+    {
+        std::lock_guard lk(pool_mu);
+        const uint64_t cap = pool_pressed ? 0 : std::min(pool_cap(), ocr_idle_cap);
+        // Also bound metadata for tiny targets. Subtraction avoids integer overflow.
+        if (item.bytes && item.bytes <= cap) {
+            // Keep the newest shapes useful to the current scene. Rejecting every
+            // arrival at a full cache would pin stale shapes until their age timeout.
+            while (!target_pool.empty() && (pool_bytes > cap - item.bytes || pool_n >= 512)) {
+                auto oldest = target_pool.begin();
+                for (auto it = target_pool.begin(); it != target_pool.end(); ++it)
+                    if (it->second.front().order < oldest->second.front().order) oldest = it;
+                auto& entries = oldest->second;
+                release.push_back(std::move(entries.front()));
+                pool_bytes -= std::min(pool_bytes, release.back().bytes);
+                --pool_n;
+                entries.erase(entries.begin());
+                if (entries.empty()) target_pool.erase(oldest);
+            }
+            item.order = ++pool_order;
+            target_pool[d.pool_key].push_back(std::move(item));
+            pool_bytes += d.bytes;
+            ++pool_n;
+        } else release.push_back(std::move(item));
+    }
+    // No driver call while holding the lock needed by parallel texture lookup.
+    for (auto& image : release) pool_destroy(image);
 }
 /// Completed images only: keep recent shapes within the existing memory cap.
 /// Age is wall time, so a 120 FPS display does not halve cache lifetime.
@@ -347,7 +374,9 @@ size_t pool_trim() {
         const uint64_t cap = pool_pressed ? 0 : std::min(pool_cap(), ocr_idle_cap);
         const size_t most = pool_pressed ? 64 : 16;
         const uint64_t now = pool_now_ms();
-        while (release.size() < most && !target_pool.empty()) {
+        // OCR_TARGET_CACHE_BOUND: a lower cap must take effect in this pass.
+        // The count budget applies only to optional age-based cleanup.
+        while (!target_pool.empty() && (pool_bytes > cap || release.size() < most)) {
             auto oldest = target_pool.end();
             // Each shape is insertion ordered; only its first entry can be globally oldest.
             for (auto it = target_pool.begin(); it != target_pool.end(); ++it)
