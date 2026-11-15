@@ -703,7 +703,7 @@
     "engine/gpu/vk/ocr_options.h": "98f59f2b8713f129ed1c0d237f94f803f31f85b5fd937d596e9d55775cf2d5cf",
     "engine/gpu/vk/ocr_perf_metrics.h": "e7c5f9c1f6cb2b71a5c2ec60b60205070900c37e077da17f986ef36fee74714d",
     "engine/gpu/vk/ocr_photo_menu.h": "e0413354ffd1df1f621d10605cfba4ce8a87db59a13833713dd82cf4befd0015",
-    "engine/gpu/vk/ocr_prepare_policy.h": "b671b6cc74c4c620d82f3fb95761ab5ab0c8dd7b34f629560b147724d20a478e",
+    "engine/gpu/vk/ocr_prepare_policy.h": "11c1c2f68fb70587818fecdf614a2fbcaaa6482c1fcc5fcbd0a86e556548f79d",
     "engine/gpu/vk/ocr_resource_policy.h": "3c0dcd119e43194f676a8202b4b975c36fb6c3461e391011d69db8d91301c493",
     "engine/gpu/vk/ocr_streaming_policy.h": "2363e6175cc3129f014c710de874d964e297e441429a0cf87de19c1e1242f499",
     "engine/gpu/vk/ocr_texture_policy.h": "562c8a61ffc3f758b3a0e977e01c60e264d84c7fbaeecc767ab35ab16d76560f",
@@ -878,7 +878,7 @@
     "engine/gpu/vk/vk_present_trace.h": "a098c18a8e438d17bb56976a74eb187bcf97e41142276602be009709efdee597",
     "engine/gpu/vk/vk_progcache.cpp": "11202bca165520da0224e9b427ef2b8857e8460999b7821b4b13af3f479e1a8a",
     "engine/gpu/vk/vk_progcache.h": "27988b7b67429f97901d83e79c4757955e389d10f3fe935c728a41cd60e662af",
-    "engine/gpu/vk/vk_programs.cpp": "b5bca750c5cd0ed71d49beb79cfbee25427aff76826eba7401510e6237fb2129",
+    "engine/gpu/vk/vk_programs.cpp": "e1b1231ccb593bb4c0d957c66bca3af683091bbf74b1842eef50b2e708183383",
     "engine/gpu/vk/vk_programs.h": "e5affab5a0c44640667d335516c4984ea4a3d036ed57cbfb0553377a7fbb53a5",
     "engine/gpu/vk/vk_progress.h": "108949a7561c1ebde0f34be189237f6f054c25c5051996d10f7aac53fde63bc3",
     "engine/gpu/vk/vk_reactive.cpp": "96b60ae56440f0d08b468f1126a1f855a44f0d80ed5e84d79053a0c1887b95af",
@@ -2147,7 +2147,7 @@
   "notes": "Corresponding source for v1.1.1: recorded shader preparation, bounded caches, FSR 3.1.6, interface colours, settings reset and expanded diagnostics. No game data, translated game code or bundled voice recordings.",
   "distribution_status": "release 1.1.1; no bundled recordings",
   "git_normalized_source_sha256": {
-    "engine/gpu/vk/ocr_prepare_policy.h": "3993a3657c5cc950bf54b4997aba7af8ced3b2a995695cf74a5444eb8424b8fd"
+    "engine/gpu/vk/ocr_prepare_policy.h": "d08433f5076a19ca9e79f20e2355d6384e27b7fc9ddac56f2fa999dfc7799e2f"
   },
-  "installer_sha256": "a7240239e6677d10e5cc98378bdd28a95d33486b19af74e7278f221306aa3415"
+  "installer_sha256": "d8e4219a5c2940e119f62e84770a9e8837938ea9ede2babde2fe9ccb54625102"
 }
