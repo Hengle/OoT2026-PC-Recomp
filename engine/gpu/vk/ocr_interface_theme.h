@@ -16,6 +16,16 @@ inline double linear(int c) {
 }
 inline double luminance(RGB c) { return .2126*linear(c.r) + .7152*linear(c.g) + .0722*linear(c.b); }
 inline RGB foreground(RGB c) { return luminance(c) > .179 ? RGB{0,0,0} : RGB{255,255,255}; }
+inline RGB tint(RGB base, RGB color) {
+    int span = std::max({base.r,base.g,base.b}) - std::min({base.r,base.g,base.b});
+    auto channel = [span](int b,int a,int d) {
+        return std::clamp(b + (int)std::floor(((a-d)*span+104)/209.0),0,255);
+    };
+    return {channel(base.r,color.r,46),channel(base.g,color.g,123),channel(base.b,color.b,255)};
+}
+inline RGB button_foreground(RGB color) {
+    return luminance(tint({59,139,255},color)) <= .30 ? RGB{255,255,255} : RGB{0,0,0};
+}
 inline constexpr RGB presets[] = {{46,123,255}, {0,184,176}, {66,184,108}, {168,121,238},
                                   {237,118,174}, {232,173,69}, {189,200,218}};
 inline void select_preset(int n) {

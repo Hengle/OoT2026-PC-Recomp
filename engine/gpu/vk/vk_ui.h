@@ -32,24 +32,27 @@ inline ImU32 kInk = rgba(236, 242, 255), kInkBright = rgba(255, 255, 255), kSoft
                 kBannerTop = rgba(14, 44, 104, 246), kBanner = rgba(8, 24, 60, 246), kBannerInk = rgba(200, 220, 250),
                 kBannerEdge = rgba(0, 180, 255), kTabInset = rgba(26, 64, 140, 250), kBox = rgba(8, 16, 38, 248),
                 kBoxEdge = rgba(0, 200, 255, 220), kBar = rgba(5, 10, 26, 232), kListen = rgba(150, 120, 40);
+inline ImU32 kButtonBottom, kButtonEdge, kBackdropTop, kBackdropBottom, kGlow;
 inline void update_theme() {
-    using interface_theme::RGB;
-    using interface_theme::mix;
-    const RGB a{std::clamp(ocr_ui_r,0,255), std::clamp(ocr_ui_g,0,255), std::clamp(ocr_ui_b,0,255)};
-    const int stamp = a.r | (a.g<<8) | (a.b<<16);
-    static int previous = -1;
-    if (previous == stamp) return;
-    previous = stamp;
-    const auto pack = [](RGB c, int alpha=255) { return rgba(c.r,c.g,c.b,alpha); };
-    kInk = rgba(242,246,255); kSoft = rgba(184,195,213); kDim = rgba(145,161,185);
-    kGold = kGoldHi = pack(a); kGoldInk = pack(interface_theme::foreground(a));
-    kAccent = pack(mix(a,{255,255,255},60)); kEdge = pack(mix({30,44,65},a,25));
-    kCellDark = pack(mix({7,14,27},a,7)); kCellName = pack(mix({12,22,39},a,10));
-    kCellNameSel = kTabInset = pack(mix({16,29,49},a,18)); kBronze = kEdge;
-    kColumn = pack(mix({5,9,17},a,4),248);
-    kBannerTop = pack(mix({10,17,29},a,9)); kBanner = pack(mix({8,15,27},a,8));
-    kBannerInk = kSoft; kBannerEdge = pack(mix({64,80,105},a,45));
-    kBox = kCellDark; kBoxEdge = kEdge; kBar = kBanner; kListen = kCellNameSel;
+    using namespace interface_theme;
+    const RGB a{std::clamp(ocr_ui_r,0,255),std::clamp(ocr_ui_g,0,255),std::clamp(ocr_ui_b,0,255)};
+    const int stamp=a.r|(a.g<<8)|(a.b<<16);
+    static int previous=-1;
+    if (previous==stamp) return;
+    previous=stamp;
+    const auto pack=[](RGB c) { return rgba(c.r,c.g,c.b); };
+    const auto shade=[&](RGB c) { return pack(tint(c,a)); };
+    kInk=rgba(242,246,255); kSoft=rgba(169,187,219); kDim=rgba(125,146,186);
+    kGold=shade({59,139,255}); kGoldHi=shade({74,149,255});
+    kGoldInk=pack(button_foreground(a)); kButtonBottom=shade({21,86,224});
+    kButtonEdge=shade({140,194,255}); kGlow=pack(a);
+    kAccent=pack(mix(a,{255,255,255},60)); kEdge=shade({34,66,126});
+    kCellDark=shade({12,26,58}); kCellName=shade({16,34,74});
+    kCellNameSel=kTabInset=shade({19,42,88}); kBronze=kCellNameSel;
+    kColumn=kCellName; kBox=kCellName; kBoxEdge=kEdge;
+    kBackdropTop=shade({13,27,54}); kBackdropBottom=shade({8,18,38});
+    kBannerTop=shade({16,34,74}); kBanner=shade({10,23,48});
+    kBannerInk=kSoft; kBannerEdge=shade({55,104,200}); kBar=kBanner; kListen=kCellNameSel;
 }
 constexpr int kDimAlpha = 185;   // (the game behind the menu)
 
@@ -171,15 +174,71 @@ inline void flourish(Ctx& c, float x0, float x1, float y, ImU32 col) {
     c.d->AddLine(ImVec2(x0,y), ImVec2(x1,y), alpha(col,.4f), std::max(1.0f,c.s));
 }
 /// The selection: a bright outline with a soft warm-white glow around it
-inline void glow(Ctx& c, ImVec2 a0, ImVec2 b0) {
-    const float s = c.s;
-    for (int i=3; i>=1; --i)
-        c.d->AddRect(a0-ImVec2(i*s,i*s), b0+ImVec2(i*s,i*s), alpha(kAccent,.08f), 9*s, 0, 2*s);
-    c.d->AddRect(a0,b0,kAccent,8*s,0,std::max(1.0f,s));
+// Rounded gradients reuse ImGui geometry; no extra textures or pipelines.
+inline void gradient(Ctx& c, ImVec2 a, ImVec2 b, ImU32 top, ImU32 bottom, float radius) {
+    const int first=c.d->VtxBuffer.Size;
+    c.d->AddRectFilled(a,b,IM_COL32_WHITE,radius);
+    for (int i=first;i<c.d->VtxBuffer.Size;++i) {
+        auto& v=c.d->VtxBuffer[i];
+        const float t=std::clamp((v.pos.y-a.y)/std::max(1.f,b.y-a.y),0.f,1.f);
+        ImU32 col=v.col&IM_COL32_A_MASK;
+        for (int shift : {IM_COL32_R_SHIFT,IM_COL32_G_SHIFT,IM_COL32_B_SHIFT}) {
+            const int x=(top>>shift)&255, y=(bottom>>shift)&255;
+            col|=(ImU32)(x+(y-x)*t+.5f)<<shift;
+        }
+        v.col=col;
+    }
+}
+inline void backdrop(Ctx& c) {
+    // Small cached color mesh reproduces the launcher's upper glow and dark edges.
+    constexpr int nx=24,ny=12;
+    static ImU32 colors[ny+1][nx+1], stamp=0;
+    if (stamp!=kGlow || !colors[0][0]) {
+        stamp=kGlow;
+        for (int y=0;y<=ny;++y) for (int x=0;x<=nx;++x) {
+            const float yy=(float)y/ny, xx=2.f*x/nx-1.f;
+            const float light=std::exp(-((xx/.9f)*(xx/.9f)+((yy-.05f)/.55f)*((yy-.05f)/.55f))*1.6f);
+            const float edge=std::clamp((std::fabs(xx)-.55f)/.45f,0.f,1.f);
+            ImU32 col=IM_COL32_A_MASK;
+            for (int shift : {IM_COL32_R_SHIFT,IM_COL32_G_SHIFT,IM_COL32_B_SHIFT}) {
+                float value=((kBackdropTop>>shift)&255)*(1-yy)+((kBackdropBottom>>shift)&255)*yy;
+                value=(value+light*((kGlow>>shift)&255)*.16f)*(1-edge*edge*.35f);
+                col|=(ImU32)std::clamp((int)value,0,255)<<shift;
+            }
+            colors[y][x]=col;
+        }
+    }
+    for (int y=0;y<ny;++y) for (int x=0;x<nx;++x)
+        c.d->AddRectFilledMultiColor(ImVec2(c.w*x/nx,c.h*y/ny),ImVec2(c.w*(x+1)/nx,c.h*(y+1)/ny),
+            colors[y][x],colors[y][x+1],colors[y+1][x+1],colors[y+1][x]);
+}
+inline void ocarina(Ctx& c, ImVec2 p, float size) {
+    const float s=size/40.f;
+    auto at=[&](float x,float y) { return p+ImVec2(x*s,y*s); };
+    c.d->PathLineTo(at(11,20)); c.d->PathLineTo(at(7,5));
+    c.d->PathBezierCubicCurveTo(at(7,0),at(16,0),at(18,8)); c.d->PathLineTo(at(21,14));
+    c.d->PathBezierCubicCurveTo(at(29,9),at(42,5),at(39,14));
+    c.d->PathBezierCubicCurveTo(at(34,30),at(10,40),at(3,33));
+    c.d->PathBezierCubicCurveTo(at(-2,28),at(5,23),at(11,20));
+    c.d->PathFillConvex(kGold);
+    for (ImVec2 hole : {at(10,29),at(19,24),at(27,19),at(33,13)}) {
+        c.d->AddCircleFilled(hole,2.4f*s,kCellDark,12);
+        c.d->AddCircle(hole,2.8f*s,kButtonEdge,12,std::max(1.f,s));
+    }
+    c.d->AddLine(at(10,14),at(18,10),kButtonEdge,2*s);
+}
+
+inline void glow(Ctx& c, ImVec2 a, ImVec2 b, float rounding=10) {
+    for (int i=6;i>=1;--i) {
+        const float e=i*2*c.s;
+        c.d->AddRect(a-ImVec2(e,e),b+ImVec2(e,e),alpha(kGlow,.045f),rounding*c.s+e,0,2*c.s);
+    }
+    c.d->AddRect(a,b,kButtonEdge,rounding*c.s,0,std::max(1.f,c.s));
 }
 /// A gold fill, lighter at its top
-inline void gold(Ctx& c, ImVec2 a0, ImVec2 b0) {
-    c.d->AddRectFilled(a0,b0,kGold,7*c.s);
+inline void gold(Ctx& c, ImVec2 a, ImVec2 b, float rounding=9) {
+    gradient(c,a,b,kGold,kButtonBottom,rounding*c.s);
+    c.d->AddRect(a,b,kButtonEdge,rounding*c.s,0,std::max(1.f,c.s));
 }
 
 // ---- the button prompts: the keys, or a controller's buttons by position (any layout: the dot lit) ----
@@ -192,7 +251,7 @@ struct Prompt {
 /// One glyph at p (its top left; the line px + 10 points high); its width. draw false: measured only
 inline float glyph(Ctx& c, float px, ImVec2 p, const Prompt& pr, bool draw) {
     const float s = c.s, hh = px + 10 * s, my = p.y + hh * 0.5f, kpx = px * 0.84f;
-    const ImU32 cap = kInk, ink = rgba(10, 20, 45), dim = rgba(130, 145, 180);
+    const ImU32 cap = kCellNameSel, ink = kInk, dim = kDim;
     auto key = [&](float x, const char* label) {   // (a key's cap, its label in it)
         const float w = label ? std::max(hh, size_of(c.f.strong, kpx, label).x + 14 * s) : hh;
         if (draw) {
@@ -286,11 +345,8 @@ inline float prompt_bar(Ctx& c, const Prompt* list, int n) {
     const float room = c.w - 2 * c.safe - 20 * s, full = prompts(c, ImVec2(0, 0), list, n, false);
     if (full > room) k.s = s * room / full;
     const float pw = prompts(k, ImVec2(0, 0), list, n, false);
-    const float x0 = std::max(0.0f, c.w - c.safe - pw - 34 * s);
-    if (x0 > 0) c.d->AddRectFilledMultiColor(ImVec2(std::max(0.0f, x0 - 80 * s), py - 12 * s), ImVec2(x0, c.h), alpha(kBar, 0), kBar, kBar,
-                                             alpha(kBar, 0));
-    c.d->AddRectFilled(ImVec2(x0, py - 12 * s), ImVec2(c.w, c.h), kBar);
-    c.d->AddLine(ImVec2(x0, py - 12 * s), ImVec2(c.w, py - 12 * s), alpha(kEdge, 0.8f), std::max(1.0f, s));
+    c.d->AddRectFilled(ImVec2(0,py-12*s),ImVec2(c.w,c.h),kBar);
+    c.d->AddLine(ImVec2(c.safe,py-12*s),ImVec2(c.w-c.safe,py-12*s),kEdge,std::max(1.f,s));
     const float kh = 17 * k.s + 10 * k.s;   // (smaller prompts: centred in the strip's height)
     prompts(k, ImVec2(c.w - c.safe - pw - 10 * s, py + (ph - kh) * 0.5f), list, n, true);
     return py - 12 * s;
@@ -302,16 +358,15 @@ inline void banner(Ctx& c, float hh) {
 }
 /// A box (the help, the restart question): opaque, a fine edge, a soft shadow
 inline void box(Ctx& c, ImVec2 a, ImVec2 b) {
-    shadow(c,a,b,12*c.s,.45f,3*c.s);
-    c.d->AddRectFilled(a,b,kBox,12*c.s);
-    c.d->AddRect(a,b,kBoxEdge,12*c.s,0,std::max(1.0f,c.s));
+    shadow(c,a,b,12*c.s,.25f,3*c.s);
+    gradient(c,a,b,kCellName,kCellDark,14*c.s);
+    c.d->AddRect(a,b,kEdge,14*c.s,0,std::max(1.f,c.s));
 }
 /// A button as the game's pause menu draws its own: a warm cell with a fine inner frame; selected, gold with the outline
-inline void button(Ctx& c, ImVec2 a0, ImVec2 b0, const char* label, bool sel) {
-    const float s=c.s;
-    c.d->AddRectFilled(a0,b0,sel?kGold:kCellName,9*s);
-    c.d->AddRect(a0,b0,sel?kAccent:kEdge,9*s,0,std::max(1.0f,s));
-    text_mid_centre(c,c.f.strong,20*s,(a0.x+b0.x)*.5f,(a0.y+b0.y)*.5f,sel?kGoldInk:kInk,label);
+inline void button(Ctx& c, ImVec2 a, ImVec2 b, const char* label, bool sel) {
+    if (sel) { gold(c,a,b); glow(c,a,b); }
+    else { gradient(c,a,b,kCellName,kCellDark,10*c.s); c.d->AddRect(a,b,kEdge,10*c.s,0,std::max(1.f,c.s)); }
+    text_mid_centre(c,c.f.strong,20*c.s,(a.x+b.x)*.5f,(a.y+b.y)*.5f,sel?kGoldInk:kInk,label);
 }
 
 } // namespace mkwvk::ui

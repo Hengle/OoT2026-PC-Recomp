@@ -209,8 +209,8 @@ class Ctx:
 
         def look(p_ctx, hover):
             if kind == 'primary':
-                p_ctx.panel(x, y, w, h, r=r, fill=ACCENT, fill2=ACCENT_LO, alpha=1.0,
-                            border=ACCENT_HI, border2=ACCENT, bw=1.5, glow=GLOW, gr=18, ga=0.55 if hover else 0.38)
+                p_ctx.panel(x, y, w, h, r=r, fill=ACCENT_HI if hover else BUTTON_TOP, fill2=ACCENT_LO, alpha=1.0,
+                            border=BUTTON_EDGE, border2=ACCENT, bw=1.5, glow=GLOW, gr=18, ga=0.55 if hover else 0.38)
             elif kind == 'pill':
                 p_ctx.panel(x, y, w, h, r=h / s / 2, fill=PANEL_HI if hover else PANEL, alpha=0.95,
                             border=LINE_HI if hover else LINE, balpha=1.0)
@@ -221,7 +221,7 @@ class Ctx:
                 p_ctx.panel(x, y, w, h, r=r, fill=PANEL_HI if hover else PANEL, fill2=None, alpha=0.95,
                             border=LINE_HI if hover else LINE, balpha=1.0, glow=GLOW if hover else None, gr=10, ga=0.18)
         look(self, False)
-        fg = color or (ON_ACCENT if kind == 'primary' else LINK if kind == 'pill' else TEXT if kind != 'quiet' else SUB)
+        fg = color or (BUTTON_INK if kind == 'primary' else LINK if kind == 'pill' else TEXT if kind != 'quiet' else SUB)
         if icon:
             tw = self.text_width(text, size, weight)
             iw = size * 1.15 * s

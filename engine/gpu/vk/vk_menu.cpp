@@ -2735,18 +2735,14 @@ void columns(const ui::Ctx& c, float* x0, float* x1, float* hx0, float* hx1, boo
     if (*narrow) *hx0 = *x0 + 20 * s, *hx1 = *x1 - 20 * s;
 }
 void column(ui::Ctx& c, float x0, float x1, float top) {
-    const ImVec2 a(x0,top), b(x1,c.h-c.safe);
-    c.d->AddRectFilled(a,b,ui::kColumn,12*c.s);
-    c.d->AddRect(a,b,ui::kEdge,12*c.s,0,std::max(1.0f,c.s));
+    ui::box(c,ImVec2(x0,top+12*c.s),ImVec2(x1,ui::prompt_bar_top(c)-16*c.s));
 }
 /// A row's name cell, selected or not, its tag (After restart) at its right end
 /// A row's name cell, selected or not; pending: a change that applies after a restart, a small gold diamond at its right end
 /// (the help says it in words)
 void name_cell(ui::Ctx& c, ImVec2 a, ImVec2 b, const char* name, bool sel, bool pending = false, float px = 18.5f) {
     const float s = c.s, mid = (a.y + b.y) * 0.5f;
-    c.d->AddRectFilled(a, b, sel ? ui::kCellNameSel : ui::kCellName, 6*s);
-    c.d->AddRect(a, b, ui::kEdge, 0, std::max(1.0f, s));
-    if (sel) c.d->AddRectFilled(a, ImVec2(a.x + 4 * s, b.y), ui::kGoldHi);
+    if (sel) c.d->AddRectFilled(ImVec2(a.x,a.y+10*s),ImVec2(a.x+3*s,b.y-10*s),ui::kGlow,1.5f*s);
     float room = b.x - a.x - 36 * s;
     if (pending) {
         ui::diamond(c, ImVec2(b.x - 12 * s, mid), 4 * s, ui::kGoldHi);
@@ -2759,8 +2755,8 @@ void name_cell(ui::Ctx& c, ImVec2 a, ImVec2 b, const char* name, bool sel, bool 
 /// A value cell: a choice with arrows at its ends (left, right: whether it can go that way), gold when selected
 void choice_cell(ui::Ctx& c, ImVec2 a, ImVec2 b, const std::string& value, bool sel, bool left, bool right, bool fixed = false) {
     const float s = c.s, mid = (a.y + b.y) * 0.5f, in = 4 * s, px = 18 * s;
-    c.d->AddRectFilled(a, b, ui::kCellDark);
-    c.d->AddRect(a, b, ui::kEdge, 0, std::max(1.0f, s));
+    c.d->AddRectFilled(a, b, ui::kCellDark,10*s);
+    c.d->AddRect(a, b, ui::kEdge,10*s,0,std::max(1.0f,s));
     if (sel && !fixed) ui::gold(c, a + ImVec2(in, in), b - ImVec2(in, in));
     const ImU32 ink = sel && !fixed ? ui::kGoldInk : fixed ? ui::kDim : ui::kInk, arrow = sel && !fixed ? ui::kGoldInk : ui::kDim;
     if (left) ui::triangle(c, ImVec2(a.x + in + 11 * s, mid), 9 * s, 0, arrow);
@@ -2773,11 +2769,11 @@ void choice_cell(ui::Ctx& c, ImVec2 a, ImVec2 b, const std::string& value, bool 
 /// A value cell of two halves (a row of two values: On and Off), the chosen one filled
 void halves_cell(ui::Ctx& c, ImVec2 a, ImVec2 b, const char* lo, const char* hi, bool high, bool sel, bool fixed) {
     const float s = c.s, mid = (a.y + b.y) * 0.5f, in = 4 * s, px = 18 * s, xm = (a.x + b.x) * 0.5f;
-    c.d->AddRectFilled(a, b, ui::kCellDark);
-    c.d->AddRect(a, b, ui::kEdge, 0, std::max(1.0f, s));
+    c.d->AddRectFilled(a, b, ui::kCellDark,10*s);
+    c.d->AddRect(a, b, ui::kEdge,10*s,0,std::max(1.0f,s));
     const ImVec2 fa = high ? ImVec2(xm, a.y + in) : a + ImVec2(in, in), fb = high ? b - ImVec2(in, in) : ImVec2(xm, b.y - in);
     if (sel && !fixed) ui::gold(c, fa, fb);
-    else c.d->AddRectFilled(fa, fb, ui::kBronze);
+    else c.d->AddRectFilled(fa, fb, ui::kBronze,7*s);
     const ImU32 on = sel && !fixed ? ui::kGoldInk : ui::kInk;
     ui::text_mid_centre(c, high ? c.f.body : c.f.strong, px, (a.x + xm) * 0.5f, mid, high ? ui::kDim : on, lo);
     ui::text_mid_centre(c, high ? c.f.strong : c.f.body, px, (xm + b.x) * 0.5f, mid, high ? on : ui::kDim, hi);
@@ -2786,14 +2782,14 @@ void halves_cell(ui::Ctx& c, ImVec2 a, ImVec2 b, const char* lo, const char* hi,
 /// A slider's value cell: the value, a track with its knob along the cell's foot; *t0, *t1 the track (for the mouse)
 void slider_cell(ui::Ctx& c, ImVec2 a, ImVec2 b, const char* value, int permille, bool sel, float* t0, float* t1) {
     const float s = c.s, mid = (a.y + b.y) * 0.5f, in = 4 * s, px = 18 * s;
-    c.d->AddRectFilled(a, b, ui::kCellDark);
-    c.d->AddRect(a, b, ui::kEdge, 0, std::max(1.0f, s));
+    c.d->AddRectFilled(a, b, ui::kCellDark,10*s);
+    c.d->AddRect(a, b, ui::kEdge,10*s,0,std::max(1.0f,s));
     if (sel) ui::gold(c, a + ImVec2(in, in), b - ImVec2(in, in));
     const float x0 = a.x + in + 24 * s, x1 = b.x - in - 24 * s, xv = x0 + (x1 - x0) * permille / 1000.0f, ty = b.y - in - 5.5f * s;
     const ImU32 track = sel ? ui::rgba(36, 24, 8, 80) : ui::rgba(255, 255, 255, 40), done = sel ? ui::kGoldInk : ui::kAccent;
     c.d->AddRectFilled(ImVec2(x0, ty - 1.5f * s), ImVec2(x1, ty + 1.5f * s), track, 1.5f * s);
     c.d->AddRectFilled(ImVec2(x0, ty - 1.5f * s), ImVec2(xv, ty + 1.5f * s), done, 1.5f * s);
-    ui::diamond(c, ImVec2(xv, ty), 4.5f * s, done);
+    c.d->AddCircleFilled(ImVec2(xv,ty),4*s,done,16);
     ui::text_mid_centre(c, c.f.strong, px, (a.x + b.x) * 0.5f, mid - 3 * s, sel ? ui::kGoldInk : ui::kInk, value);
     const ImU32 arrow = sel ? ui::kGoldInk : ui::kDim;
     ui::triangle(c, ImVec2(a.x + in + 11 * s, mid), 9 * s, 0, arrow), ui::triangle(c, ImVec2(b.x - in - 11 * s, mid), 9 * s, 1, arrow);
@@ -3092,8 +3088,10 @@ void draw_options(ui::Ctx& c) {
     // the tabs in the banner: dark ink on the tan, the shown one light on a dark inset; the tab keys at their ends (a click there
     // is the previous or the next tab)
     float tw[TAB_COUNT], total = 0;
-    for (int i = 0; i < TAB_COUNT; i++) tw[i] = ui::size_of(c.f.heading, 23 * s, tab_titles[i]).x + 56 * s, total += tw[i];
+    for (int i = 0; i < TAB_COUNT; i++) tw[i] = ui::size_of(c.f.heading, 19 * s, tab_titles[i]).x + 56 * s, total += tw[i];
     float x = (c.w - total) * 0.5f;
+    c.d->AddRectFilled(ImVec2(x-6*s,6*s),ImVec2(x+total+6*s,hh-6*s),ui::kCellDark,24*s);
+    c.d->AddRect(ImVec2(x-6*s,6*s),ImVec2(x+total+6*s,hh-6*s),ui::kEdge,24*s,0,std::max(1.f,s));
     const float ty = hh * 0.5f + s;
     const char* const keys[2] = {c.pad ? "L" : "Q", c.pad ? "R" : "E"};
     for (int i = 0; i < 2; i++) {
@@ -3105,28 +3103,23 @@ void draw_options(ui::Ctx& c) {
     }
     for (int i = 0; i < TAB_COUNT; i++) {
         const bool shown = i == (cur_tab == TAB_MOTION ? TAB_CONTROLS : cur_tab);   // (the Motion page: under Controls)
-        if (shown || i == hover_tab) {
-            c.d->AddRectFilled(ImVec2(x + 4*s, 8*s), ImVec2(x + tw[i] - 4*s, hh - 8*s), shown ? ui::kTabInset : ui::alpha(ui::kTabInset, 0.35f), 12*s);
-            if (shown) {
-                c.d->AddLine(ImVec2(x + 18*s, hh - 8*s), ImVec2(x + tw[i] - 18*s, hh - 8*s), ui::kAccent, std::max(1.0f, s));
-            }
-        }
-        ui::text_mid(c, c.f.heading, 23 * s, x + 28 * s, ty, shown ? ui::kInkBright : ui::kBannerInk, tab_titles[i]);
+        const ImVec2 ta(x+2*s,10*s),tb(x+tw[i]-2*s,hh-10*s);
+        if (shown) { ui::gold(c,ta,tb,19); ui::glow(c,ta,tb,19); }
+        else if (i==hover_tab) c.d->AddRectFilled(ta,tb,ui::kTabInset,18*s);
+        ui::text_mid(c,c.f.heading,19*s,x+28*s,ty,shown?ui::kGoldInk:ui::kBannerInk,tab_titles[i]);
         hits.add(x, 0, x + tw[i], hh, menu_hit::kTab, i);
         x += tw[i];
     }
     {   // (Ocarina Reborn) the banner's left: an original circle mark, OCARINA REBORN, Powered by Sorax under it (no version: the log has it)
         const float room = (c.w - total) * 0.5f - 60 * s - c.safe, x0 = c.safe, tri = 30 * s;
         if (room > tri + 40 * s) {
-            const ImVec2 centre(x0 + tri * 0.5f, ty);
-            c.d->AddCircle(centre, tri * 0.42f, ui::kAccent, 24, 2 * s);
-            c.d->AddLine(ImVec2(x0 + tri * 0.25f, ty), ImVec2(x0 + tri * 0.75f, ty), ui::kInkBright, 2 * s);
+            ui::ocarina(c,ImVec2(x0,ty-18*s),36*s);
+            c.d->AddLine(ImVec2(x0+tri+4*s,ty-14*s),ImVec2(x0+tri+4*s,ty+14*s),ui::kBannerEdge,std::max(1.f,s));
             const float tx = x0 + tri + 12 * s, text_room = room - tri - 12 * s;
-            const auto width = [&](float p) { return ui::size_of(c.f.heading, p, "OCARINA REBORN").x; };
+            const auto width = [&](float p) { return ui::size_of(c.f.heading, p, "Ocarina Reborn").x; };
             const float px = ui::fit_px(20 * s, 12 * s, 0.5f * s, text_room, width);
             if (px > 0) {
-                ui::text_mid(c, c.f.heading, px, tx, ty - 7 * s, ui::kInkBright, "OCARINA REBORN");
-                ui::text_mid(c, c.f.body, std::max(10 * s, px * 0.55f), tx + s, ty + 11 * s, ui::kAccent, "Powered by Sorax");
+                ui::text_mid(c, c.f.heading, px, tx, ty, ui::kInkBright, "Ocarina Reborn");
             }
         }
     }
@@ -3134,7 +3127,11 @@ void draw_options(ui::Ctx& c) {
     float cx0, cx1, hx0, hx1;
     bool narrow;
     columns(c, &cx0, &cx1, &hx0, &hx1, &narrow);
-    column(c, cx0, cx1, hh);
+    const float content_top=hh+76*s;
+    ui::text_mid(c,c.f.strong,28*s,cx0+6*s,hh+36*s,ui::kInkBright,"Settings");
+    c.d->AddLine(ImVec2(cx0,content_top),ImVec2(hx1,content_top),ui::alpha(ui::kEdge,.65f),std::max(1.f,s));
+    column(c,cx0,cx1,content_top);
+
     const int count = tab_row_count(cur_tab), sel = tab_selected[cur_tab];
     const Row& selr = rows[tab_row_to_global(cur_tab, sel)];
     const char* hint = selr.value && selr.hint ? selr.hint(*selr.value, -1) : nullptr;
@@ -3167,7 +3164,7 @@ void draw_options(ui::Ctx& c) {
         prompt_list[prompts_n++] = {ui::kTabs, "Tabs"}, prompt_list[prompts_n++] = {ui::kBack, "Close"};
     }
     const float bar_top = ui::prompt_bar_top(c);   // (the strip itself drawn last, over all: below)
-    float bottom = std::min(c.h - c.safe, bar_top) - 10 * s;   // (the rows end above the prompts)
+    float bottom = std::min(c.h - c.safe, bar_top) - 32 * s;   // (the rows end above the prompts)
     const bool after = restart_changed(selr);
     if (narrow) {   // (the help over the column's foot, the rows above it: at most half the room, the rows get the rest)
         const float help_h = std::min(22 * s + 32 * s + help_tall + (after ? 30 * s : 0) + (pending_line.empty() ? 0 : 52 * s) + 22 * s,
@@ -3176,10 +3173,10 @@ void draw_options(ui::Ctx& c) {
         help_box(c, hx0, hx1, bottom + 8 * s, selr.name, selr.help, hint, pending_line.empty() ? nullptr : pending_line.c_str(), help_tall,
                  after, bottom + 8 * s, bar_top - 10 * s);
     } else {
-        help_box(c, hx0, hx1, std::max(hh + 26 * s, c.h * 0.30f), selr.name, selr.help, hint,
-                 pending_line.empty() ? nullptr : pending_line.c_str(), help_tall, after, hh + 18 * s, bar_top - 12 * s);
+        help_box(c, hx0, hx1, content_top+12*s, selr.name, selr.help, hint,
+                 pending_line.empty() ? nullptr : pending_line.c_str(), help_tall, after, content_top+12*s, bar_top-16*s);
     }
-    const float rh = 40 * s, pitch = 48 * s, top = hh + 24 * s, rx0 = cx0 + 44 * s, rx1 = cx1 - 44 * s, split = rx0 + (rx1 - rx0) * 0.55f;
+    const float rh = 40 * s, pitch = 52 * s, top = content_top + 36 * s, rx0 = cx0 + 30 * s, rx1 = cx1 - 24 * s, split = rx0 + (rx1 - rx0) * 0.55f;
     if (cur_tab == TAB_DEBUG) {   // (the Debug tab: its own layout of the same rows)
         marquee_max = 0;
         draw_debug_rows(c, cx0, cx1, top, bottom, sel);
@@ -3193,7 +3190,7 @@ void draw_options(ui::Ctx& c) {
     c.d->PushClipRect(ImVec2(cx0, top - 8 * s), ImVec2(cx1, bottom + 8 * s));
     for (int i = 0; i < count; i++) {
         const float y = top + (i - first) * pitch;
-        if (y + rh < top - 8 * s || y > bottom + 8 * s) continue;
+        if (y + rh < top - 8 * s || y + rh > bottom) continue;
         const Row& r = rows[tab_row_to_global(cur_tab, i)];
         if (r.heading) {   // (a section's title: gold, a rule after it to the column's end; no cell, nothing to click)
             const float ty = y + rh * 0.62f, tw = ui::size_of(c.f.heading, 19 * s, r.name).x;
@@ -3202,7 +3199,7 @@ void draw_options(ui::Ctx& c) {
             continue;
         }
         const bool selected = i == sel;
-        name_cell(c, ImVec2(rx0, y), ImVec2(split, y + rh), r.name, selected, restart_changed(r));
+        name_cell(c, ImVec2(rx0, y), ImVec2(split-10*s, y + rh), r.name, selected, restart_changed(r));
         const ImVec2 va(split, y), vb(rx1, y + rh);
         float t0 = 0, t1 = 0;
         row_value_cell(c, r, va, vb, selected, &t0, &t1);
@@ -3727,7 +3724,7 @@ void draw_menu(ui::Ctx& c) {
     ui::update_theme();
     ocr_ui_preset = interface_theme::preset_index();
     c.f.heading = c.f.strong; // Launcher-like sans headings, including translated glyphs.
-    if (!(tune_mode && page == 0)) c.d->AddRectFilled(ImVec2(0, 0), ImVec2(c.w, c.h), ui::rgba(3, 7, 15, ui::kDimAlpha));   // (the game behind, dimmed)
+    if (!(tune_mode && page == 0)) ui::backdrop(c);   // (the game behind, dimmed)
     ui::Ctx k = c;
     k.w = std::min(c.w, std::floor(c.h * 16.0f / 9.0f + 0.5f));
     menu_ox = std::floor((c.w - k.w) * 0.5f);

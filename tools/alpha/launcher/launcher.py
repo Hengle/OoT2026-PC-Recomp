@@ -888,9 +888,9 @@ class App(tk.Tk):
         for i, ((key, icon, text), w) in enumerate(zip(items, widths)):
             on = key == self.step
             if on:
-                ctx.panel(x, cy - ch / 2 + 4 * s, w, ch - 8 * s, r=25, fill=ui.ACCENT, fill2=ui.ACCENT_LO, alpha=1,
+                ctx.panel(x, cy - ch / 2 + 4 * s, w, ch - 8 * s, r=25, fill=ui.BUTTON_TOP, fill2=ui.ACCENT_LO, alpha=1,
                           border=ui.ACCENT_HI, border2=ui.ACCENT, bw=1.2, glow=ui.GLOW, gr=16, ga=0.45)
-            col = ui.ON_ACCENT if on else ui.SUB
+            col = ui.BUTTON_INK if on else ui.SUB
             ctx.icon(x + pad + isz / 2, cy, icon, 23, col)
             ctx.text(x + pad + isz + gap, cy, text, 21, 'semibold' if on else 'regular', col, anchor='w')
             x += w

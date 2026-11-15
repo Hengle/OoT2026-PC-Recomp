@@ -17,6 +17,11 @@ import engine_theme
 
 
 class InterfaceThemeTests(unittest.TestCase):
+    def test_default_restores_original_launcher_style(self):
+        p=theme.palette(theme.DEFAULT)
+        self.assertEqual((p['BG_TOP'],p['PANEL'],p['CELL']),('#0d1b36','#10224a','#0c1a3a'))
+        self.assertEqual((p['BUTTON_TOP'],p['ACCENT_LO'],p['BUTTON_INK']),('#3b8bff','#1556e0','#ffffff'))
+
     def test_rgb_validation_and_hex_roundtrip(self):
         self.assertEqual(theme.rgb({}), (46, 123, 255))
         self.assertEqual(theme.rgb(dict(interface_red=-30, interface_green='bad', interface_blue=999)), (0, 123, 255))
@@ -68,7 +73,7 @@ int main() {
     for (int i=0;i<7;++i) { select_preset(i); if(preset_index()!=i) return 1; }
     int r,g,b;
     while(std::cin>>r>>g>>b) {
-        RGB a{r,g,b}, f=foreground(a), p=mix({12,22,39},a,10), l=mix(a,{255,255,255},60);
+        RGB a{r,g,b}, f=foreground(a), p=tint({16,34,74},a), l=mix(a,{255,255,255},60);
         std::cout<<f.r<<' '<<f.g<<' '<<f.b<<' '<<p.r<<' '<<p.g<<' '<<p.b<<' '<<l.r<<' '<<l.g<<' '<<l.b<<'\n';
     }
 }'''
