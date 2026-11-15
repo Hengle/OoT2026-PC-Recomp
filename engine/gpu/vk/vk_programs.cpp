@@ -29,6 +29,7 @@
 #include "program_life.h"
 #include "module_ids.h"
 #include "load_default.h"
+#include "ocr_prepare_policy.h"
 #include "vk_programs.h"
 
 namespace mkwvk {
@@ -344,7 +345,14 @@ PipelineSource& pipeline_source() {
 /// waited too long for loads, start otherwise. Decided once the device is up (vk_main.cpp); start until then
 std::atomic<int> load_mode{-1};
 void programs_load_decide(bool native_mesh) {
-    const load_default::Choice c = load_default::choose(getenv("RX_VK_LOAD"), native_mesh, load_default::marker_there(load_fallback_path()),
+    bool marker = load_default::marker_there(load_fallback_path());
+    MEMORYSTATUSEX memory{}; memory.dwLength = sizeof memory;
+    if (!getenv("RX_VK_LOAD") && GlobalMemoryStatusEx(&memory) &&
+        ocr_prepare::avoid_resident_fallback(native_mesh, marker, memory.ullTotalPhys)) {
+        marker = false;
+        logf("vk: memory-aware startup: keeping lazy program loads on a <=20 GiB PC; a previous slow-load marker would retain every listed program");
+    }
+    const load_default::Choice c = load_default::choose(getenv("RX_VK_LOAD"), native_mesh, marker,
                                                         env_on("RX_VK_PROGRAM_CACHE_ZSTD"));   // (as vk_progcache.cpp disk_init reads it)
     load_mode.store(c.create ? 1 : 0, std::memory_order_release);
     logf("vk: programs are loaded %s: %s (RX_VK_LOAD=create or start says which)",

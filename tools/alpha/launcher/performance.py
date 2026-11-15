@@ -136,6 +136,27 @@ def gpu_failure_advice(summary, de=True):
     return advice
 
 
+def memory_pressure(lines):
+    """Observed pressure is separate from allocation failure, and never called OOM."""
+    samples = []
+    for line in lines:
+        m = re.search(r'\[OcarinaReborn/MEM\] system: commit free (\d+) MB, RAM free (\d+) MB, reserve (\d+) MB', line)
+        if m:
+            samples.append(tuple(map(int, m.groups())))
+    return dict(memory_pressure_events=sum(c < 1024 or r < 1024 for c, r, _ in samples),
+                ram_free_min_mb=min((r for _, r, _ in samples), default=None),
+                commit_free_min_mb=min((c for c, _, _ in samples), default=None))
+
+
+def memory_pressure_advice(de=True):
+    return ('warn',
+        'Wenig freier RAM oder Windows-Speicher im Spiel gemessen. Nachladen und Speicher auf Weniger Speicher stellen, '
+        'RAM-Schutz auf Stark lassen und unnötige Hintergrundprogramme schließen. Ein Shader-Neubau hilft hier nicht.'
+        if de else
+        'Low available RAM or Windows commit headroom was measured during play. Set Streaming and memory to '
+        'Lower memory, keep RAM guard on Strong, and close unnecessary background apps. Rebuilding shaders will not fix this.')
+
+
 def memory_events(lines):
     return sum(bool(HOST_MEMORY_ERROR.search(line)) for line in lines)
 
@@ -204,7 +225,7 @@ def summarize(lines):
     # loading/compilation pauses above are excluded, and no CPU model is used as a proxy for measured pressure.
     cpu_slow = sum(r['seconds'] for r in steady if r['fps'] < 55 and r['cpu'] >= 12 and
                    r['gpu'] > .1 and r['cpu'] > 1.2 * r['gpu'])
-    return dict(schema=2, **gpu_failures(lines), **cache_status(lines), host_memory_events=host_memory_events, seconds=seconds, frames=int(frames), fps=frames / seconds,
+    return dict(schema=2, **gpu_failures(lines), **cache_status(lines), **memory_pressure(lines), host_memory_events=host_memory_events, seconds=seconds, frames=int(frames), fps=frames / seconds,
                 p95_worst_window=max(r['p95'] for r in rows), p99_worst_window=max(r['p99'] for r in rows),
                 worst_ms=max(r['worst'] for r in rows), over50=int(sum(r['h50'] for r in rows)),
                 over100=int(sum(r['h100'] for r in rows)),
@@ -244,6 +265,8 @@ def describe(summary, de=True):
     ]
     if s.get('host_memory_events', 0):
         lines.insert(0, memory_advice(de))
+    elif s.get('memory_pressure_events', 0):
+        lines.insert(0, memory_pressure_advice(de))
     lines[0:0] = gpu_failure_advice(s, de)
     if cpu_pressure(s):
         lines.insert(-1, ('warn', t(

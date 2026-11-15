@@ -266,6 +266,8 @@ def diagnose(lines, settings=None, de=True):
         return gpu_advice
     if performance.memory_events(lines):
         return [performance.memory_advice(de)]
+    if performance.memory_pressure(lines)['memory_pressure_events']:
+        return [performance.memory_pressure_advice(de)]
     if any('stats2 seconds ' in line for line in lines):
         return [('tip', T('Noch keine auswertbaren Abschnitte. Spiele mindestens 30 Sekunden bei geschlossenem F1-Menü.',
                           'No usable windows yet. Play for at least 30 seconds with the F1 menu closed.'))]

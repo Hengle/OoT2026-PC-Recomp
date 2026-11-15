@@ -4,15 +4,15 @@ This repository contains the **Ocarina Reborn launcher, patched engine and build
 
 A native Windows x64 version of **The Legend of Zelda: Ocarina of Time (Switch 2)**, built on your PC from your own `.nup` game file.
 
-**Current release: v1.0.9 · November 15, 2026**
+**Current release: v1.1.1 · November 15, 2026**
 
 [Download the latest release](https://github.com/ocarina-pc-native-build/ocarina-pc-native-build.github.io/releases/latest) · [Website](https://ocarina-pc-native-build.github.io/) · [Discord](https://discord.gg/vDPAcc6JnY)
 
 ## Source code
 
-The actual **v1.0.9 source** is here: [engine and renderer](engine/), [game-build pipeline](engine/nx2/), [Ocarina Reborn launcher](tools/alpha/launcher/), [installer/build scripts](scripts/), [custom hooks and graphics](tools/alpha/hud/), [tests](tools/alpha/tests/) and [build instructions](BUILDING.md). The original [engine builder source](engine/builder/) is retained alongside the Ocarina Reborn launcher.
+The actual **v1.1.1 source** is here: [engine and renderer](engine/), [game-build pipeline](engine/nx2/), [Ocarina Reborn launcher](tools/alpha/launcher/), [installer/build scripts](scripts/), [custom hooks and graphics](tools/alpha/hud/), [tests](tools/alpha/tests/) and [build instructions](BUILDING.md). The original [engine builder source](engine/builder/) is retained alongside the Ocarina Reborn launcher.
 
-`engine/` contains the already-patched sources used by the released installer, including custom tunic colors and the classic counters fix. Classic-voice preparation imports a user-selected ZIP; recordings are not bundled. `SOURCE-MANIFEST.json` records the engine file hashes and the matching installer SHA-256. GitHub's v1.0.9 source archives contain this project source; the website lives in its separate repository.
+`engine/` contains the already-patched sources used by the released installer, including custom tunic colors and the classic counters fix. Classic-voice preparation imports a user-selected ZIP; recordings are not bundled. `SOURCE-MANIFEST.json` records the engine file hashes and the matching installer SHA-256. GitHub's v1.1.1 source archives contain this project source; the website lives in its separate repository.
 
 ## Get started
 
@@ -34,17 +34,17 @@ You need Windows x64, a Vulkan-capable graphics card and your own supported game
 
 NVIDIA's DLSS files are downloaded separately through the launcher after accepting NVIDIA's license.
 
-## What's new in v1.0.9
+## What's new in v1.1.1
 
-- Lower CPU overhead for texture uploads through reusable, bounded workers.
-- More useful render-target reuse within existing memory limits.
-- Smaller temporary buffers for large textures and earlier release of idle buffers under memory pressure.
-- Game compilation continues when an optional performance profile is missing.
-- A persistent Navi on/off button in the launcher header.
+- Shader preparation focuses on recorded pipelines and releases temporary pipelines as it goes.
+- Memory-aware shader workers, bounded rendering caches and new streaming/memory modes.
+- AMD FSR 3.1.6, shared launcher/F1 colours and launcher-style F1 cards.
+- Reset all settings with backups, plus explicit Off choices for RAM guard and texture dimensions.
+- Better memory-pressure, graphics-startup and GPU-hang diagnostics.
 
-These changes target CPU overhead, texture-loading stutters and temporary RAM use. Technical tests passed; broader hardware testing remains ongoing. Update over the existing installation and let the launcher update the game components. No full reinstall or game-file reimport is required. Saves, settings and local voice mods stay. Existing caches are kept; shader preparation may depend on the previous build.
+Update over your current installation. No full reinstall or game-file reimport is required. Saves, settings and private voice files remain. Compatible caches are retained. Performance depends on hardware and scene; newly encountered effects can still cause compilation stutters.
 
-[Full release notes and SHA-256](https://github.com/ocarina-pc-native-build/ocarina-pc-native-build.github.io/releases/tag/v1.0.9) · [All releases](https://github.com/ocarina-pc-native-build/ocarina-pc-native-build.github.io/releases)
+[Full release notes and SHA-256](https://github.com/ocarina-pc-native-build/ocarina-pc-native-build.github.io/releases/tag/v1.1.1) · [All releases](https://github.com/ocarina-pc-native-build/ocarina-pc-native-build.github.io/releases)
 
 ## Feedback and troubleshooting
 

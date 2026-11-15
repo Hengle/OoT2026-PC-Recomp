@@ -3,7 +3,7 @@ import shutil, subprocess, sys, tempfile, unittest
 ALPHA = Path(__file__).resolve().parents[1]
 ROOT = ALPHA.parents[1]
 sys.path.insert(0, str(ALPHA))
-import engine_streaming, engine_target_cache
+import engine_streaming, engine_target_cache, engine_settings_reset
 
 
 class TargetCacheTests(unittest.TestCase):
@@ -18,11 +18,13 @@ class TargetCacheTests(unittest.TestCase):
                 (root/'gpu/vk'/name).write_bytes(result.stdout)
             engine_streaming.apply(root)
             engine_target_cache.apply(root)
+            engine_settings_reset.apply(root)
             for name in names:
                 self.assertEqual((root/'gpu/vk'/name).read_text(), (ROOT/'engine/gpu/vk'/name).read_text())
             before = {p.name:p.read_bytes() for p in (root/'gpu/vk').iterdir()}
             engine_streaming.apply(root)
             engine_target_cache.apply(root)
+            engine_settings_reset.apply(root)
             self.assertEqual(before, {p.name:p.read_bytes() for p in (root/'gpu/vk').iterdir()})
 
     def test_lower_memory_reservations(self):

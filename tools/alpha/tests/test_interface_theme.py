@@ -60,7 +60,7 @@ class InterfaceThemeTests(unittest.TestCase):
             engine_theme.apply(root)
             for name in ('vk_ui.h','vk_menu.cpp','menu_i18n.h','ocr_interface_theme.h'):
                 self.assertEqual((vk/name).read_text(encoding='utf-8'),
-                                 (ROOT/'engine/gpu/vk'/name).read_text(encoding='utf-8'),name)
+                                 subprocess.check_output(['git','show','4ad4254:engine/gpu/vk/'+name],cwd=ROOT).decode('utf-8').replace('\r\n','\n'),name)
 
     def test_native_palette_and_presets_match_launcher(self):
         cxx=shutil.which('clang++')

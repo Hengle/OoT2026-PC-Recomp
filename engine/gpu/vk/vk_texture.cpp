@@ -2023,7 +2023,7 @@ Texture* create(const Key& key, const nvn_tex* t, VkFormat vf, bool astc, int bw
         // below 64, and too wide for the BC3 scratch. Explicit overrides keep main's existing parsing.)
         static const char* skip_env = getenv("RX_VK_TEX_SKIP_MB");
         const uint64_t skip_from = (uint64_t)(skip_env ? atoi(skip_env) : small_mips ? 8 : 64) << 20;
-        while (!x.sparse && astc && x.skip + 1 < x.levels && bytes_at(x.skip) > skip_from &&
+        while (max_dim && !x.sparse && astc && x.skip + 1 < x.levels && bytes_at(x.skip) > skip_from &&
                (std::max(x.width, x.height) >> x.skip) > max_dim)
             x.skip++;
         while (!x.sparse && x.skip + 1 < x.levels && bytes_at(x.skip) > max_bytes) x.skip++;
@@ -4407,7 +4407,8 @@ void texture_frame(uint64_t completed) {
 bool ocr_ram_limited = false, ocr_ram_urgent = false;
 #ifdef _WIN32
     {   // (Ocarina Reborn) RAM guard: engine_v21.py RAM_GUARD
-        static const uint64_t reserve = (uint64_t)(getenv("OCR_RAM_RESERVE_MB") ? std::max(512, atoi(getenv("OCR_RAM_RESERVE_MB"))) : 1024) << 20;
+        static const bool ram_guard_enabled = !getenv("OCR_RAM_GUARD") || atoi(getenv("OCR_RAM_GUARD")) != 0;
+        static const uint64_t reserve = ram_guard_enabled ? (uint64_t)(getenv("OCR_RAM_RESERVE_MB") ? std::max(512, atoi(getenv("OCR_RAM_RESERVE_MB"))) : 1024) << 20 : 0;
         static uint64_t held = 0;   // (0: no hold)
         static uint64_t said_at = 0;
         static auto pressure_at = std::chrono::steady_clock::time_point{};
@@ -4452,7 +4453,7 @@ bool ocr_ram_limited = false, ocr_ram_urgent = false;
             // (and physical RAM: with commit to spare, Windows still pages the game out when RAM runs short, and the whole
             // game stops 1-3 s at a time: RTX 4070 SUPER, 31 GB RAM, private bytes 17 -> 29 GB over a session, dozens of
             // 2-3 s freezes, the game reading no controller meanwhile, 2026-11-12. Under 1.5 GB of RAM free counts as short)
-            const uint64_t phys_reserve = std::max<uint64_t>(reserve, 1536ull << 20);
+            const uint64_t phys_reserve = ram_guard_enabled ? std::max<uint64_t>(reserve, 1536ull << 20) : 0;
             const uint64_t short_commit = ms.ullAvailPageFile < reserve ? reserve - ms.ullAvailPageFile : 0;
             const uint64_t short_phys = ms.ullAvailPhys < phys_reserve ? phys_reserve - ms.ullAvailPhys : 0;
             // (and the video memory Windows allows the game: over 92% of it, the driver moves memory out to RAM and the game
@@ -4464,7 +4465,7 @@ bool ocr_ram_limited = false, ocr_ram_urgent = false;
             const uint64_t short_vram = vknown && vused > vcap ? vused - vcap : 0;
             const bool roomy = ms.ullAvailPageFile > reserve + (1024ull << 20) && ms.ullAvailPhys > phys_reserve + (1024ull << 20) &&
                                (!vknown || vused < vallowed / 100 * 85);
-            const bool critical = ms.ullAvailPageFile < (256ull << 20) || ms.ullAvailPhys < (512ull << 20) ||
+            const bool critical = (ram_guard_enabled && (ms.ullAvailPageFile < (256ull << 20) || ms.ullAvailPhys < (512ull << 20))) ||
                                   (vknown && vused > vallowed / 100 * 97);
             ocr_ram_urgent = critical || short_vram;
             // Do not collapse a growing scene's cache to the loading screen's footprint.

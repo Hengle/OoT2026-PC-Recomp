@@ -1720,8 +1720,9 @@ ComputePlan computes_plan(const char* which, bool state_lists) {
         for (const uint64_t k : state_list_computes(state_list_path("ocarina_reborn_pipeline_states_shipped.bin")))
             if (seen.insert(k).second) plan.shipped++, plan.fresh += plan.keys.insert(k).second;
     }
-    const bool listed = which && !strcmp(which, "listed");
-    plan.all = which && !plan.learned_only && !listed ? !strcmp(which, "all") : listed ? plan.keys.empty() : !plan.learned;
+    // Default to programs observed in real play, not every speculative variant.
+    // An empty list is valid: first dispatch builds a missing program normally.
+    plan.all = which && !strcmp(which, "all");
     plan.none = !plan.all && which && !strcmp(which, "none");
     return plan;
 }
@@ -8172,7 +8173,10 @@ bool prepare_run(void (*progress)(size_t done, size_t total), bool background, b
     // once a run, by the start's own preparation (the background one in play leaves the driver's part to first use)
     static std::atomic<bool> rewarm_once{true};
     if (!background && pcache_drop_stale() && rewarm_once.exchange(false)) prepared_for.warmed = 0;   // (read as not made)
-    const bool libraries = gpl_wanted() && !env_on("RX_VK_NO_WARM");
+    // The regular preparation translates all shaders and warms recorded pipelines.
+    // Full speculative warming is optional: it took hours on compute-fallback GPUs.
+    const bool full_prepare = env_on("RX_VK_PREPARE_FULL");
+    const bool libraries = full_prepare && gpl_wanted() && !env_on("RX_VK_NO_WARM");
     const uint64_t warmed = warmed_stamp(libraries);
     const std::string warming = path + ".warming";
     if (hash_ms > 0)
@@ -8220,7 +8224,7 @@ bool prepare_run(void (*progress)(size_t done, size_t total), bool background, b
     // crashes on one of them (it happens: TotK Recomp's issue 30) would crash here at every start: the file says this step began and
     // did not end, and the next start goes without it. Those libraries are then built when a draw first needs them
     bool warm = libraries && !background;
-    bool warm_cs = !env_on("RX_VK_NO_WARM") && !background;
+    bool warm_cs = full_prepare && !env_on("RX_VK_NO_WARM") && !background;
     if (background) {
     } else if (FILE* f = fopen(warming.c_str(), "rb")) {
         fclose(f);
@@ -8408,10 +8412,15 @@ void precompile_warm(void (*progress)(size_t done, size_t total)) {
         list.push_back(&r);
     }
     const size_t total = refs.size();
+    const ComputePlan plan = computes_plan(getenv("RX_VK_PRECOMPILE_COMPUTES"), !env_on("RX_VK_NO_STATE_LIST"));
+    std::vector<uint64_t> computes = program_cache_compute_keys();
+    if (!plan.all) computes.erase(std::remove_if(computes.begin(), computes.end(),
+        [&](uint64_t key) { return plan.none || !plan.keys.count(key); }), computes.end());
+    const size_t progress_total = total + computes.size();
     std::atomic<size_t> done{0}, built{0}, failed{0}, no_program{0};
     const std::string notes_path = pipe_notes_path();
     auto log_at = std::chrono::steady_clock::now() + std::chrono::seconds(10);
-    const unsigned threads = std::min(usable_cpus(), 16u);
+    const unsigned threads = ocr_shader_workers(std::min(usable_cpus(), 16u));
     warm_bounded::run(progs.size(), threads, [&](size_t i) {
         static thread_local bool off = (ub_thread_off(), true);   // (a background thread: see ub_thread_off)
         static thread_local FILE* in = fopen(notes_path.c_str(), "rb");
@@ -8421,6 +8430,9 @@ void precompile_warm(void (*progress)(size_t done, size_t total)) {
         size_t found = 0;
         program_cache_borrow(progs[i], [&](Program& p) {
             ensure_layout(p);
+            // Warm the recorded mesh-fallback compute stages too. Borrowed objects
+            // are private to this worker; release every temporary pipeline below.
+            if (p.fallback) fallback_compute_pipelines(p);
             for (const NoteRef* r : list) {
                 if (r->variant != p.variant || prepare_stopped() || !pipe_note_at(in, r->at, note.get())) continue;
                 found++;
@@ -8428,17 +8440,19 @@ void precompile_warm(void (*progress)(size_t done, size_t total)) {
                 if (made) vkDestroyPipeline(dev.device, made, nullptr);   // (it is in the cache now: that is all it was built for)
                 (made ? built : failed)++;
             }
+            for (VkPipeline pl : p.fallback_compute) if (pl) vkDestroyPipeline(dev.device, pl, nullptr);
+            p.fallback_compute.clear();
         });
         no_program += list.size() - std::min(found, list.size());
         done += list.size();
     }, [] { return prepare_stopped(); }, [&](size_t) {
-        if (progress) progress(done.load(), total);
+        if (progress) progress(done.load(), progress_total);
         prepare_progress_log("noted pipelines", done.load(), total, t0, log_at);
     });
     // (the compute pipelines too, every kept compute program's: a first start in start mode makes them all, and a load at a
     // create call only asks the caches, so on a new install a first dispatch found none (666 in one first session). Built
     // into the cache and let go, as the noted ones)
-    const std::vector<uint64_t> computes = done == total && !prepare_stopped() ? program_cache_compute_keys() : std::vector<uint64_t>{};
+    // Count compute work too: a live compiler must keep the watchdog moving.
     std::atomic<size_t> computes_done{0}, computes_built{0}, computes_failed{0};
     const auto c0 = std::chrono::steady_clock::now();
     warm_bounded::run(computes.size(), threads, [&](size_t i) {
@@ -8458,7 +8472,7 @@ void precompile_warm(void (*progress)(size_t done, size_t total)) {
         });
         computes_done++;
     }, [] { return prepare_stopped(); }, [&](size_t) {
-        if (progress) progress(total, total);
+        if (progress) progress(total + computes_done.load(), progress_total);
         prepare_progress_log("compute pipelines", computes_done.load(), computes.size(), c0, log_at);
     });
     const bool all = done == total && computes_done == computes.size();
@@ -8555,6 +8569,12 @@ void precompile_at_create() {
 }
 
 void precompile_run(void (*progress)(size_t done, size_t total)) {
+    // A builder process never plays. Keeping tens of thousands of pipelines alive
+    // until exit needlessly exhausts RAM, especially on compute-fallback GPUs.
+    if (env_on("HOOKSHOT_PREPARE_ONLY")) {
+        precompile_warm(progress);
+        return;
+    }
     // (hookshot, RX_VK_LOAD=create: only once every note has been built into the pipeline cache, so that a load from the
     // caches alone never meets a pipeline the prepare should have compiled. The first start after a preparation builds them
     // there and lets each go, precompile_warm: before the game, and never more of them alive than workers)
@@ -8796,7 +8816,9 @@ bool predict_pending() {
 void predict_run(void (*progress)(size_t done, size_t total)) {
     const auto t0 = std::chrono::steady_clock::now();
     std::vector<std::unique_ptr<PipeNote>> notes = pipe_notes_read();
-    if (notes.empty() || env_on("RX_VK_NO_PREDICT")) {
+    if (notes.empty() || env_on("RX_VK_NO_PREDICT") || !env_on("RX_VK_PREPARE_FULL")) {
+        if (!notes.empty() && !env_on("RX_VK_PREPARE_FULL"))
+            logf("vk: preparation: recorded pipelines only; speculative prediction is optional (RX_VK_PREPARE_FULL=1)");
         remove(predict_pending_path().c_str());
         return;
     }

@@ -1,0 +1,87 @@
+from pathlib import Path
+import importlib.util, json, shutil, subprocess, sys, tempfile, unittest
+from unittest.mock import patch
+ALPHA=Path(__file__).resolve().parents[1]
+ROOT=ALPHA.parents[1]
+sys.path.insert(0,str(ALPHA));sys.path.insert(0,str(ALPHA/'launcher'))
+import engine_prepare, performance, advisor
+
+class PreparationTests(unittest.TestCase):
+    def test_policy_and_real_compute_selection(self):
+        compiler=shutil.which('clang++')
+        self.assertIsNotNone(compiler,'clang++ required')
+        t=(ROOT/'engine/gpu/vk/vk_draw.cpp').read_text(encoding='utf-8')
+        code=t[t.index('struct ComputePlan {'):t.index('std::mutex state_mu;')]
+        harness=r'''
+#include <unordered_set>
+#include <string>
+#include <vector>
+#include <cstring>
+#include <cstdio>
+#include "ocr_prepare_policy.h"
+using namespace ocr_prepare;
+std::unordered_set<uint64_t> learned;
+std::vector<uint64_t> shipped;
+auto computes_read(){return learned;}
+std::string state_list_path(const char* p){return p;}
+auto state_list_computes(const std::string&){return shipped;}
+/* PRODUCTION */
+#define CHECK(x) do {if(!(x)){printf("line %d: %s\n",__LINE__,#x);return 1;}}while(0)
+int main(){
+ CHECK(workers(64,64,1024*MiB,64000*MiB)==1);
+ CHECK(workers(16,16,16000*MiB,2048*MiB)==1);
+ CHECK(workers(16,16,16000*MiB,32000*MiB)==8);
+ CHECK(workers(2,16,16000*MiB,32000*MiB)==2);
+ CHECK(workers(16,1,16000*MiB,32000*MiB)==1);
+ CHECK(avoid_resident_fallback(true,true,16ull*1024*MiB));
+ CHECK(!avoid_resident_fallback(true,true,32ull*1024*MiB));
+ CHECK(!avoid_resident_fallback(false,true,16ull*1024*MiB));
+ auto p=computes_plan(nullptr,true); CHECK(!p.all && p.keys.empty());
+ shipped={11,22,22};p=computes_plan(nullptr,true);CHECK(!p.all && p.keys.size()==2 && p.shipped==2);
+ learned={22,33};p=computes_plan(nullptr,true);CHECK(!p.all && p.keys.size()==3 && p.fresh==1);
+ p=computes_plan("all",true);CHECK(p.all);
+ p=computes_plan("none",true);CHECK(p.none && !p.all);
+ p=computes_plan("learned",true);CHECK(p.keys.size()==2 && !p.keys.count(11) && !p.all);
+ p=computes_plan(nullptr,false);CHECK(p.keys.size()==2 && !p.all);
+ learned.clear();p=computes_plan("learned",true);CHECK(p.keys.empty() && !p.all);
+ puts("worker memory limits and real compute selection passed");
+}'''.replace('/* PRODUCTION */',code)
+        with tempfile.TemporaryDirectory() as tmp:
+            p=Path(tmp);(p/'test.cpp').write_text(harness)
+            r=subprocess.run([compiler,'-std=c++17','-O2','-static','-I'+str(ROOT/'engine/gpu/vk'),str(p/'test.cpp'),'-o',str(p/'test.exe')],capture_output=True,text=True)
+            self.assertEqual(r.returncode,0,r.stdout+r.stderr)
+            r=subprocess.run([str(p/'test.exe')],capture_output=True,text=True,timeout=10)
+            self.assertEqual(r.returncode,0,r.stdout+r.stderr)
+
+    def test_fresh_and_repeat_generator(self):
+        names={rel for rel,_,_ in engine_prepare.CHANGES}
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp)
+            for rel in names:
+                p=root/rel;p.parent.mkdir(parents=True,exist_ok=True)
+                p.write_bytes(subprocess.run(['git','show','517b661:engine/'+rel],cwd=ROOT,capture_output=True,check=True).stdout)
+            engine_prepare.apply(root)
+            for rel in names:
+                self.assertEqual((root/rel).read_text(encoding='utf-8'),(ROOT/'engine'/rel).read_text(encoding='utf-8'))
+            before={r:(root/r).read_bytes() for r in names}
+            engine_prepare.apply(root)
+            self.assertEqual(before,{r:(root/r).read_bytes() for r in names})
+
+    def test_progress_does_not_invent_completed_shader_counts(self):
+        spec=importlib.util.spec_from_file_location('prepare',ALPHA/'ocarina_prepare.py')
+        m=importlib.util.module_from_spec(spec);spec.loader.exec_module(m)
+        messages=[]
+        with patch.object(m,'out',side_effect=lambda **kw:messages.append(kw)):
+            p=m.Progress();p.programs=38809;p.line('@@stage shaders');p.line('@@progress 0.8')
+        last=messages[-1];self.assertNotIn('count',last);self.assertLess(last['total_pct'],100)
+
+    def test_low_ram_is_not_an_allocation_failure(self):
+        lines=['[hos Presentation Thread] [OcarinaReborn/MEM] system: commit free 407 MB, RAM free 331 MB, reserve 3072 MB']
+        self.assertEqual(performance.memory_events(lines),0)
+        result=performance.memory_pressure(lines)
+        self.assertEqual(result['memory_pressure_events'],1)
+        self.assertEqual(result['ram_free_min_mb'],331)
+        self.assertIn('Low available RAM',advisor.diagnose(lines,de=False)[0][1])
+        self.assertEqual(performance.memory_pressure(['system: RAM free 1 MB'])['memory_pressure_events'],0)
+
+if __name__=='__main__':unittest.main()

@@ -37,6 +37,7 @@ import mods_manager  # noqa: E402
 import classic_voices  # noqa: E402
 import tunic_colors  # noqa: E402
 import interface_theme  # noqa: E402
+import settings_reset  # noqa: E402
 import amiibo  # noqa: E402
 import gamepad  # noqa: E402
 
@@ -181,7 +182,7 @@ def display_info():
 
 SESSION_KEEP = ('[perf]', '[Performance Warning]', 'VRAM full', 'over budget', '[HDR]', '[OcarinaReborn/GFX]', 'swapchain ',
                 'allocation fail', 'import fail', 'translation fail', 'rejected', 'device lost', 'DEVICE_LOST',
-                'GPU queue submission failed')
+                'GPU queue submission failed', '[OcarinaReborn/MEM] system:')
 
 
 def session_from_game_log(game):
@@ -250,14 +251,18 @@ def tester_id():
         return '-'
 
 
-def settings():
+def default_settings():
     import ctypes
     try:
         de = (ctypes.windll.kernel32.GetUserDefaultUILanguage() & 0x3ff) == 0x07
     except (OSError, AttributeError):
         de = False
-    s = dict(game_dir=str(Path.home() / 'Games' / 'Ocarina Reborn'), language='de' if de else 'en-US', workers='auto',
-             ui_language='de' if de else 'en', audio='default', navi_enabled=True)
+    return dict(game_dir=str(Path.home() / 'Games' / 'Ocarina Reborn'), language='de' if de else 'en-US', workers='auto',
+                ui_language='de' if de else 'en', audio='default', navi_enabled=True)
+
+
+def settings():
+    s = default_settings()
     try:
         s.update(json.loads(SETTINGS.read_text()))
     except (OSError, ValueError):
@@ -335,17 +340,17 @@ LOW_END_ROWS = (
      'Lower memory keeps smaller caches and reserves less video memory at startup; revisiting areas may require more loading. '
      'Texture quality stays the same. An explicit texture-memory limit is respected. Restart the game.', 'low'),
     ('ram_guard', 'RAM-Schutz', 'RAM guard',
-     ['Notfall (512 MB Reserve)', 'Standard (1 GB Reserve)', 'Stark (3 GB Reserve)'], ['Emergency (512 MB reserve)', 'Standard (1 GB reserve)', 'Strong (3 GB reserve)'],
+     ['Notfall (512 MB Reserve)', 'Standard (1 GB Reserve)', 'Stark (3 GB Reserve)', 'Aus'], ['Emergency (512 MB reserve)', 'Standard (1 GB reserve)', 'Strong (3 GB reserve)', 'Off'],
      'Bei knappem RAM oder Windows-Speicher gibt das Spiel ungenutzte Texturen frei. Auch Notfall hält einen Mindestschutz aktiv; '
-     'Auto-Texturspeicher bleibt begrenzt. Stark: für lange Sitzungen, 16 GB RAM oder viele offene Programme.',
+     'Aus deaktiviert diese RAM-Reserve-Steuerung. Die normalen Textur- und VRAM-Limits bleiben bestehen. Stark: für 16 GB RAM oder viele offene Programme.',
      'When RAM or Windows commit runs short, the game releases unused textures. Emergency keeps minimum protection active; '
-     'Auto texture memory stays capped. Strong: for long sessions, 16 GB RAM or many open programs.', 'low'),
+     'Off disables this RAM-reserve control. Normal texture and VRAM limits remain. Strong: for 16 GB RAM or many open programs.', 'low'),
     ('tex_max_dim', 'Größte Texturen', 'Largest textures',
-     ['Standard (2048)', '1024 (weniger VRAM)'], ['Standard (2048)', '1024 (less VRAM)'],
+     ['Standard (2048)', '1024 (weniger VRAM)', 'Aus (keine Größenbegrenzung)'], ['Standard (2048)', '1024 (less VRAM)', 'Off (no dimension limit)'],
      'Sehr große Texturen (ab 64 MB) werden höchstens so breit geladen. 1024 spart Grafikspeicher auf Karten mit 4–6 GB; '
-     'diese Texturen werden etwas unschärfer. Spiel neu starten.',
+     'diese Texturen werden etwas unschärfer. Aus hebt das Breitenlimit auf; Speicherlimits gelten weiter. Spiel neu starten.',
      'Very large textures (64 MB and up) load at most this wide. 1024 saves video memory on 4-6 GB cards; '
-     'those textures look a little softer. Restart the game.', 'low'),
+     'those textures look a little softer. Off removes the dimension limit; memory limits still apply. Restart the game.', 'low'),
     ('low_spec', 'Low-Spec-Modus', 'Low-spec mode',
      ['Aus', 'An'], ['Off', 'On'],
      'Keine zusätzlichen Hilfsthreads für Speicherkopien: entlastet CPUs mit 4 Kernen oder weniger. Auf starken CPUs '
@@ -389,10 +394,13 @@ LOW_END_DEFAULTS = {'streaming_mode': 1, 'ram_guard': 1, 'tex_max_dim': 0, 'low_
 def low_end_env(cfg):
     """the low-end rows as the engine's switches (only what differs from the engine's own defaults)"""
     get = lambda k: int(cfg.get(k, LOW_END_DEFAULTS[k]))
-    env = {'OCR_RAM_RESERVE_MB': str((512, 1024, 3072)[min(get('ram_guard'), 2)])}
+    guard = max(0, min(get('ram_guard'), 3))
+    env = {'OCR_RAM_RESERVE_MB': str((512, 1024, 3072, 0)[guard]), 'OCR_RAM_GUARD': '0' if guard == 3 else '1'}
     env['OCR_STREAMING_MODE'] = str(max(0, min(get('streaming_mode'), 2)))
     if get('tex_max_dim') == 1:
         env['RX_VK_TEX_MAX_DIM'] = '1024'
+    elif get('tex_max_dim') == 2:
+        env['RX_VK_TEX_MAX_DIM'] = '0'
     if get('low_spec'):
         env['RX_VK_LOW_SPEC'] = '1'
     if get('vram_compact'):
@@ -1447,8 +1455,8 @@ class App(tk.Tk):
             (hy, _), (dv, _), (cy, chh), (dv2, _), (fy, fh) = layout(
                 ctx, top, [(76, 34, 0), (0, 27, 0.15), (420, 30, 1), (0, 32, 0.15), (82, 7, 0)])
             self.heading(ctx, x, hy, T('Ocarina Reborn ist bereit.', 'Ocarina Reborn is ready.'),
-                         T('Beim ersten Start werden die Shader vorbereitet (einige Minuten). Danach geht es schneller.',
-                           'The first start prepares the shaders (several minutes). Later starts are faster.'), icon='play', w=w)
+                         T('Beim ersten Start werden Shader vorbereitet. Die Dauer hängt von CPU und Grafiktreiber ab.',
+                           'The first start prepares shaders. Time depends on your CPU and graphics driver.'), icon='play', w=w)
             px = x + w
             if self.news:   # (what the newest release brought, from the site's GitHub)
                 label = T(f'Neu in {self.news[0]}', f'New in {self.news[0]}')
@@ -1848,6 +1856,34 @@ class App(tk.Tk):
         threading.Thread(target=work, daemon=True).start()
         poll()
 
+    def reset_all_settings(self, tab=0):
+        if self.busy:
+            return
+        if not messagebox.askyesno('Ocarina Reborn', T(
+                'ALLE Einstellungen zurücksetzen? Grafik, Audio, Steuerung, Schwierigkeit, Cheats, Farben und Launcher-Optionen '
+                'werden auf Standard gesetzt. Klassische Stimmen werden deaktiviert.\n\n'
+                'Spielstände, installierte Dateien und Shader-Caches bleiben erhalten. Die bisherigen Einstellungen werden gesichert.',
+                'Reset ALL settings? Graphics, audio, controls, difficulty, cheats, colours and launcher preferences will return '
+                'to defaults. Classic voices will be disabled.\n\n'
+                'Saves, installed files and shader caches stay. Your current settings will be backed up.')):
+            return
+        try:
+            fresh, backup = settings_reset.reset_all(self.cfg['game_dir'], SETTINGS, self.cfg, default_settings())
+            self.cfg = fresh
+            self.pending_settings = {}
+            self.diag = []
+            self.active_gpu = None
+            UI_LANG[0] = fresh['ui_language']
+            self.muted = False
+            self.music.play()
+            self.sync_interface_theme()
+            self.start_fairy()
+            self.settings_status = (T('Alle Einstellungen zurückgesetzt.', 'All settings reset.'), ui.GOLD)
+            log('all preferences reset; backup: ' + str(backup))
+            self.settings_page(tab, True)
+        except (OSError, ValueError) as error:
+            messagebox.showerror('Ocarina Reborn', str(error))
+
     def settings_page(self, tab=0, keep_status=False):
         """the game's settings as a PC game has them: tabs (Display, Quality, Performance, Advanced, Difficulty), each row the
         in-game menu's own key in its options file (game_settings.py), a line on what the row under the cursor does and what it
@@ -2229,20 +2265,25 @@ class App(tk.Tk):
                                                  'Point at a setting to see what it does.'), 17, 'regular', ui.SUB,
                      key='help_text', width=w - 100 * s)
             ctx.button(x, fy, 170 * s, fh, T('Zurück', 'Back'), back, icon='back', size=19)
+            all_w = ctx.text_width(T('Alles zurücksetzen', 'Reset all settings'), 19, 'semibold') + 70 * s
+            ctx.button(x + 186*s, fy, all_w, fh, T('Alles zurücksetzen', 'Reset all settings'),
+                       lambda: self.reset_all_settings(tab), icon='refresh', size=19)
             if appearance_tab:
                 ctx.text(x + w, fy + fh/2, T('Automatisch gespeichert · Kein Neustart nötig',
                          'Saved automatically · No restart needed'), 18, 'regular', ui.SUB, anchor='e')
                 return
             if amiibo_tab:
                 text, col = self.settings_status
-                ctx.text(x + 200 * s, fy + fh / 2, text, 18, 'regular', col, anchor='w',
-                         key='status', width=w - 220 * s)
+                ctx.text(x + 202*s + all_w, fy + fh / 2, text, 18, 'regular', col, anchor='w',
+                         key='status', width=w - all_w - 222*s)
                 return
             rw = ctx.text_width(T('Grafik zurücksetzen', 'Reset graphics'), 19, 'semibold') + 70 * s
-            ctx.button(x + 186 * s, fy, rw, fh, T('Grafik zurücksetzen', 'Reset graphics'), reset, icon='refresh', size=19)
+            ctx.button(x + 202 * s + all_w, fy, rw, fh, T('Grafik zurücksetzen', 'Reset graphics'), reset, icon='refresh', size=19)
             text, col = self.settings_status
             bw = 260 * s
-            ctx.text(x + w - bw - 24 * s, fy + fh / 2, text, 18, 'regular', col, anchor='e', key='status')
+            status_w = w - bw - all_w - rw - 250*s
+            if status_w > 40*s:
+                ctx.text(x + w - bw - 24*s, fy + fh/2, text, 18, 'regular', col, anchor='e', key='status', width=status_w)
             ctx.button(x + w - bw, fy, bw, fh, T('Speichern', 'Save'), save, kind='primary', icon='save', size=24,
                        weight='bold', r=14)
         self.show('play', body)
@@ -2479,10 +2520,10 @@ class App(tk.Tk):
         if self.busy or not game_exe(game).is_file():
             return messagebox.showinfo('Ocarina Reborn', T('Erst das Spiel einrichten.', 'Set up the game first.'))
         if not messagebox.askyesno('Ocarina Reborn', T(
-                'Shader und Pipelines jetzt vorbereiten? Das dauert je nach Grafikkarte einige Minuten und verhindert Ruckler, '
-                'wenn das Spiel etwas zum ersten Mal zeichnet. Sinnvoll nach einem Treiber-Update.',
-                'Prepare the shaders and pipelines now? Depending on the graphics card it takes a few minutes and prevents '
-                'stutter the first time the game draws something. Worth it after a driver update.')):
+                'Shader und bekannte Pipelines jetzt vorbereiten? Vorhandene Caches werden weiterverwendet. '
+                'Die Dauer hängt von CPU und Grafiktreiber ab. Neue Effekte können beim ersten Auftreten noch kurz ruckeln.',
+                'Prepare shaders and recorded pipelines now? Existing caches are reused. '
+                'Time depends on your CPU and graphics driver. New effects may still stutter briefly on first use.')):
             return
         win = tk.Toplevel(self, bg=BG)
         win.title('Ocarina Reborn')

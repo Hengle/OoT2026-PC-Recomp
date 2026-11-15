@@ -10,6 +10,7 @@
 #include <algorithm>
 
 #include "vk_paths.h"
+#include "ocr_prepare_policy.h"
 
 namespace mkwvk {
 
@@ -78,9 +79,12 @@ inline unsigned ocr_shader_workers(unsigned auto_n) {
         const int i = ocr_option(nullptr, "shader_threads", 0);
         return want[i < 0 ? 0 : i > 4 ? 4 : i];
     }();
-    if (!n) return auto_n;
     const unsigned cpus = std::thread::hardware_concurrency();
-    return std::max(1u, std::min(n, cpus > 1 ? cpus - 1 : 1u));
+    MEMORYSTATUSEX memory{}; memory.dwLength = sizeof memory;
+    const unsigned requested = n ? n : auto_n;
+    if (GlobalMemoryStatusEx(&memory))
+        return ocr_prepare::workers(requested, cpus, memory.ullAvailPhys, memory.ullAvailPageFile);
+    return std::max(1u, std::min(requested, cpus > 1 ? cpus - 1 : 1u));
 }
 
 } // namespace mkwvk

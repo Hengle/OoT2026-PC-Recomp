@@ -18,7 +18,7 @@ Steps and where their numbers come from (all of them from the build's own output
     analyze   the code lifted to C (lift stage; its milestones: discovery, translation, chunks, files written)
     build     the C compiled (@@plan files, @@file per finished file, @@progress)
     finish    the game folder put together, the shader list made (finish stage)
-    shaders   the shader programs prepared on this GPU (@@stage shaders / @@progress; the first 70 % are the programs)
+    shaders   the shader programs prepared on this GPU (@@stage shaders / @@progress; weighted by the renderer)
 The .nup is only read.
 """
 import argparse
@@ -120,11 +120,10 @@ class Progress:
             except ValueError:
                 return None
             if self.step == 'shaders':
-                extra = {}
-                if self.programs:   # (gpu/vk/vk_main.cpp started_up: the programs are the first 70 % of its bar)
-                    extra = dict(count=min(self.programs, int(round(min(f, 0.7) / 0.7 * self.programs))), total=self.programs,
-                                 unit='shaders')
-                self.go('shaders', f, **extra)
+                # The renderer combines translation and driver pipeline stages with
+                # dynamic weights. A fixed 70% conversion falsely showed all shaders
+                # complete while hours of pipeline work remained.
+                self.go('shaders', f)
             elif self.step == 'build' and not self.plan:
                 self.go('build', f)
         elif w[0] == '@@error':

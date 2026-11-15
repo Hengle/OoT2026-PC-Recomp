@@ -68,7 +68,9 @@ for i in range(20):
             shutil.copy2(ROOT/'engine/gpu/vk/vk_vma.cpp',root/'gpu/vk/vk_vma.cpp')
             engine_streaming.apply(root)
             engine_target_cache.apply(root)
-            self.assertEqual(target.read_bytes(),current)
+            import engine_settings_reset
+            engine_settings_reset.apply(root)
+            self.assertEqual(target.read_text(),current.decode('utf-8').replace('\r\n','\n'))
             before=target.read_bytes();engine_streaming.apply(root)
             self.assertEqual(before,target.read_bytes())
             # Git checks out tool files as CRLF on Windows, engine headers as LF.
