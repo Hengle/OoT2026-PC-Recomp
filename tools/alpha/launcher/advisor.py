@@ -253,6 +253,9 @@ def diagnose(lines, settings=None, de=True):
     """the session in plain words: [(kind, text)], kind 'ok', 'tip' or 'warn'; [] when it has no [perf] lines"""
     T = (lambda d, e: d) if de else (lambda d, e: e)
     lines = list(lines)
+    startup_advice = performance.renderer_failure_advice(performance.renderer_startup_failure(lines), de)
+    if startup_advice:
+        return startup_advice
     summary = performance.summarize(lines)
     if summary:
         return performance.describe(summary, de)

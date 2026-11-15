@@ -103,6 +103,16 @@ def log_fingerprints(game):
     return result
 
 
+def startup_evidence(path, recent):
+    """Startup errors can precede a long session of working audio and guest logic."""
+    try:
+        with Path(path).open('rb') as stream:
+            beginning = stream.read(65536).decode('utf-8', 'replace')
+    except OSError:
+        beginning = ''
+    return performance.renderer_startup_failure((beginning + '\n' + recent).splitlines())
+
+
 def start(folder, game, build, settings, hardware, env):
     folder = Path(folder)
     folder.mkdir(parents=True, exist_ok=True)
@@ -152,12 +162,18 @@ def finish(run, code, game):
     except (OSError, ValueError):
         record['settings_at_exit'] = None
     record['gpu_errors'] = performance.gpu_failures(text.splitlines())
+    record['renderer_startup_error'] = startup_evidence(Path(game) / changed[0], text) if record['runtime_log_updated'] else None
     if 'launch_error' in record:
         record['result'] = 'launch_failed'
     elif code == 0:
-        record['result'] = 'runtime_errors_on_exit' if any(record['gpu_errors'].values()) else 'normal_exit'
+        if record['renderer_startup_error']:
+            record['result'] = 'renderer_initialization_failed'
+        else:
+            record['result'] = 'runtime_errors_on_exit' if any(record['gpu_errors'].values()) else 'normal_exit'
     elif record['native_failure_recorded']:
         record['result'] = 'native_failure_recorded'
+    elif record['renderer_startup_error']:
+        record['result'] = 'renderer_initialization_failed'
     elif 'FATAL:' in text or 'CRASH:' in text:
         record['result'] = 'runtime_failure_recorded'
     else:

@@ -39,6 +39,54 @@ def hardware_signature(facts):
 HOST_MEMORY_ERROR = re.compile(r"vk: (?:batched |segment )?submit \d+ failed \(-1\)|VK_ERROR_OUT_OF_HOST_MEMORY|mem: commit .*Windows grew the page file")
 GPU_SUBMIT_ERROR = re.compile(r'vk: (?:batched |segment )?submit \d+ failed \((-2|-4)\)')
 
+# A rejected adapter alone is not a failed session: another adapter/backend may work.
+RENDERER_STARTUP_LOG = ('vk: device ', 'vk: no Vulkan 1.3 GPU', 'vk: the Vulkan loader is ',
+                        'vk: pick_device failed', 'display: no WebGPU device: the window stays black')
+
+
+def renderer_startup_failure(lines):
+    """Require the display's explicit terminal failure, not just a missing/old adapter."""
+    reason, failure, evidence = None, None, []
+    for line in lines:
+        if 'vk: no Vulkan 1.3 GPU' in line or ('vk: the Vulkan loader is ' in line and '1.3 is needed' in line):
+            reason = 'vulkan_1_3_unavailable'
+        if any(marker in line for marker in RENDERER_STARTUP_LOG):
+            evidence.append(line[:512])
+            evidence = evidence[-8:]
+        if 'display: no WebGPU device: the window stays black' in line:
+            failure = dict(reason=reason or 'no_graphics_device', evidence=list(evidence))
+        # Guest "frames presented" and audio progress do not prove GPU rendering.
+        draw = DRAW.search(line)
+        if BASE.search(line) and draw:
+            try:
+                rendered = float(draw[1])
+            except ValueError:
+                continue
+            if math.isfinite(rendered) and rendered > 0:
+                reason, failure, evidence = None, None, []
+    return failure
+
+
+def renderer_failure_advice(failure, de=True):
+    if not failure:
+        return []
+    t = lambda d, e: d if de else e
+    if failure['reason'] == 'vulkan_1_3_unavailable':
+        message = t(
+            'Dem Spiel stand kein Vulkan-1.3-Grafikgerät zur Verfügung. Deshalb kann das Bild schwarz bleiben, '
+            'obwohl Ton und Eingaben funktionieren. Prüfe Treiber und Unterstützung beim GPU- oder Laptop-Hersteller. '
+            'Niedrigere Grafikeinstellungen oder ein neuer Shader-Cache ersetzen die fehlende Vulkan-Unterstützung nicht.',
+            'No Vulkan 1.3 graphics device was available to the game. This can leave a black screen while audio and '
+            'inputs still work. Check driver support with your GPU or laptop manufacturer. '
+            'Lower graphics settings or rebuilding shaders cannot add the missing Vulkan support.')
+    else:
+        message = t(
+            'Die Grafik konnte nicht gestartet werden; das Bild bleibt schwarz, obwohl Ton weiterlaufen kann. '
+            'Schließe das Spiel und sende ein Debug-Paket, damit wir den Grafikstart prüfen können.',
+            'Graphics initialization failed; the screen stays black even though audio may continue. '
+            'Close the game and send a Debug Package so we can check the graphics startup failure.')
+    return [('warn', message)]
+
 
 def gpu_failures(lines):
     """Specific Vulkan results, independent of FPS samples or the process exit code."""
