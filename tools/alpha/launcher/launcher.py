@@ -36,6 +36,7 @@ import trace_capture  # noqa: E402
 import mods_manager  # noqa: E402
 import classic_voices  # noqa: E402
 import tunic_colors  # noqa: E402
+import interface_theme  # noqa: E402
 import amiibo  # noqa: E402
 import gamepad  # noqa: E402
 
@@ -425,6 +426,7 @@ class App(tk.Tk):
                      lightcolor=BLUE_HI, darkcolor=BLUE, thickness=10)
         self.q = queue.Queue()
         self.cfg = settings()
+        self.sync_interface_theme()
         UI_LANG[0] = self.cfg.get('ui_language', 'de')
         self.busy = False
         log(f'{INFO["name"]} {INFO["version"]} build {INFO["build_id"]} commit {INFO["commit"]}')
@@ -471,6 +473,26 @@ class App(tk.Tk):
         self.protocol('WM_DELETE_WINDOW', self.quit_app)
         self.after(50, self.route)
         self.after(600, self.start_fairy)
+
+    def sync_interface_theme(self):
+        """The game owns the shared RGB after an F1 edit; never overwrite it at launch."""
+        values = self.cfg
+        game = self.cfg.get('game_dir')
+        if game and Path(game).is_dir():
+            stored = game_settings.read(game)
+            if any(key in stored for key in interface_theme.KEYS):
+                values = stored
+        ui.apply_theme(values)
+        global BG, PANEL, PANEL2, LINE, CYAN, CYAN_MID, CYAN_DIM, BLUE, BLUE_HI, TEXT, SUB
+        BG, PANEL, PANEL2, LINE = ui.BG_BOTTOM, ui.PANEL, ui.PANEL_HI, ui.LINE
+        CYAN, CYAN_MID, CYAN_DIM = ui.LINK, ui.ACCENT_HI, ui.LINE_HI
+        BLUE, BLUE_HI, TEXT, SUB = ui.ACCENT, ui.ACCENT_HI, ui.TEXT, ui.SUB
+        self.configure(bg=ui.BG_BOTTOM)
+        ttk.Style(self).configure('Blue.Horizontal.TProgressbar', background=ui.ACCENT, troughcolor=ui.CELL,
+                                 bordercolor=ui.LINE, lightcolor=ui.ACCENT, darkcolor=ui.ACCENT)
+        if hasattr(self, 'canvas'):
+            self.canvas.configure(bg=ui.BG_BOTTOM)
+            self.stage.render()
 
     def quit_app(self):
         self.music.close()
@@ -866,9 +888,9 @@ class App(tk.Tk):
         for i, ((key, icon, text), w) in enumerate(zip(items, widths)):
             on = key == self.step
             if on:
-                ctx.panel(x, cy - ch / 2 + 4 * s, w, ch - 8 * s, r=25, fill='#3b8bff', fill2=ui.ACCENT_LO, alpha=1,
-                          border='#8cc2ff', border2=ui.ACCENT, bw=1.2, glow=ui.GLOW, gr=16, ga=0.45)
-            col = ui.TEXT if on else ui.SUB
+                ctx.panel(x, cy - ch / 2 + 4 * s, w, ch - 8 * s, r=25, fill=ui.ACCENT, fill2=ui.ACCENT_LO, alpha=1,
+                          border=ui.ACCENT_HI, border2=ui.ACCENT, bw=1.2, glow=ui.GLOW, gr=16, ga=0.45)
+            col = ui.ON_ACCENT if on else ui.SUB
             ctx.icon(x + pad + isz / 2, cy, icon, 23, col)
             ctx.text(x + pad + isz + gap, cy, text, 21, 'semibold' if on else 'regular', col, anchor='w')
             x += w
@@ -1122,7 +1144,7 @@ class App(tk.Tk):
             ctx.dropdown(wx, iy, ww_, 52 * s, [shown.get(v, v) for v in workers], shown.get(self.sel_workers, self.sel_workers),
                          lambda v: pick_workers(AUTO if v == shown[AUTO] else v), size=21)
             # the two progress rows
-            ctx.panel(x - 21 * s, py, w + 42 * s, ph, r=18, fill=ui.PANEL, fill2='#0d1d40', alpha=0.85, border=ui.LINE,
+            ctx.panel(x - 21 * s, py, w + 42 * s, ph, r=18, fill=ui.PANEL, fill2=ui.CELL, alpha=0.85, border=ui.LINE,
                       bw=1.2)
             rows = ((('layers', T('Bereit zum Bauen', 'Ready to build'),
                       T('Das Spiel wird aus deiner NUP-Datei auf diesem PC gebaut.', 'The game is built from your NUP file on this PC.')),
@@ -1329,7 +1351,7 @@ class App(tk.Tk):
                            'The game is rebuilt from the game data it already has; the .nup is not needed.'), icon='sync', w=w)
             ctx.hline(x, dv, w, ui.LINE, 0.55)
             half = (w - 24 * s) / 2 if saves else w
-            ctx.panel(x, ay, half, ah, r=16, fill=ui.PANEL, fill2='#0d1d40', alpha=0.85, border=ui.LINE)
+            ctx.panel(x, ay, half, ah, r=16, fill=ui.PANEL, fill2=ui.CELL, alpha=0.85, border=ui.LINE)
             ctx.icon_box(x + 28 * s, ay + 28 * s, 64 * s, 'layers', 28)
             ctx.text(x + 116 * s, ay + 34 * s, T('Was passiert', 'What happens'), 22, 'semibold')
             ctx.text(x + 116 * s, ay + 70 * s, T(
@@ -1339,7 +1361,7 @@ class App(tk.Tk):
                 width=half - 150 * s)
             if saves:
                 bx = x + half + 24 * s
-                ctx.panel(bx, ay, half, ah, r=16, fill=ui.PANEL, fill2='#0d1d40', alpha=0.85, border=ui.LINE)
+                ctx.panel(bx, ay, half, ah, r=16, fill=ui.PANEL, fill2=ui.CELL, alpha=0.85, border=ui.LINE)
                 ctx.icon_box(bx + 28 * s, ay + 28 * s, 64 * s, 'save', 28)
                 ctx.text(bx + 116 * s, ay + 34 * s, T('Deine Spielstände', 'Your save data'), 22, 'semibold')
                 ctx.text(bx + 116 * s, ay + 70 * s, T('Sie bleiben beim Update erhalten. Ein Backup vorher ist trotzdem sicherer.',
@@ -1394,7 +1416,7 @@ class App(tk.Tk):
             lw = (w - gap) * 0.56
             rw = w - gap - lw
             # left: what the game starts with
-            ctx.panel(x, cy, lw, chh, r=16, fill=ui.PANEL, fill2='#0d1d40', alpha=0.85, border=ui.LINE)
+            ctx.panel(x, cy, lw, chh, r=16, fill=ui.PANEL, fill2=ui.CELL, alpha=0.85, border=ui.LINE)
             ctx.text(x + 30 * s, cy + 26 * s, T('SPIELSTART', 'GAME START'), 17, 'semibold', ui.SUB)
             fields = ((('globe', T('Spielsprache (Text)', 'Game language (text)'), 'language', [n for _, n in LANGS],
                         dict(LANGS).get(self.cfg['language'], 'Deutsch')),
@@ -1413,7 +1435,7 @@ class App(tk.Tk):
                              lambda v, k=key: self.set_option(k, v), size=20)
             # right: the game's own pages
             rx = x + lw + gap
-            ctx.panel(rx, cy, rw, chh, r=16, fill=ui.PANEL, fill2='#0d1d40', alpha=0.85, border=ui.LINE)
+            ctx.panel(rx, cy, rw, chh, r=16, fill=ui.PANEL, fill2=ui.CELL, alpha=0.85, border=ui.LINE)
             ctx.text(rx + 30 * s, cy + 26 * s, T('SPIEL', 'GAME'), 17, 'semibold', ui.SUB)
             tiles = (('save', T('Spielstände', 'Save data'), T('Backups, Wiederherstellen, Import', 'Backups, restore, import'),
                       self.saves_page),
@@ -1585,7 +1607,7 @@ class App(tk.Tk):
                 ctx.button(bx, ly, bw, 36 * s, text, cmd, kind='pill', size=17)
                 bx -= 10 * s
             # the list
-            ctx.panel(x, ty, w, th, r=16, fill=ui.PANEL, fill2='#0d1d40', alpha=0.85, border=ui.LINE)
+            ctx.panel(x, ty, w, th, r=16, fill=ui.PANEL, fill2=ui.CELL, alpha=0.85, border=ui.LINE)
             cols = ((T('Zeitpunkt', 'When'), 0.0), (T('Art', 'Kind'), 0.30), (T('Grund', 'Reason'), 0.50),
                     (T('Dateien', 'Files'), 0.74), (T('Größe', 'Size'), 0.86))
             iw = w - 48 * s
@@ -1682,7 +1704,7 @@ class App(tk.Tk):
                            'ZIP. Gilt ab dem nächsten Spielstart. exefs-Patches werden nicht angewendet.',
                            'RomFS mods in the emulator layout (a folder with "romfs"). Turn them on and off, add from a folder or '
                            'a ZIP. Applies at the next start. exefs patches are not applied.'), icon='layers', w=w)
-            ctx.panel(x, ty, w, th, r=16, fill=ui.PANEL, fill2='#0d1d40', alpha=0.85, border=ui.LINE)
+            ctx.panel(x, ty, w, th, r=16, fill=ui.PANEL, fill2=ui.CELL, alpha=0.85, border=ui.LINE)
             cols = (('', 0.0), ('Mod', 0.05), (T('Dateien', 'Files'), 0.62), (T('Größe', 'Size'), 0.74), ('', 0.86))
             iw = w - 48 * s
             hh = 46 * s
@@ -1858,6 +1880,28 @@ class App(tk.Tk):
             self.settings_status = ('', ui.GOLD)
             self.ready()
 
+        def choose_interface(value=None, hex_input=False):
+            current = interface_theme.hex_color(game_settings.read(game))
+            if value is None:
+                if hex_input:
+                    value = simpledialog.askstring(T('Menüfarbe', 'Interface color'),
+                        T('HEX-Farbe, z. B. #2E7BFF:', 'Hex color, e.g. #2E7BFF:'), initialvalue=current, parent=self)
+                else:
+                    _, value = colorchooser.askcolor(color=current, title=T('Menüfarbe', 'Interface color'), parent=self)
+            if value is None:
+                return
+            try:
+                colors = interface_theme.from_hex(value)
+                game_settings.write(game, colors)
+                self.cfg.update(colors)
+                save_settings(self.cfg)
+                self.sync_interface_theme()
+                self.settings_status = (T('Menüfarbe gespeichert', 'Interface color saved'), ui.SUB)
+            except (OSError, ValueError) as e:
+                messagebox.showerror(T('Menüfarbe', 'Interface color'), str(e), parent=self)
+                return
+            self.settings_page(tab, True)
+
         def choose_tunic(hex_input=False):
             current = tunic_colors.hex_color(cur | self.pending_settings)
             if hex_input:
@@ -1990,9 +2034,12 @@ class App(tk.Tk):
             (hy, _), (tby, _), (gy, gh), (hpy, hph), (fy, fh) = layout(
                 ctx, top, [(76, 30, 0), (44, 24, 0), (330, 18, 1), (84, 16, 0.15), (60, 18, 0)])
             amiibo_tab = tab < len(game_settings.SECTIONS) and game_settings.SECTIONS[tab][1] == 'amiibo'
+            appearance_tab = tab < len(game_settings.SECTIONS) and game_settings.SECTIONS[tab][1] == 'Appearance'
             self.heading(ctx, x, hy, T('Einstellungen', 'Settings'),
                          T('Wähle eine Figur für den nächsten amiibo-Scan. Kein Neustart nötig.',
                            'Choose a figure for the next amiibo scan. No restart needed.') if amiibo_tab else
+                         T('Deine Farbe für Launcher und F1-Menü. Änderungen werden sofort gespeichert.',
+                           'Your color for the launcher and F1 menu. Changes are saved immediately.') if appearance_tab else
                          T('Dieselben Einstellungen wie im Spielmenü (F1). Sie gelten ab dem nächsten Spielstart.',
                            'The same settings as the in-game menu (F1). They apply at the next start of the game.'),
                          icon='settings', w=w)
@@ -2009,7 +2056,7 @@ class App(tk.Tk):
                     ctx.button(tx, tby, tw, 44 * s, n.upper(), lambda i=i: self.settings_page(i),
                                kind='primary' if i == tab else 'secondary', size=16, r=22)
                     tx += tw + 10 * s
-            ctx.panel(x, gy, w, gh, r=16, fill=ui.PANEL, fill2='#0d1d40', alpha=0.85, border=ui.LINE)
+            ctx.panel(x, gy, w, gh, r=16, fill=ui.PANEL, fill2=ui.CELL, alpha=0.85, border=ui.LINE)
             head = 0
             if tab == 1:   # (the presets: a line of their own at the panel's top, on Quality only; at its foot they covered the last row)
                 gpu = advisor.main_gpu(self.facts)[0] if self.facts else ''
@@ -2066,6 +2113,28 @@ class App(tk.Tk):
                            'Selection applies immediately. Normal reward limits still apply.\n'
                            'Read-only: no saving data to tags. Amiibo files are not included.'),
                          17, 'regular', ui.SUB, width=w - 60 * s)
+            if appearance_tab:
+                color = interface_theme.hex_color(cur)
+                py = gy + 24 * s
+                ctx.text(x + 28*s, py, T('Menüfarbe', 'Interface color'), 24, 'semibold', ui.TEXT)
+                ctx.text(x + w - 28*s, py + 4*s, color.upper(), 20, 'semibold', ui.SUB, anchor='ne')
+                sw = (w - 56*s - 6*10*s) / 7
+                for i, (name, value) in enumerate(interface_theme.PRESETS):
+                    sx, sy = x + 28*s + i*(sw+10*s), py + 48*s
+                    ctx.panel(sx, sy, sw, 42*s, r=10, fill=value, alpha=1,
+                              border=ui.TEXT if color == value else ui.LINE, bw=2 if color == value else 1)
+                    ctx.hot(sx, sy, sw, 42*s, lambda value=value: choose_interface(value))
+                    ctx.text(sx + sw/2, sy + 54*s, name, 15, 'semibold', ui.SUB, anchor='center')
+                ctx.button(x + 28*s, py + 132*s, 230*s, 46*s, T('Farbe auswählen', 'Choose color'),
+                           choose_interface, kind='primary', size=19)
+                ctx.button(x + 276*s, py + 132*s, 180*s, 46*s, T('HEX eingeben', 'Enter HEX'),
+                           lambda: choose_interface(hex_input=True), size=18)
+                ctx.button(x + 474*s, py + 132*s, 200*s, 46*s, T('Standardfarbe', 'Default color'),
+                           lambda: choose_interface('#2e7bff'), icon='refresh', size=18)
+                ctx.text(x + 28*s, py + 202*s,
+                         T('Auch im Spiel: F1 → Gameplay → Menüfarbe.\nDie dort gewählte Farbe übernimmt der Launcher nach dem Spiel.',
+                           'In game: F1 → Gameplay → Interface color.\nThe launcher picks up your in-game color when you return.'),
+                         18, 'regular', ui.SUB, width=w - 56*s)
             if tab < len(game_settings.SECTIONS) and game_settings.SECTIONS[tab][1] == 'Tunic':
                 color = tunic_colors.hex_color(cur | self.pending_settings)
                 py = gy + 106 * s
@@ -2107,6 +2176,10 @@ class App(tk.Tk):
                                                  'Point at a setting to see what it does.'), 17, 'regular', ui.SUB,
                      key='help_text', width=w - 100 * s)
             ctx.button(x, fy, 170 * s, fh, T('Zurück', 'Back'), back, icon='back', size=19)
+            if appearance_tab:
+                ctx.text(x + w, fy + fh/2, T('Automatisch gespeichert · Kein Neustart nötig',
+                         'Saved automatically · No restart needed'), 18, 'regular', ui.SUB, anchor='e')
+                return
             if amiibo_tab:
                 text, col = self.settings_status
                 ctx.text(x + 200 * s, fy + fh / 2, text, 18, 'regular', col, anchor='w',
@@ -2500,7 +2573,7 @@ class App(tk.Tk):
                 log(f'diagnosis failed: {e}')
             if code not in (0, None):
                 self.crash_info(code)
-            self.after(0, lambda: (self.deiconify(), None if getattr(self, 'muted', True) else self.music.play()))
+            self.after(0, lambda: (self.sync_interface_theme(), self.deiconify(), None if getattr(self, 'muted', True) else self.music.play()))
             if (self.cfg.get('reborn_auto') or {}).get('step'):   # (Reborn Auto: its next step, on the window's thread)
                 self.after(700, lambda s=auto_summary: self.reborn_auto_after(s))
         threading.Thread(target=wait, daemon=True).start()

@@ -129,6 +129,7 @@ const char* tx_framegen(int v) {
     static const char* t[] = {"Off", "Auto", "2x", "3x", "4x", "5x", "6x", "7x", "8x"};
     return t[v];
 }
+const char* tx_interface_preset(int v) { static const char* names[] = {"Reborn Blue", "Ocean", "Forest", "Violet", "Rose", "Amber", "Silver", "Custom"}; return names[std::clamp(v,0,7)]; }
 const char* tx_tunic_rgb(int v) { static char b[16]; snprintf(b, sizeof b, "%d", v); return b; }
 const char* tx_onoff(int v) { return v ? "On" : "Off"; }
 const char* tx_fps_level(int v) { return fps_stats::level_name(v); }
@@ -1284,6 +1285,14 @@ Row rows[] = {
      nullptr, false, true},
     {TAB_GAMEPLAY, "Death counter", &ocr_deaths_row, 0, 1, 1, tx_onoff,
      "How often Link's hearts reached zero since the game started, in the top left corner.", nullptr, false, true},
+    {TAB_GAMEPLAY, "Interface color", &ocr_ui_preset, 0, 7, 1, tx_interface_preset,
+     "Shared color for the launcher and F1 menu. Applies immediately and is saved automatically. The launcher adopts it when you return from the game.", nullptr, false, true},
+    {TAB_GAMEPLAY, "Interface red", &ocr_ui_r, 0, 255, 1, tx_tunic_rgb,
+     "Shared color for the launcher and F1 menu. Applies immediately and is saved automatically. The launcher adopts it when you return from the game.", nullptr, false, true},
+    {TAB_GAMEPLAY, "Interface green", &ocr_ui_g, 0, 255, 1, tx_tunic_rgb,
+     "Shared color for the launcher and F1 menu. Applies immediately and is saved automatically. The launcher adopts it when you return from the game.", nullptr, false, true},
+    {TAB_GAMEPLAY, "Interface blue", &ocr_ui_b, 0, 255, 1, tx_tunic_rgb,
+     "Shared color for the launcher and F1 menu. Applies immediately and is saved automatically. The launcher adopts it when you return from the game.", nullptr, false, true},
     {TAB_GAMEPLAY, "Menu size", &opts.menu_size, 1, 3, 1, tx_menu_size,
      "How large this menu, the FPS counter and the start-up screen are drawn.", hn_menu_size, false, true},
     {TAB_GAMEPLAY, "Game speed", &opts.realtime, 0, 1, 1, tx_speed, "How the game keeps time when it runs below 60 fps.",
@@ -1737,9 +1746,9 @@ constexpr int64_t kMarqueeStep = 150000000LL, kMarqueeRest = 1200000000LL;   // 
 int hover_tab = -1;
 int drag_row = -1;
 bool mouse_read = false;   // (the menu has read the mouse since it opened)
-bool is_slider(const Row& r) { return r.value == &ocr_tunic_r || r.value == &ocr_tunic_g || r.value == &ocr_tunic_b || r.value == &opts.sharpness || r.value == &opts.mouse_sens || r.value == &opts.gyro_sens_x || r.value == &opts.gyro_sens_y || r.value == &opts.volume || r.value == &opts.camera_speed || r.value == &opts.fov; }
+bool is_slider(const Row& r) { return r.value == &ocr_ui_r || r.value == &ocr_ui_g || r.value == &ocr_ui_b || r.value == &ocr_tunic_r || r.value == &ocr_tunic_g || r.value == &ocr_tunic_b || r.value == &opts.sharpness || r.value == &opts.mouse_sens || r.value == &opts.gyro_sens_x || r.value == &opts.gyro_sens_y || r.value == &opts.volume || r.value == &opts.camera_speed || r.value == &opts.fov; }
 /// (a scale: the arrows and a click stop at its ends; Rumble strength would go from Off to its strongest)
-bool stops_at_ends(const Row& r) { return r.value == &ocr_tunic_r || r.value == &ocr_tunic_g || r.value == &ocr_tunic_b || r.value == &opts.ultrawide || r.value == &opts.mouse_sens || r.value == &opts.rumble || r.value == &opts.gyro_sens_x || r.value == &opts.gyro_sens_y || r.value == &opts.volume || r.value == &opts.camera_speed || r.value == &opts.fov; }
+bool stops_at_ends(const Row& r) { return r.value == &ocr_ui_r || r.value == &ocr_ui_g || r.value == &ocr_ui_b || r.value == &ocr_tunic_r || r.value == &ocr_tunic_g || r.value == &ocr_tunic_b || r.value == &opts.ultrawide || r.value == &opts.mouse_sens || r.value == &opts.rumble || r.value == &opts.gyro_sens_x || r.value == &opts.gyro_sens_y || r.value == &opts.volume || r.value == &opts.camera_speed || r.value == &opts.fov; }
 /// (the ini's Rumble strength on the menu's steps: 0 to 150, the nearest 25)
 int rumble_step(int v) { return (std::min(std::max(v, 0), 150) + 12) / 25 * 25; }
 // (hookshot) A run's environment over a saved row (RX_VK_PACE=1, HOS_OUTPUT_RES=...): for that run only. save() writes the
@@ -2412,6 +2421,8 @@ void set_row(Row& r, int v, int dir, bool keep = true) {
         samplers_changed();
     if (r.value == &opts.dlss || r.value == &opts.resolution || r.value == &opts.dlss_model)
         temporal_reset_failure();
+    if (r.value == &ocr_ui_preset) interface_theme::select_preset(ocr_ui_preset);
+    ocr_ui_preset = interface_theme::preset_index();
     prompts_at_once(r);   // (hookshot)
     {   // (a row that takes a restart, or a preset that sets one: asked again at the next close)
         int now[mr::kMax];
@@ -2696,7 +2707,7 @@ void help_box(ui::Ctx& c, float x0, float x1, float y0, const char* title, const
     if (title) ui::text(c, c.f.heading, 21 * s, ImVec2(x0 + 24 * s, y), ui::kInk, title), y += 32 * s;
     if (after_restart) {   // (this row's change applies at the next start: said here, not in the row, where it would cut the name)
         ui::diamond(c, ImVec2(x0 + 29 * s, y + 10 * s), 4 * s, ui::kGoldHi);
-        ui::text_mid(c, c.f.strong, 16 * s, x0 + 42 * s, y + 10 * s, ui::kGoldHi, "Takes effect after a restart");
+        ui::text_mid(c, c.f.strong, 16 * s, x0 + 42 * s, y + 10 * s, ui::kAccent, "Takes effect after a restart");
         y += note;
     }
     if (help) ui::para(c, c.f.body, 18 * s, ImVec2(x0 + 24 * s, y), ui::kInk, help, w);
@@ -2709,7 +2720,7 @@ void help_box(ui::Ctx& c, float x0, float x1, float y0, const char* title, const
         y += body + 20 * s;
         c.d->AddLine(ImVec2(x0 + 24 * s, y), ImVec2(x1 - 24 * s, y), ui::alpha(ui::kEdge, 0.8f), std::max(1.0f, s));
         ui::diamond(c, ImVec2(x0 + 29 * s, y + 20 * s), 4 * s, ui::kGoldHi);
-        ui::text_mid(c, c.f.strong, 16 * s, x0 + 42 * s, y + 20 * s, ui::kGoldHi, gold_line);
+        ui::text_mid(c, c.f.strong, 16 * s, x0 + 42 * s, y + 20 * s, ui::kAccent, gold_line);
     }
     c.d->PopClipRect();
 }
@@ -2724,17 +2735,16 @@ void columns(const ui::Ctx& c, float* x0, float* x1, float* hx0, float* hx1, boo
     if (*narrow) *hx0 = *x0 + 20 * s, *hx1 = *x1 - 20 * s;
 }
 void column(ui::Ctx& c, float x0, float x1, float top) {
-    const float s = c.s;
-    c.d->AddRectFilled(ImVec2(x0, top), ImVec2(x1, c.h), ui::kColumn);
-    c.d->AddLine(ImVec2(x0, top), ImVec2(x0, c.h), ui::alpha(ui::kEdge, 1), 2 * s);
-    c.d->AddLine(ImVec2(x1, top), ImVec2(x1, c.h), ui::alpha(ui::kEdge, 1), 2 * s);
+    const ImVec2 a(x0,top), b(x1,c.h-c.safe);
+    c.d->AddRectFilled(a,b,ui::kColumn,12*c.s);
+    c.d->AddRect(a,b,ui::kEdge,12*c.s,0,std::max(1.0f,c.s));
 }
 /// A row's name cell, selected or not, its tag (After restart) at its right end
 /// A row's name cell, selected or not; pending: a change that applies after a restart, a small gold diamond at its right end
 /// (the help says it in words)
 void name_cell(ui::Ctx& c, ImVec2 a, ImVec2 b, const char* name, bool sel, bool pending = false, float px = 18.5f) {
     const float s = c.s, mid = (a.y + b.y) * 0.5f;
-    c.d->AddRectFilled(a, b, sel ? ui::kCellNameSel : ui::kCellName);
+    c.d->AddRectFilled(a, b, sel ? ui::kCellNameSel : ui::kCellName, 6*s);
     c.d->AddRect(a, b, ui::kEdge, 0, std::max(1.0f, s));
     if (sel) c.d->AddRectFilled(a, ImVec2(a.x + 4 * s, b.y), ui::kGoldHi);
     float room = b.x - a.x - 36 * s;
@@ -2915,7 +2925,7 @@ void draw_debug_rows(ui::Ctx& c, float cx0, float cx1, float top, float bottom, 
     auto heading = [&](float x0, float x1, int row, const char* title) {   // (as the list's Developer heading: gold, a rule after)
         const float y = top + (row - first) * pitch, ty = y + rh * 0.62f, tw = ui::size_of(c.f.heading, 19 * s, title).x;
         if (y + pitch <= top || y >= bottom) return;
-        ui::text_mid(c, c.f.heading, 19 * s, x0 + 2 * s, ty, ui::kGoldHi, title);
+        ui::text_mid(c, c.f.heading, 19 * s, x0 + 2 * s, ty, ui::kAccent, title);
         if (x0 + tw + 16 * s < x1) c.d->AddLine(ImVec2(x0 + tw + 16 * s, ty), ImVec2(x1, ty), ui::alpha(ui::kEdge, 0.9f), std::max(1.0f, s));
     };
     c.d->PushClipRect(ImVec2(cx0, top), ImVec2(cx1, std::max(top, bottom)), true);
@@ -3030,6 +3040,10 @@ inline bool cheat_is_toggle(int c) { return c == 0 || c == 1 || c == 7; }
 /// Draws a row's value cell (slider, toggle, choice, or subpage arrow), shared between the full menu and tuning bar
 void row_value_cell(ui::Ctx& c, const Row& r, ImVec2 va, ImVec2 vb, bool selected, float* t0, float* t1) {
     const float s = c.s, mid = (va.y + vb.y) * 0.5f;
+    if (r.value == &ocr_ui_preset) {
+        c.d->AddRectFilled(ImVec2(va.x+4*s,va.y+9*s),ImVec2(va.x+27*s,vb.y-9*s),ui::rgba(ocr_ui_r,ocr_ui_g,ocr_ui_b),4*s);
+        va.x += 32*s;
+    }
     if (r.value == &ocr_tunic) {
         c.d->AddRectFilled(ImVec2(va.x + 4*s, va.y + 9*s), ImVec2(va.x + 27*s, vb.y - 9*s),
             ui::rgba(ocr_tunic_r, ocr_tunic_g, ocr_tunic_b), 3*s);
@@ -3092,10 +3106,9 @@ void draw_options(ui::Ctx& c) {
     for (int i = 0; i < TAB_COUNT; i++) {
         const bool shown = i == (cur_tab == TAB_MOTION ? TAB_CONTROLS : cur_tab);   // (the Motion page: under Controls)
         if (shown || i == hover_tab) {
-            c.d->AddRectFilled(ImVec2(x, 0), ImVec2(x + tw[i], hh - 3 * s), shown ? ui::kTabInset : ui::alpha(ui::kTabInset, 0.35f));
+            c.d->AddRectFilled(ImVec2(x + 4*s, 8*s), ImVec2(x + tw[i] - 4*s, hh - 8*s), shown ? ui::kTabInset : ui::alpha(ui::kTabInset, 0.35f), 12*s);
             if (shown) {
-                c.d->AddLine(ImVec2(x + 1, 0), ImVec2(x + 1, hh - 3 * s), ui::rgba(0, 180, 255), std::max(1.0f, s));
-                c.d->AddLine(ImVec2(x + tw[i] - 1, 0), ImVec2(x + tw[i] - 1, hh - 3 * s), ui::rgba(0, 180, 255), std::max(1.0f, s));
+                c.d->AddLine(ImVec2(x + 18*s, hh - 8*s), ImVec2(x + tw[i] - 18*s, hh - 8*s), ui::kAccent, std::max(1.0f, s));
             }
         }
         ui::text_mid(c, c.f.heading, 23 * s, x + 28 * s, ty, shown ? ui::kInkBright : ui::kBannerInk, tab_titles[i]);
@@ -3106,7 +3119,7 @@ void draw_options(ui::Ctx& c) {
         const float room = (c.w - total) * 0.5f - 60 * s - c.safe, x0 = c.safe, tri = 30 * s;
         if (room > tri + 40 * s) {
             const ImVec2 centre(x0 + tri * 0.5f, ty);
-            c.d->AddCircle(centre, tri * 0.42f, ui::rgba(114, 215, 234), 24, 2 * s);
+            c.d->AddCircle(centre, tri * 0.42f, ui::kAccent, 24, 2 * s);
             c.d->AddLine(ImVec2(x0 + tri * 0.25f, ty), ImVec2(x0 + tri * 0.75f, ty), ui::kInkBright, 2 * s);
             const float tx = x0 + tri + 12 * s, text_room = room - tri - 12 * s;
             const auto width = [&](float p) { return ui::size_of(c.f.heading, p, "OCARINA REBORN").x; };
@@ -3184,7 +3197,7 @@ void draw_options(ui::Ctx& c) {
         const Row& r = rows[tab_row_to_global(cur_tab, i)];
         if (r.heading) {   // (a section's title: gold, a rule after it to the column's end; no cell, nothing to click)
             const float ty = y + rh * 0.62f, tw = ui::size_of(c.f.heading, 19 * s, r.name).x;
-            ui::text_mid(c, c.f.heading, 19 * s, rx0 + 2 * s, ty, ui::kGoldHi, r.name);
+            ui::text_mid(c, c.f.heading, 19 * s, rx0 + 2 * s, ty, ui::kAccent, r.name);
             c.d->AddLine(ImVec2(rx0 + tw + 16 * s, ty), ImVec2(rx1, ty), ui::alpha(ui::kEdge, 0.9f), std::max(1.0f, s));
             continue;
         }
@@ -3223,7 +3236,7 @@ void draw_tune_bar(ui::Ctx& c) {
     // Header strip inside card: Tab Name and restart status
     const char* cur_name = cur_tab == TAB_MOTION ? "Motion" : tab_title(cur_tab);
     const float header_y = by0 + 13 * s;
-    ui::text_mid(c, c.f.heading, 14 * s, bx0 + 16 * s, header_y, ui::kGoldHi, cur_name);
+    ui::text_mid(c, c.f.heading, 14 * s, bx0 + 16 * s, header_y, ui::kAccent, cur_name);
 
     char tab_hint[32];
     if (c.pad) snprintf(tab_hint, sizeof tab_hint, " (LB / RB)");
@@ -3233,7 +3246,7 @@ void draw_tune_bar(ui::Ctx& c) {
 
     if (restart_changed(r)) {
         ui::diamond(c, ImVec2(bx1 - 20 * s, header_y), 4 * s, ui::kGoldHi);
-        ui::text_mid_centre(c, c.f.body, 12 * s, bx1 - 68 * s, header_y, ui::kGoldHi, "Restart needed");
+        ui::text_mid_centre(c, c.f.body, 12 * s, bx1 - 68 * s, header_y, ui::kAccent, "Restart needed");
     }
 
     // Active Row widget: Name cell and Value cell
@@ -3475,7 +3488,7 @@ void draw_inventory(ui::Ctx& c) {
         const float ly = a.y + 37 * s;
         if (editing) {   // (the amount being changed: its arrows, gold)
             ui::triangle(c, ImVec2(a.x + 18 * s, ly), 8 * s, 0, ui::kGoldHi);
-            ui::text_mid(c, c.f.strong, 15 * s, a.x + 28 * s, ly, ui::kGoldHi, amount);
+            ui::text_mid(c, c.f.strong, 15 * s, a.x + 28 * s, ly, ui::kAccent, amount);
             ui::triangle(c, ImVec2(a.x + 38 * s + ui::size_of(c.f.strong, 15 * s, amount).x, ly), 8 * s, 1, ui::kGoldHi);
         } else {
             ui::text_mid(c, c.f.body, 15 * s, a.x + 13 * s, ly, owned ? ui::kAccent : ui::kDim, amount);
@@ -3711,7 +3724,10 @@ float menu_ox = 0;   // (the menu's column's left edge in the window: more than 
 /// middle (a window of 16:9 or narrower: the whole of it). The pages draw from 0 as on 16:9; their vertices and clip
 /// rectangles are moved over after, and menu_tick moves the mouse back by menu_ox before it tests the hits
 void draw_menu(ui::Ctx& c) {
-    if (!(tune_mode && page == 0)) c.d->AddRectFilled(ImVec2(0, 0), ImVec2(c.w, c.h), ui::rgba(8, 5, 2, ui::kDimAlpha));   // (the game behind, dimmed)
+    ui::update_theme();
+    ocr_ui_preset = interface_theme::preset_index();
+    c.f.heading = c.f.strong; // Launcher-like sans headings, including translated glyphs.
+    if (!(tune_mode && page == 0)) c.d->AddRectFilled(ImVec2(0, 0), ImVec2(c.w, c.h), ui::rgba(3, 7, 15, ui::kDimAlpha));   // (the game behind, dimmed)
     ui::Ctx k = c;
     k.w = std::min(c.w, std::floor(c.h * 16.0f / 9.0f + 0.5f));
     menu_ox = std::floor((c.w - k.w) * 0.5f);
@@ -5220,6 +5236,7 @@ void menu_record_image(VkCommandBuffer cmd, VkImage image, VkImageView view, uin
     const bool rupees = !photo && ocr_counters && started && ocr_rupees.load(std::memory_order_relaxed) >= 0;   // (Classic counters)
     if (!open && !fps && !timer && !deaths && !rupees) return;
     if (!ui::begin(w, h)) return;
+    ease_step = 1; // Static UI snapshots show the selected row immediately.
     ui::Ctx c = ui_ctx(w, h);
     if (open) draw_menu(c);
     if (fps) draw_fps(c, open);

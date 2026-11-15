@@ -17,6 +17,7 @@ import tkinter.font as tkfont
 from ctypes import wintypes
 
 import numpy as np
+import interface_theme
 
 # ---- the palette (the design: dark navy, blue glass panels, a bright blue accent)
 BG_TOP, BG_BOTTOM = '#0d1b36', '#081226'
@@ -29,6 +30,13 @@ GLOW = '#2f7bff'
 TEXT, SUB, MUTED = '#f2f6ff', '#a9bbdb', '#7d92ba'
 LINK = '#86d0ff'
 GOLD, RED, GREEN = '#f4c430', '#ff8a80', '#3ccf6e'
+
+
+def apply_theme(values):
+    globals().update(interface_theme.palette(interface_theme.rgb(values)))
+
+
+apply_theme({})
 
 ICON = 'Segoe Fluent Icons'
 GLYPH = dict(download='', folder='', folder_open='', cube='', play='', globe='',
@@ -57,7 +65,7 @@ class Painter:
 
     @classmethod
     def background(cls, w, h, cache={}):
-        key = (w, h)
+        key = (w, h, BG_TOP, BG_BOTTOM, GLOW)
         if key not in cache:
             cache.clear()
             y = np.linspace(0, 1, h, dtype=np.float32)[:, None, None]
@@ -67,7 +75,7 @@ class Painter:
             yy = np.linspace(0, 1, h, dtype=np.float32)[:, None]
             xx = np.linspace(-1, 1, w, dtype=np.float32)[None, :]
             light = np.exp(-((xx / 0.9) ** 2 + ((yy - 0.05) / 0.55) ** 2) * 1.6)
-            a += light[..., None] * np.array([10, 26, 60], np.float32)
+            a += light[..., None] * rgb(GLOW) * .16
             vign = np.clip((np.abs(xx) - 0.55) / 0.45, 0, 1) ** 2 * 0.35
             a *= (1 - vign)[..., None]
             cache[key] = a
@@ -201,8 +209,8 @@ class Ctx:
 
         def look(p_ctx, hover):
             if kind == 'primary':
-                p_ctx.panel(x, y, w, h, r=r, fill=ACCENT_HI if hover else '#3b8bff', fill2=ACCENT_LO, alpha=1.0,
-                            border='#8cc2ff', border2=ACCENT, bw=1.5, glow=GLOW, gr=18, ga=0.55 if hover else 0.38)
+                p_ctx.panel(x, y, w, h, r=r, fill=ACCENT, fill2=ACCENT_LO, alpha=1.0,
+                            border=ACCENT_HI, border2=ACCENT, bw=1.5, glow=GLOW, gr=18, ga=0.55 if hover else 0.38)
             elif kind == 'pill':
                 p_ctx.panel(x, y, w, h, r=h / s / 2, fill=PANEL_HI if hover else PANEL, alpha=0.95,
                             border=LINE_HI if hover else LINE, balpha=1.0)
@@ -213,7 +221,7 @@ class Ctx:
                 p_ctx.panel(x, y, w, h, r=r, fill=PANEL_HI if hover else PANEL, fill2=None, alpha=0.95,
                             border=LINE_HI if hover else LINE, balpha=1.0, glow=GLOW if hover else None, gr=10, ga=0.18)
         look(self, False)
-        fg = color or (LINK if kind == 'pill' else TEXT if kind != 'quiet' else SUB)
+        fg = color or (ON_ACCENT if kind == 'primary' else LINK if kind == 'pill' else TEXT if kind != 'quiet' else SUB)
         if icon:
             tw = self.text_width(text, size, weight)
             iw = size * 1.15 * s
@@ -463,7 +471,7 @@ class Stage:
         font = (self.f_text, -round(size * s))
         rows = []
         for i, v in enumerate(values):
-            r = cv.create_rectangle(0, i * rh, w, (i + 1) * rh, fill=ACCENT if v == current else PANEL, outline='')
+            r = cv.create_rectangle(0, i * rh, w, (i + 1) * rh, fill=PANEL_HI if v == current else PANEL, outline='')
             cv.create_text(round(20 * s), i * rh + rh / 2, text=v, font=font, fill=TEXT, anchor='w')
             rows.append(r)
         cv.configure(scrollregion=(0, 0, w, n * rh))
@@ -472,9 +480,9 @@ class Stage:
         def move(e):
             i = int(cv.canvasy(e.y) // rh)
             if hov[0] is not None and hov[0] != i and 0 <= hov[0] < n:
-                cv.itemconfig(rows[hov[0]], fill=ACCENT if values[hov[0]] == current else PANEL)
+                cv.itemconfig(rows[hov[0]], fill=PANEL_HI if values[hov[0]] == current else PANEL)
             if 0 <= i < n:
-                cv.itemconfig(rows[i], fill=ACCENT_HI)
+                cv.itemconfig(rows[i], fill=PANEL_HI)
             hov[0] = i
 
         def click(e):

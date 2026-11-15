@@ -2161,6 +2161,11 @@ inline constexpr Entry kfr[] = {
     {"your home folder", "votre dossier personnel"},
 };
 inline constexpr Entry kde[] = {
+    {"Interface color", "Menüfarbe"},
+    {"Interface red", "Menüfarbe: Rot"},
+    {"Interface green", "Menüfarbe: Grün"},
+    {"Interface blue", "Menüfarbe: Blau"},
+    {"Shared color for the launcher and F1 menu. Applies immediately and is saved automatically. The launcher adopts it when you return from the game.", "Gemeinsame Farbe für Launcher und F1-Menü. Gilt sofort und wird automatisch gespeichert. Der Launcher übernimmt sie nach dem Spiel."},
     {" (game's)", " (des Spiels)"},
     {" (native)", " (nativ)"},
     {" (not connected)", " (nicht verbunden)"},
@@ -6993,7 +6998,7 @@ inline constexpr Lang kLangs[] = {
     {"es-419", "Español (Latinoamérica)", kes_419, 536},
     {"es", "Español (España)", kes, 538},
     {"fr", "Français", kfr, 533},
-    {"de", "Deutsch", kde, 528},
+    {"de", "Deutsch", kde, 533},
     {"it", "Italiano", kit, 531},
     {"nl", "Nederlands", knl, 522},
     {"pl", "Polski", kpl, 531},
