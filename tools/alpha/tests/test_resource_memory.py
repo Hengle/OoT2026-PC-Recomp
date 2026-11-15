@@ -105,6 +105,11 @@ int main() {
     CHECK(idle_limit(256*MB,8*1024*MB,1000*MB,1024*MB)==32*MB);
     CHECK(idle_limit(16*MB,0,0,1024*MB)==16*MB);
     CHECK(idle_limit(256*MB,8*1024*MB,8*1024*MB,1024*MB)==256*MB);
+    CHECK(eviction_target(4096*MB,1536*MB,true,false)==4032*MB);
+    CHECK(eviction_target(4096*MB,4080*MB,true,false)==4080*MB);
+    CHECK(eviction_target(32*MB,16*MB,true,false)==16*MB);
+    CHECK(eviction_target(4096*MB,1536*MB,true,true)==1344*MB);
+    CHECK(eviction_target(4096*MB,2048*MB,false,false)==1792*MB);
     IdleReserve reserve;
     CHECK(reserve.update(256*MB,0)==256*MB);
     CHECK(reserve.update(32*MB,100)==32*MB);

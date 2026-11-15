@@ -19,6 +19,12 @@ inline uint64_t idle_limit(uint64_t normal, uint64_t commit_free, uint64_t ram_f
         return std::min(normal, 64 * MB);
     return normal;
 }
+inline uint64_t eviction_target(uint64_t total, uint64_t budget, bool host_pressure, bool urgent) {
+    if (!host_pressure || urgent) return budget / 8 * 7;
+    // At most 64 MiB per pass, plus the final indivisible texture. Avoid the extra
+    // 1/8 undershoot when a pressure target already describes the desired reduction.
+    return std::max(budget, total - std::min(total, 64 * MB));
+}
 struct IdleReserve {
     uint64_t limit = UINT64_MAX, recover_at = 0;
     uint64_t update(uint64_t candidate, uint64_t now_ms) {

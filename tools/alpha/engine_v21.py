@@ -443,7 +443,8 @@ def apply_mem(H):
 # (A HOLD, not a cut for one pass: the guard of 1.0.1 lowered the budget for the pass it ran in only; the next pass had the
 # normal budget again, the textures came back, the guard cut again. Two players' sessions (RX 9060 XT 01:15-01:32: 97 cuts,
 # 32 of 42 windows with frames over 100 ms right after one; RX 7900 XTX 04:52) stuttered from that seesaw)
-RAM_GUARD = r'''#ifdef _WIN32
+RAM_GUARD = r'''bool ocr_ram_limited = false, ocr_ram_urgent = false;
+#ifdef _WIN32
     {   // (Ocarina Reborn) RAM guard: engine_v21.py RAM_GUARD
         static const uint64_t reserve = (uint64_t)(getenv("OCR_RAM_RESERVE_MB") ? std::max(512, atoi(getenv("OCR_RAM_RESERVE_MB"))) : 1024) << 20;
         static uint64_t held = 0;   // (0: no hold)
@@ -471,7 +472,8 @@ RAM_GUARD = r'''#ifdef _WIN32
                 logf("[OcarinaReborn/MEM] system: commit free %llu MB, RAM free %llu MB, reserve %llu MB",
                      (unsigned long long)(ms.ullAvailPageFile >> 20), (unsigned long long)(ms.ullAvailPhys >> 20),
                      (unsigned long long)(reserve >> 20));
-            const uint64_t floor = std::min<uint64_t>(1536ull << 20, budget), step = 256ull << 20;
+            uint64_t floor = std::min<uint64_t>(1536ull << 20, budget);
+            const uint64_t step = 256ull << 20;
             // (and physical RAM: with commit to spare, Windows still pages the game out when RAM runs short, and the whole
             // game stops 1-3 s at a time: RTX 4070 SUPER, 31 GB RAM, private bytes 17 -> 29 GB over a session, dozens of
             // 2-3 s freezes, the game reading no controller meanwhile, 2026-11-12. Under 1.5 GB of RAM free counts as short)
@@ -487,16 +489,30 @@ RAM_GUARD = r'''#ifdef _WIN32
             const uint64_t short_vram = vknown && vused > vcap ? vused - vcap : 0;
             const bool roomy = ms.ullAvailPageFile > reserve + (1024ull << 20) && ms.ullAvailPhys > phys_reserve + (1024ull << 20) &&
                                (!vknown || vused < vallowed / 100 * 85);
-            if (short_commit || short_phys || short_vram) {   // (short: the hold one step lower, at most the shortfall)
+            const bool critical = ms.ullAvailPageFile < (256ull << 20) || ms.ullAvailPhys < (512ull << 20) ||
+                                  (vknown && vused > vallowed / 100 * 97);
+            ocr_ram_urgent = critical || short_vram;
+            // Do not collapse a growing scene's cache to the loading screen's footprint.
+            // Keep the recently used working set during ordinary host pressure. The
+            // original emergency behavior and the configured/hardware ceiling still win.
+            if (!ocr_ram_urgent && ms.ullAvailPhys >= (1024ull << 20) && ms.ullAvailPageFile >= (512ull << 20)) {
+                uint64_t recent = 0;
+                for (const auto& kv : textures) {
+                    const auto& tex = *kv.second;
+                    if (frame_no - tex.last_frame < 120) recent += tex.bytes + tex.pad;
+                }
+                floor = std::max(floor, std::min(budget, recent));
+                if (held) held = std::max(held, floor);
+            }
+            if (short_commit || short_phys || short_vram) {   // trim only memory that can actually be reclaimed
                 const uint64_t short_by = std::max(std::max(short_commit, short_phys), short_vram), from = held ? held : std::min(budget, total_bytes);
                 const uint64_t lower = std::max(from > short_by ? from - short_by : 0, from > step ? from - step : 0);
                 pressure_at = now;
                 // Give retired images/driver accounting time to catch up. High FPS must not squeeze faster.
                 // At critical pressure retain the old prompt response; recovery always needs five quiet seconds.
-                const bool critical = ms.ullAvailPageFile < (256ull << 20) || ms.ullAvailPhys < (512ull << 20) ||
-                                      (vknown && vused > vallowed / 100 * 97);
                 const uint64_t was = held;
-                if (!held || critical || now - changed_at >= std::chrono::milliseconds(500)) {
+                if ((held || total_bytes > floor || critical) &&
+                    (!held || critical || now - changed_at >= std::chrono::milliseconds(500))) {
                     held = std::max(lower, floor);
                     changed_at = now;
                 }
@@ -515,7 +531,10 @@ RAM_GUARD = r'''#ifdef _WIN32
                          (unsigned long long)(ms.ullAvailPageFile >> 20));
                 }
             }
-            if (held) budget = std::min(budget, held);
+            if (held) {
+                ocr_ram_limited = held < budget;
+                budget = std::min(budget, held);
+            }
         }
     }
 #endif

@@ -80,7 +80,7 @@ class NativeMemoryGuard(unittest.TestCase):
             built = subprocess.run([compiler, '-std=c++17', '-O2', '-Wall', '-Wextra', '-Werror',
                                     '-static', str(tmp / 'test.cpp'), '-o', str(exe)], capture_output=True, text=True)
             self.assertEqual(built.returncode, 0, built.stdout + built.stderr)
-            for case in ['off-cap', 'off-commit', 'off-ram', 'manual', 'healthy', 'unavailable', 'floor', 'recovery', 'rate', 'critical']:
+            for case in ['off-cap', 'off-commit', 'off-ram', 'manual', 'healthy', 'unavailable', 'floor', 'recovery', 'rate', 'critical', 'loading', 'working-set', 'working-set-emergency', 'working-set-tight']:
                 with self.subTest(case=case):
                     env = dict(os.environ)
                     env.pop('RX_VK_TEX_MAX_MB', None)
@@ -97,6 +97,8 @@ HARNESS = r'''
 #include <cstring>
 #include <cassert>
 #include <chrono>
+#include <map>
+#include <memory>
 struct MEMORYSTATUSEX {
     unsigned dwLength;
     uint64_t ullTotalPhys, ullAvailPhys, ullAvailPageFile;
@@ -105,6 +107,8 @@ constexpr uint64_t MB = 1ull << 20, GB = 1ull << 30;
 static MEMORYSTATUSEX memory{0, 32*GB, 8*GB, 12*GB};
 static bool available = true;
 static int manual_gb = 0;
+struct Texture { uint64_t last_frame, bytes, pad; };
+static std::map<int, std::unique_ptr<Texture>> textures;
 static int GlobalMemoryStatusEx(MEMORYSTATUSEX* out) { *out = memory; return available; }
 static int ocr_texture_budget_gb() { return manual_gb; }
 static bool vram_usage(uint64_t* used, uint64_t* allowed) { *used = 14*GB; *allowed = 24*GB; return true; }
@@ -113,6 +117,7 @@ static uint64_t clock_ms = 10000;
 static auto fake_now() { return std::chrono::steady_clock::time_point(std::chrono::milliseconds(clock_ms)); }
 static uint64_t run(uint64_t budget, uint64_t total_bytes, uint64_t frame_no) {
 /* GUARD */
+    (void)ocr_ram_limited; (void)ocr_ram_urgent;
     return budget;
 }
 int main(int argc, char** argv) {
@@ -169,6 +174,36 @@ int main(int argc, char** argv) {
         auto held = run(8*GB, 6*GB, 10);
         ++clock_ms;
         assert(run(8*GB, 6*GB, 20) == held - 256*MB); // no cooldown at imminent exhaustion
+    } else if (!strcmp(test, "loading")) {
+        memory.ullAvailPageFile = 512*MB;
+        // Repeated pressure while loading must not latch the cache to 1.5 GB.
+        for (unsigned i=0; i<20; ++i) {
+            clock_ms += 500;
+            assert(run(6*GB, 150*MB, i*30+10) == 6*GB);
+        }
+    } else if (!strcmp(test, "working-set")) {
+        memory.ullAvailPageFile = 512*MB;
+        textures[1] = std::make_unique<Texture>(Texture{1, 3500*MB, 0});
+        textures[2] = std::make_unique<Texture>(Texture{1, 100*MB, 0});
+        const auto held = run(6*GB, 4*GB, 10);
+        assert(held >= 3600*MB && held < 4*GB);
+        clock_ms += 500;
+        assert(run(6*GB, 4*GB, 20) >= 3600*MB);
+        // Newly visible textures raise the floor, without exceeding manual budget.
+        textures[1]->bytes = 5*GB;
+        assert(run(6*GB, 6*GB, 30) >= 5*GB);
+        assert(run(2*GB, 6*GB, 40) <= 2*GB);
+        // An area left behind loses its recent-use protection.
+        clock_ms += 500;
+        assert(run(6*GB, 6*GB, 500) < 5*GB+100*MB);
+    } else if (!strcmp(test, "working-set-emergency")) {
+        memory.ullAvailPageFile = 128*MB;
+        textures[1] = std::make_unique<Texture>(Texture{1, 6*GB, 0});
+        assert(run(8*GB, 6*GB, 10) == 6*GB-256*MB);
+    } else if (!strcmp(test, "working-set-tight")) {
+        memory.ullAvailPhys = 700*MB;
+        textures[1] = std::make_unique<Texture>(Texture{1, 6*GB, 0});
+        assert(run(8*GB, 6*GB, 10) == 6*GB-256*MB);
     } else return 2;
     puts("memory policy OK");
 }

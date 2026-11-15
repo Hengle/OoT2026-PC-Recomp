@@ -108,4 +108,7 @@ void cap_buf_free(''')
 ''')
     text = replace_once(text, 'kept + it->size > keep || stale',
                         'kept + it->size > std::min(keep, std::max(kArena, ocr_idle_cap)) || stale')
+    text = replace_once(text, '    for (auto& [last, tex] : order) {\n        // (total_bytes can have drifted', '    // Host-pressure eviction must not retire gigabytes in one render frame.\n    // Dead targets still use the existing sweep path; GPU lifetime/flush guards stay below.\n    const uint64_t ocr_target = ocr_resources::eviction_target(total_bytes, budget, ocr_ram_limited, ocr_ram_urgent);\n    for (auto& [last, tex] : order) {\n        // (total_bytes can have drifted')
+    text = replace_once(text, 'total_bytes - pending_bytes <= budget / 8 * 7',
+                        'total_bytes - pending_bytes <= ocr_target')
     texture.write_text(text, encoding='utf-8', newline='\n')
