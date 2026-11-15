@@ -40,14 +40,15 @@ int main() {
         "2560x1080,3440x1440,3440x1440,1080x1920,320x240,7680x4320,5120x1440;3840x1600 2560x1440,junk,720x576");
     assert(modes.size() == 21);   // ("junk" skipped)
     const std::vector<Size> v = offered(modes);
-    // (each side down to 8: 1366x768 1360x768, 1600x900 1600x896; the portrait one narrower than 5:4, 320x240 too small,
+    // (each side down to 8: 1366x768 1360x768, 1600x900 1600x896; portrait is valid, 320x240 too small,
     // 7680x4320 more than 5120x2880's pixels; each once, by width then height)
     const std::string got = sizes(v);
     std::printf("offered: %s\n", got.c_str());
-    assert(got == "640x480 720x576 800x600 1024x768 1280x720 1280x1024 1360x768 1600x896 1680x1048 1920x1080 1920x1200 "
+    assert(got == "640x480 720x576 800x600 1024x768 1080x1920 1280x720 1280x1024 1360x768 1600x896 1680x1048 1920x1080 1920x1200 "
                   "2560x1080 2560x1440 3440x1440 3840x1600 5120x1440");
     // (the shapes as screens are sold; a little off after the rounding is still the shape)
     const struct { unsigned w, h; const char* name; } named[] = {
+        {720, 1280, "9:16"}, {1080, 1920, "9:16"}, {1440, 2560, "9:16"}, {2160, 3840, "9:16"},
         {1920, 1080, "16:9"}, {1360, 768, "16:9"}, {1600, 896, "16:9"}, {2048, 1152, "16:9"}, {5120, 2880, "16:9"},
         {2560, 1080, "21:9"}, {3440, 1440, "21:9"}, {3840, 1600, "21:9"}, {5120, 2160, "21:9"},
         {1920, 1200, "16:10"}, {1680, 1048, "16:10"}, {2560, 1600, "16:10"}, {1280, 1024, "5:4"}, {720, 576, "5:4"},
@@ -62,8 +63,11 @@ int main() {
     const std::vector<Shape> s = shapes(v);
     const std::string sn = names(s);
     std::printf("shapes: %s\n", sn.c_str());
-    assert(sn == "5:4 4:3 16:10 16:9 21:9 32:9");
-    assert(shape_index(s, {3440, 1440}) == 4 && shape_index(s, {1920, 1080}) == 3 && shape_index(s, {720, 480}) == 0);
+    assert(sn == "9:16 5:4 4:3 16:10 16:9 21:9 32:9");
+    assert(shape_index(s, {3440, 1440}) == 5 && shape_index(s, {1920, 1080}) == 4);
+    assert(shape_index(s, {1080, 1920}) == 0);
+    assert(sizes(with_common(offered(parse_list("1080x1920")))) == "720x1280 1080x1920 1440x2560 2160x3840");
+    assert(!hos_output_size_valid(640, 1920)); // narrower than 9:16 remains rejected
     // (a shape chosen: the screen's own size when it has that shape, else the largest of the shape)
     assert(v[pick(v, "21:9", {3440, 1440})] == (Size{3440, 1440}));
     assert(v[pick(v, "21:9", {1920, 1080})] == (Size{2560, 1080}));   // (the largest no taller than the screen)

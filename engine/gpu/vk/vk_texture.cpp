@@ -4777,9 +4777,8 @@ bool ocr_ram_limited = false, ocr_ram_urgent = false;
     for (auto& [last, tex] : order) {
         // (total_bytes can have drifted below the textures' sum (destroy_later clamps it): the chosen ones' bytes past it mean the
         // budget is met, not a wrapped difference that never is)
-        if ((!sweep && !by_hold && (pending_bytes >= total_bytes || total_bytes - pending_bytes <= ocr_target)) ||
-            frame_no - last < need_dead)
-            break;
+        // Overwritten-target reclaim: age, not the live budget, ends this scan.
+        if (frame_no - last < need_dead) break;
         const bool shifted = drawn_over_shifted(tex);
         if (frame_no - last < need_unused && !shifted) continue;   // (younger: only a dead transient target goes)
         if (tex->last_value > completed) continue;
@@ -4795,6 +4794,10 @@ bool ocr_ram_limited = false, ocr_ram_urgent = false;
         static const bool keep_over_only = env_on("RX_VK_KEEP_RENDERED_OVER");
         const uint64_t keep_rendered = keep_rendered::presents(known, used, allowed, keep_over_only);
         const bool overwritten = shifted || drawn_over(tex);   // (above)
+        // Meeting the live-cache budget must not stop reclamation of overwritten
+        // transient targets later in age order. Their contents are already gone.
+        if (!overwritten && !sweep && !by_hold &&
+            (pending_bytes >= total_bytes || total_bytes - pending_bytes <= ocr_target)) continue;
         // (hookshot, RX_VK_COMPACT: the hold's pass, above. A live texture stays once the excess over its line is covered: the
         // reserve's line for one long unused, the hold's own for one unused ten seconds, and what the other rules ask (the 90%
         // rule, the budget's size, the driver's limit) for one unused as long as an eviction asks with the compaction off)

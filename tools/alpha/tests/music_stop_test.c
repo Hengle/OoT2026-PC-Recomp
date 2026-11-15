@@ -29,6 +29,11 @@ static void au_lock(void) {}
 static void au_unlock(void) {}
 static const char *fixture_getenv(const char *name) { (void)name; return NULL; }
 #define getenv fixture_getenv
+static int fail_realloc;
+static void *fixture_realloc(void *p, size_t size) {
+    return fail_realloc ? NULL : realloc(p, size);
+}
+#define realloc fixture_realloc
 #include "actual_music_stop.inc"
 
 #define APPEND imp__ZN2nn5audio16AppendWaveBufferEPNS0_9VoiceTypeEPKNS0_10WaveBufferE
@@ -141,6 +146,26 @@ int main(void) {
         CHECK(call(RELEASED, i, 0) == 0);
     }
     CHECK(call(COUNT, 0, 0) == 1);
+    /* Under memory pressure a full command queue must retain FIFO order.
+       A replacement appended after Stop must not be cancelled by that older Stop. */
+    reset(); start(0); consume(0, 17); commit();
+    CHECK(call(PLAYED, 0, 0) == 17);
+    const int saved_cap = cmds_cap;
+    cmds_cap = 1;
+    call(STATE, 0, PLAY_STOPPED);
+    fail_realloc = 1;
+    CHECK(call(APPEND, 0, NEXT_BUFFER));
+    CHECK(call(PLAYED, 0, 0) == 17); /* emergency drain does not publish a snapshot */
+    fail_realloc = 0;
+    cmds_cap = saved_cap;
+    call(STATE, 0, PLAY_STARTED); commit();
+    CHECK(call(COUNT, 0, 0) == 1);
+    CHECK(call(RELEASED, 0, 0) == BUFFER);
+    CHECK(call(RELEASED, 0, 0) == 0);
+    consume(0, LENGTH);
+    CHECK(!next_source_frame(&voices[0]));
+    commit();
+    CHECK(call(RELEASED, 0, 0) == NEXT_BUFFER);
     /* Diagnostic snapshots describe looping/empty voices without consuming them,
        and are throttled; disabled diagnostics emit nothing. */
     reset(); start(0); consume(0, 12);
@@ -148,6 +173,8 @@ int main(void) {
     audio_status_diagnostic(10000000000LL);
     CHECK(diag_events == before + 1 && !strcmp(diag_kind, "audio_status"));
     CHECK(strstr(diag_detail, "voices=6 playing=1 looping=1 empty_playing=0"));
+    CHECK(strstr(diag_detail, "client_update_age_ms=-1.0"));
+    CHECK(strstr(diag_detail, "silent_volume=0 unrouted=0 queue_fallbacks=1"));
     CHECK(voices[0].played == 12 && voices[0].nwb == 1);
     audio_status_diagnostic(11000000000LL);
     CHECK(diag_events == before + 1);

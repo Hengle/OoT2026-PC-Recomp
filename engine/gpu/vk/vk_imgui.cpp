@@ -29,6 +29,9 @@
 extern const unsigned ocarina_reborn_font_body_size, ocarina_reborn_font_strong_size, ocarina_reborn_font_heading_size;
 extern const unsigned char ocarina_reborn_font_body[], ocarina_reborn_font_strong[], ocarina_reborn_font_heading[];
 
+#include "ocr_rupee_rgba.h"
+#include "ocr_mark_rgba.h"   // (Ocarina Reborn: the banner mark)
+
 namespace mkwvk::ui {
 namespace {
 
@@ -38,6 +41,8 @@ bool srgb_target = false;   // (those views are sRGB: the window's surface lists
 Fonts fonts_;
 ImTextureData* logo_ = nullptr;
 float logo_aspect = 1;
+ImTextureData* mark_ = nullptr;
+ImTextureData* rupee_ = nullptr;
 int64_t presents = 0;   // (frames recorded: when a texture or a staging buffer let go can be destroyed)
 
 PFN_vkVoidFunction load(const char* name, void*) {
@@ -413,6 +418,11 @@ bool init() {
     ImGui::RegisterUserTexture(logo_);
     logo_aspect = (float)ocarina_reborn_logo_w / ocarina_reborn_logo_h;
 #endif
+    mark_ = IM_NEW(ImTextureData)();
+    mark_->Create(ImTextureFormat_RGBA32, (int)ocr_mark_w, (int)ocr_mark_h);
+    memcpy(mark_->GetPixels(), ocr_mark_rgba, (size_t)ocr_mark_w * ocr_mark_h * 4);
+    mark_->UseColors = true;
+    ImGui::RegisterUserTexture(mark_);
     logf("vk: ui: Dear ImGui %s on the window's images (format %d%s)", IMGUI_VERSION, (int)pipeline_format,
          srgb_target ? ", sRGB: colours made linear" : "");
     return true;
@@ -472,6 +482,27 @@ void prebake(const float* px, int n) {
 ImTextureData* logo(float* aspect) {
     *aspect = logo_aspect;
     return logo_;
+}
+
+ImTextureData* mark() { return mark_; }
+
+ImTextureData* rupee(double seconds, float* uv, float* aspect) {
+    if (!ready) return nullptr;
+    if (!rupee_) {
+        rupee_ = IM_NEW(ImTextureData)();
+        rupee_->Create(ImTextureFormat_RGBA32, ocr_rupee_w, ocr_rupee_h);
+        memcpy(rupee_->GetPixels(), ocr_rupee_rgba, sizeof ocr_rupee_rgba);
+        rupee_->UseColors = true;
+        ImGui::RegisterUserTexture(rupee_);
+    }
+    int ms = (int)std::fmod(std::max(0.0, seconds) * 1000.0, double(ocr_rupee_period)), frame = 0;
+    while (frame + 1 < ocr_rupee_frames && ms >= ocr_rupee_ms[frame]) ms -= ocr_rupee_ms[frame++];
+    const float x = float((frame % ocr_rupee_cols) * ocr_rupee_cw + 2);
+    const float y = float((frame / ocr_rupee_cols) * ocr_rupee_ch + 2);
+    uv[0] = x / ocr_rupee_w; uv[1] = y / ocr_rupee_h;
+    uv[2] = (x + ocr_rupee_fw) / ocr_rupee_w; uv[3] = (y + ocr_rupee_fh) / ocr_rupee_h;
+    *aspect = float(ocr_rupee_fw) / ocr_rupee_fh;
+    return rupee_;
 }
 
 void idle() {

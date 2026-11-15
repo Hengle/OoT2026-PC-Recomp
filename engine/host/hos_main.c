@@ -2021,7 +2021,7 @@ static int game_main(int argc, char **argv) {
         /* (a screen narrower than 16:9 too, 16:10 to 5:4: the picture keeps the game's height and is narrower, the
            cameras take its ratio, and the HUD fills its width instead of a middle 16:9 wider than the screen. A 4:3 CRT
            at the 1440 output: picture 1920 x 1440, scene 1440 x 1080, HUD 100%) */
-        if (want > game * 1.01 || (want > 1.0f && want < game * 0.99)) {
+        if (want > game * 1.01 || (want > 0.0f && want < game * 0.99)) {
             const double r = hos_wide_clamp(want);
             /* (the height kept, the width at the screen's ratio, at most hos_wide_max_px() pixels (5120 x 2160's, a 21:9 screen's
                native at the 4K output) with the shape kept: host/hos_wide_size.h, which the Insert menu's Output and Render

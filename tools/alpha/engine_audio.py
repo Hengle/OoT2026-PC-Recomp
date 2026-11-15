@@ -50,6 +50,49 @@ TIMEOUT_CHANGES = (
 )
 
 
+# A full queue under commit pressure used to execute its newest command first.
+# A pending Stop could then cancel the replacement buffer appended after it.
+QUEUE_MARKER = '/* Audio: preserve FIFO even when command storage cannot grow. */'
+QUEUE_CHANGES = (
+    ('static int ncmds, cmds_cap;', 'static int ncmds, cmds_cap;\nstatic uint64_t audio_queue_fallbacks;'),
+    ('    if (immediate || ncmds == cmds_cap) apply(k);\n    else cmds[ncmds++] = *k;',
+     '    ' + QUEUE_MARKER + '\n'
+     '    if (immediate || ncmds == cmds_cap) {\n'
+     '        if (!immediate) {\n'
+     '            ++audio_queue_fallbacks;\n'
+     '            if (audio_queue_fallbacks <= 4 || audio_queue_fallbacks % 128 == 0)\n'
+     '                ocr_diag_event("audio_queue_pressure", "command allocation failed; applying queued controls in order");\n'
+     '        }\n'
+     '        for (int i = 0; i < ncmds; ++i) apply(&cmds[i]);\n'
+     '        ncmds = 0;\n'
+     '        apply(k); /* do not publish a client status snapshot here */\n'
+     '    } else cmds[ncmds++] = *k;'),
+    ('    hos_log("audio: timeout status snapshot fix active (client update boundary)");',
+     '    hos_log("audio: timeout status snapshot fix active (client update boundary)");\n'
+     '    hos_log("audio: command order preserved under memory pressure");'),
+)
+
+STATUS_MARKER = '/* Audio diagnostics: distinguish quiet/routing states from missing buffers. */'
+STATUS_CHANGES = (
+    ('    int used = 0, playing = 0, loops = 0, empty = 0, pending = 0;',
+     '    ' + STATUS_MARKER + '\n'
+     '    int used = 0, playing = 0, loops = 0, empty = 0, pending = 0, muted = 0, unrouted = 0;'),
+    ('            ++playing;\n            if (!v->nwb) ++empty;',
+     '            ++playing;\n'
+     '            if (v->volume == 0.0f) ++muted;\n'
+     '            if (v->dest_kind == DEST_NONE) ++unrouted;\n'
+     '            if (!v->nwb) ++empty;'),
+    ('    char note[220];\n    snprintf(note, sizeof note,\n'
+     '             "voices=%d playing=%d looping=%d empty_playing=%d pending_buffers=%d queued_commands=%d client_update_age_ms=%.1f",\n'
+     '             used, playing, loops, empty, pending, ncmds, (now - last_update_ns) / 1e6);',
+     '    char note[360];\n    snprintf(note, sizeof note,\n'
+     '             "voices=%d playing=%d looping=%d empty_playing=%d pending_buffers=%d queued_commands=%d client_update_age_ms=%.1f silent_volume=%d unrouted=%d queue_fallbacks=%llu",\n'
+     '             used, playing, loops, empty, pending, ncmds,\n'
+     '             last_update_ns > 0 ? (now - last_update_ns) / 1e6 : -1.0,\n'
+     '             muted, unrouted, (unsigned long long)audio_queue_fallbacks);'),
+)
+
+
 def patch_group(source, marker, changes):
     if marker in source:
         if not all(new in source for _, new in changes):
@@ -70,6 +113,8 @@ def apply(root):
     # engine and an existing stop/reset test build without a partial upgrade.
     updated = patch_group(source, MARKER, CHANGES)
     updated = patch_group(updated, TIMEOUT_MARKER, TIMEOUT_CHANGES)
+    updated = patch_group(updated, QUEUE_MARKER, QUEUE_CHANGES)
+    updated = patch_group(updated, STATUS_MARKER, STATUS_CHANGES)
     if updated != source:
         path.write_text(updated, encoding='utf-8', newline='\n')
     print('audio: coherent stop/reset and client status across mixer timeouts')

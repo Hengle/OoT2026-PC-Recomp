@@ -40,6 +40,7 @@ inline std::vector<Size> offered(const std::vector<Size>& modes) {
 /// Each side a multiple of 8 (1366x768, 1600x900 and 1680x1050 are not: a screen that has them lists them, rounded)
 inline const std::vector<Size>& common_sizes() {
     static const std::vector<Size> v = {
+        {720, 1280}, {1080, 1920}, {1440, 2560}, {2160, 3840}, // 9:16 portrait
         {1280, 720},  {1920, 1080}, {2560, 1440}, {3200, 1800}, {3840, 2160}, {5120, 2880},   // 16:9
         {1280, 800},  {1920, 1200}, {2560, 1600}, {2880, 1800}, {3840, 2400},                 // 16:10
         {1024, 768},  {1280, 960},  {1440, 1080}, {1600, 1200}, {1920, 1440}, {2048, 1536}, {2880, 2160},   // 4:3
@@ -76,7 +77,7 @@ inline std::string ratio_name(Size s) {
     static const struct {
         const char* name;
         double r;
-    } named[] = {{"5:4", 5.0 / 4}, {"4:3", 4.0 / 3}, {"3:2", 3.0 / 2},  {"16:10", 16.0 / 10}, {"5:3", 5.0 / 3},
+    } named[] = {{"9:16", 9.0 / 16}, {"5:4", 5.0 / 4}, {"4:3", 4.0 / 3}, {"3:2", 3.0 / 2},  {"16:10", 16.0 / 10}, {"5:3", 5.0 / 3},
                  {"16:9", 16.0 / 9}, {"32:9", 32.0 / 9}, {"48:9", 48.0 / 9}};
     const char* best = nullptr;
     double off = 0.02;

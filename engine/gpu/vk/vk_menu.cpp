@@ -46,8 +46,10 @@
 #include "vk_fsr4.h"
 #include "ocr_amiibo_menu.h"
 #include "ocr_photo_menu.h"
+#include "ocr_rupee_roll.h"
 namespace mkwvk { int ocr_tunic = 0, ocr_tunic_r = 80, ocr_tunic_g = 160, ocr_tunic_b = 75; }
-namespace mkwvk { int ocr_counters = 0; std::atomic<int> ocr_rupees{-1}; }   // (Classic counters row; the wallet, -1: none)
+namespace mkwvk { int ocr_counters = 0; std::atomic<int> ocr_rupees{-1};
+std::atomic<uint64_t> ocr_wallet_visual{0}; }   // (Classic counters row; the wallet, -1: none)
 #define OCR_OPT_RUPEES 4084   /* (Ocarina Reborn) rx_option_set from the game side: the wallet, host/ocr_counters.c */
 namespace mkwvk { int ocr_view = 1, ocr_grass = 2, ocr_shadows = 1; }   // (View distance rows)
 namespace mkwvk { int ocr_timer = 0, ocr_deaths_row = 0; std::atomic<int> ocr_deaths{0}; }   // (Speedrun timer, Death counter)
@@ -419,6 +421,12 @@ const std::vector<Out>& outputs() {
             o.insert(o.end(), std::begin(kOutputs) + 1, std::end(kOutputs));
             std::sort(o.begin() + 1, o.end(), [](Out a, Out b) { return a.w != b.w ? a.w < b.w : a.h < b.h; });
         }
+        // Ocarina Reborn: offer portrait even on landscape displays. Keep the legacy fallback first.
+        for (dm::Size p : dm::common_sizes()) {
+            if (dm::ratio_name(p) != "9:16") continue;
+            if (std::none_of(o.begin(), o.end(), [&](Out v) { return v.w == p.w && v.h == p.h; }))
+                o.push_back({p.w, p.h});
+        }
         return o;
     }();
     return v;
@@ -610,7 +618,7 @@ Out picture_for(int v, bool* native = nullptr) {
     if (!opts.handheld && (own || aspect_follows_host(opts.ultrawide))) {
         const double want = own ? (double)o.w / o.h : have_host ? (double)hw / hh : 0.0;   // (the host's screen: hos_main.c)
         const double game = 16.0 / 9.0;
-        if (want > game * 1.01 || (want > 1.0 && want < game * 0.99)) {
+        if (want > game * 1.01 || (want > 0.0 && want < game * 0.99)) {
             unsigned w = 0, h = 0;
             hos_wide_size(o.h, hos_wide_clamp(want), hos_wide_max_px(), &w, &h);
             o = Out{w, h};
@@ -2592,7 +2600,7 @@ float ease_step = 0;     // (this drawing's share of the way: the time since the
 ui::Ctx ui_ctx(uint32_t w, uint32_t h) {
     ui::Ctx c{ImGui::GetForegroundDrawList(), ui::fonts(), 1, (float)w, (float)h, 0, pad_last};
     c.confirm_dot = menu_keys::dot(pad_confirm), c.back_dot = menu_keys::dot(pad_back);
-    c.s = ui::unit((float)h, opts.menu_size, &c.safe);
+    c.s = ui::unit((float)std::min(w, h), opts.menu_size, &c.safe);
     return c;
 }
 /// The banner's height
@@ -3115,11 +3123,11 @@ void draw_options(ui::Ctx& c) {
         x += tw[i];
     }
     {   // (Ocarina Reborn) the banner's left: an original circle mark, OCARINA REBORN, Powered by Sorax under it (no version: the log has it)
-        const float room = (c.w - total) * 0.5f - 60 * s - c.safe, x0 = c.safe, tri = 30 * s;
+        const float room = (c.w - total) * 0.5f - 60 * s - c.safe, x0 = c.safe, tri = 40 * s;
         if (room > tri + 40 * s) {
-            ui::ocarina(c,ImVec2(x0,ty-18*s),36*s);
-            c.d->AddLine(ImVec2(x0+tri+4*s,ty-14*s),ImVec2(x0+tri+4*s,ty+14*s),ui::kBannerEdge,std::max(1.f,s));
-            const float tx = x0 + tri + 12 * s, text_room = room - tri - 12 * s;
+            ui::ocarina(c,ImVec2(x0,ty-20*s),40*s);
+            c.d->AddLine(ImVec2(x0+tri+10*s,ty-14*s),ImVec2(x0+tri+10*s,ty+14*s),ui::kBannerEdge,std::max(1.f,s));
+            const float tx = x0 + tri + 20 * s, text_room = room - tri - 20 * s;
             const auto width = [&](float p) { return ui::size_of(c.f.heading, p, "Ocarina Reborn").x; };
             const float px = ui::fit_px(20 * s, 12 * s, 0.5f * s, text_room, width);
             if (px > 0) {
@@ -3679,7 +3687,7 @@ float prebaked[2] = {0, 0};   // (the unit and the width prebake last did)
 /// The menu's unit now for a window w x h: whether prebake has not done it yet
 bool prebake_needed(uint32_t w, uint32_t h) {
     float m = 0;
-    return ui::unit((float)h, opts.menu_size, &m) != prebaked[0] || (float)w != prebaked[1];
+    return ui::unit((float)std::min(w, h), opts.menu_size, &m) != prebaked[0] || (float)w != prebaked[1];
 }
 void prebake(const ui::Ctx& c) {
     if (c.s == prebaked[0] && c.w == prebaked[1]) return;
@@ -4031,28 +4039,42 @@ void draw_corner(ui::Ctx& c, bool paused, bool timer, bool deaths) {
     }
 }
 
-/// (Ocarina Reborn) the bottom left corner, as on the N64: a green rupee and the wallet in white, outlined. The Classic counters
-/// row; the count from host/ocr_counters.c (OCR_OPT_RUPEES)
+/// The user's looping crystal and quick odometer-style digits. Only the displayed number animates.
+ocr_hud::RupeeRoll rupee_roll;
 void draw_rupees(ui::Ctx& c) {
-    const int v = ocr_rupees.load(std::memory_order_relaxed);
-    if (v < 0) return;
-    const float ih = 34 * c.s, iw = ih * 0.56f, px = 32 * c.s;
-    const float x = c.safe + 8 * c.s, bottom = c.h - c.safe - 6 * c.s, cy = bottom - ih / 2, cx = x + iw / 2;
-    auto gem = [&](float k, ImVec2* out) {   // (the rupee: a long hexagon, k of its size around the middle)
-        const float hw = iw / 2 * k, hh = ih / 2 * k, side = ih * 0.22f * k;
-        out[0] = {cx, cy - hh}, out[1] = {cx + hw, cy - side}, out[2] = {cx + hw, cy + side};
-        out[3] = {cx, cy + hh}, out[4] = {cx - hw, cy + side}, out[5] = {cx - hw, cy - side};
-    };
-    ImVec2 outer[6], inner[6];
-    gem(1.0f, outer), gem(0.5f, inner);
-    c.d->AddConvexPolyFilled(outer, 6, ui::rgba(30, 170, 60));
-    c.d->AddConvexPolyFilled(inner, 6, ui::rgba(130, 245, 140));
-    for (int i = 0; i < 6; i++) c.d->AddLine(outer[i], inner[i], ui::rgba(20, 110, 40), std::max(1.0f, c.s));
-    c.d->AddPolyline(outer, 6, ui::rgba(0, 0, 0, 230), ImDrawFlags_Closed, std::max(1.5f, 2 * c.s));
-    char text[16];
-    snprintf(text, sizeof text, "%d", v);
-    const float tw = ui::size_of(c.f.strong, px, text).x;
-    outlined_right(c, c.f.strong, px, x + iw + 10 * c.s + tw, cy - px * 0.62f, ui::rgba(255, 255, 255), text);
+    const uint64_t wallet = ocr_wallet_visual.load(std::memory_order_acquire);
+    const int value = int(wallet & 0xffff) - 1;
+    const double now = prof_now() / 1e9;
+    const double shown = rupee_roll.update(value, now, wallet >> 16);
+    if (shown < 0) return;
+    const float ih = 28 * c.s, px = 22 * c.s;
+    const float x = c.safe + 8 * c.s, bottom = c.h - c.safe - 6 * c.s;
+    const float cy = bottom - ih / 2;
+    float uv[4], aspect = 0.56f;
+    if (ImTextureData* gem = ui::rupee(now, uv, &aspect))
+        c.d->AddImage(gem->GetTexRef(), ImVec2(x, bottom - ih), ImVec2(x + ih * aspect, bottom),
+                     ImVec2(uv[0], uv[1]), ImVec2(uv[2], uv[3]));
+    Tab tab(c.f.strong, px);
+    const float left = x + ih * aspect + 6 * c.s, top = cy - px * 0.62f;
+    const float line = px * 1.18f;
+    int place = 1;
+    const int largest = std::max(value, int(std::ceil(shown)));
+    while (place < 1000 && largest >= place * 10) place *= 10;
+    c.d->PushClipRect(ImVec2(left - 2 * c.s, top - c.s),
+                      ImVec2(left + tab.digit * 4 + 2 * c.s, top + line - c.s), true);
+    int column = 0;
+    for (; place; place /= 10, column++) {
+        const auto d = ocr_hud::rupee_digit(shown, place);
+        const float right = left + (column + 1) * tab.digit;
+        char text[] = {char('0' + d.lower), 0};
+        if (!d.blank_lower)
+            outlined_right(c, c.f.strong, px, right, top - float(d.fraction) * line, ui::rgba(255,255,255), text);
+        if (d.fraction > 0.0001) {
+            text[0] = char('0' + d.upper);
+            outlined_right(c, c.f.strong, px, right, top + (1 - float(d.fraction)) * line, ui::rgba(255,255,255), text);
+        }
+    }
+    c.d->PopClipRect();
 }
 
 /// The start-up screen: the logo, the wordmark, what the start is doing, a bar, on a warm dark. A little below the middle; what
@@ -4403,7 +4425,15 @@ std::recursive_mutex menu_mu;
 void menu_option_set(int id, int value) {
     if (id == OCR_OPT_DEATHS) { ocr_deaths.store(value, std::memory_order_relaxed); return; }   // (Ocarina Reborn)
     if (id == OCR_OPT_PHOTO_READY) { photo_tools::availability(value); return; }
-    if (id == OCR_OPT_RUPEES) { ocr_rupees.store(value, std::memory_order_relaxed); return; }   // (Ocarina Reborn: the wallet)
+    if (id == OCR_OPT_RUPEES) {
+        value = value >= 0 && value <= 9999 ? value : -1;
+        // One game producer; epoch + value travel together so a rapid save reload cannot animate stale money.
+        const uint64_t before = ocr_wallet_visual.load(std::memory_order_relaxed);
+        const uint64_t epoch = (before >> 16) + (value < 0 && (before & 0xffff) != 0);
+        ocr_wallet_visual.store((epoch << 16) | uint64_t(value + 1), std::memory_order_release);
+        ocr_rupees.store(value, std::memory_order_relaxed);
+        return;
+    }   // (Ocarina Reborn: the wallet)
     if (id == OOT_CHEAT_AGE_ID) {   // (Link's age: the Switch age row shows it)
         if (link_age.exchange(value, std::memory_order_relaxed) != value && page == 0 && cur_tab == TAB_DEBUG) menu_refresh = true;
         return;
@@ -5197,6 +5227,7 @@ void menu_record(VkCommandBuffer cmd, uint32_t index, uint32_t w, uint32_t h) {
     const bool open = open_now.load(std::memory_order_relaxed);
     const bool timer = ocr_timer && !start && !photo, deaths = ocr_deaths_row && !start && !photo;   // (Ocarina Reborn: the corner)
     const bool rupees = !photo && ocr_counters && !start && ocr_rupees.load(std::memory_order_relaxed) >= 0;   // (Classic counters)
+    if (!rupees || open) rupee_roll.reset();
     if (!ocr_timer || start) timer_off();
     if (!start && !fps && !open && !timer && !deaths && !rupees) {   // (nothing shows: no ImGui frame, no render pass)
         // (but a new window size or Menu size since the last bake: one frame with nothing drawn that bakes the menu's glyphs
@@ -5236,6 +5267,7 @@ void menu_record_image(VkCommandBuffer cmd, VkImage image, VkImageView view, uin
     const bool started = !startup_on.load(std::memory_order_acquire);
     const bool timer = ocr_timer && started && !photo, deaths = ocr_deaths_row && started && !photo;   // (Ocarina Reborn: the corner)
     const bool rupees = !photo && ocr_counters && started && ocr_rupees.load(std::memory_order_relaxed) >= 0;   // (Classic counters)
+    if (!rupees || open) rupee_roll.reset();
     if (!open && !fps && !timer && !deaths && !rupees) return;
     if (!ui::begin(w, h)) return;
     ease_step = 1; // Static UI snapshots show the selected row immediately.

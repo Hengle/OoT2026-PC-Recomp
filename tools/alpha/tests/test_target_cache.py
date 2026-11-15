@@ -3,7 +3,7 @@ import shutil, subprocess, sys, tempfile, unittest
 ALPHA = Path(__file__).resolve().parents[1]
 ROOT = ALPHA.parents[1]
 sys.path.insert(0, str(ALPHA))
-import engine_streaming, engine_target_cache, engine_settings_reset
+import engine_streaming, engine_target_cache, engine_settings_reset, engine_resource_memory
 
 
 class TargetCacheTests(unittest.TestCase):
@@ -19,6 +19,8 @@ class TargetCacheTests(unittest.TestCase):
             engine_streaming.apply(root)
             engine_target_cache.apply(root)
             engine_settings_reset.apply(root)
+            texture = root/'gpu/vk/vk_texture.cpp'
+            texture.write_text(engine_resource_memory.reclaim_overwritten(texture.read_text()), encoding='utf-8', newline='\n')
             for name in names:
                 self.assertEqual((root/'gpu/vk'/name).read_text(), (ROOT/'engine/gpu/vk'/name).read_text())
             before = {p.name:p.read_bytes() for p in (root/'gpu/vk').iterdir()}

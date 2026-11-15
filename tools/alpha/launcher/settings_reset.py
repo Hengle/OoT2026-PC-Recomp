@@ -6,7 +6,7 @@ import os
 import tempfile
 import classic_voices
 
-KEEP = ('game_dir', 'backup_dir', 'dlss_sdk')
+KEEP = ('game_dir', 'backup_dir', 'dlss_sdk', 'notes_seen_version')   # (paths and what was shown: not preferences)
 
 def _write(path, data):
     path=Path(path)

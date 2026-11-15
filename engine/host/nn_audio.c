@@ -1121,6 +1121,7 @@ typedef struct {
 } Cmd;
 static Cmd *cmds;
 static int ncmds, cmds_cap;
+static uint64_t audio_queue_fallbacks;
 static int64_t last_update_ns;
 
 /* Bounded metadata only: no samples, paths or guest pointers. Together with the
@@ -1141,21 +1142,26 @@ static void audio_status_diagnostic(int64_t now) {   /* audio lock held, at most
     static int64_t next;
     if (!ocr_diag_enabled() || now < next) return;
     next = now + 5000000000LL;
-    int used = 0, playing = 0, loops = 0, empty = 0, pending = 0;
+    /* Audio diagnostics: distinguish quiet/routing states from missing buffers. */
+    int used = 0, playing = 0, loops = 0, empty = 0, pending = 0, muted = 0, unrouted = 0;
     for (int i = 0; i < MAX_VOICES; ++i) {
         const Voice *v = &voices[i];
         if (!v->used || v->released) continue;
         ++used; pending += v->pending_wb;
         if (v->state == PLAY_STARTED) {
             ++playing;
+            if (v->volume == 0.0f) ++muted;
+            if (v->dest_kind == DEST_NONE) ++unrouted;
             if (!v->nwb) ++empty;
             else if (v->wbc[0].loop) ++loops;
         }
     }
-    char note[220];
+    char note[360];
     snprintf(note, sizeof note,
-             "voices=%d playing=%d looping=%d empty_playing=%d pending_buffers=%d queued_commands=%d client_update_age_ms=%.1f",
-             used, playing, loops, empty, pending, ncmds, (now - last_update_ns) / 1e6);
+             "voices=%d playing=%d looping=%d empty_playing=%d pending_buffers=%d queued_commands=%d client_update_age_ms=%.1f silent_volume=%d unrouted=%d queue_fallbacks=%llu",
+             used, playing, loops, empty, pending, ncmds,
+             last_update_ns > 0 ? (now - last_update_ns) / 1e6 : -1.0,
+             muted, unrouted, (unsigned long long)audio_queue_fallbacks);
     ocr_diag_event("audio_status", note);
 }
 
@@ -1288,8 +1294,17 @@ static void submit(const Cmd *k) {   /* (with the lock held) */
         Cmd *grown = (Cmd *)realloc(cmds, (size_t)cap * sizeof *grown);
         if (grown) cmds = grown, cmds_cap = cap;
     }
-    if (immediate || ncmds == cmds_cap) apply(k);
-    else cmds[ncmds++] = *k;
+    /* Audio: preserve FIFO even when command storage cannot grow. */
+    if (immediate || ncmds == cmds_cap) {
+        if (!immediate) {
+            ++audio_queue_fallbacks;
+            if (audio_queue_fallbacks <= 4 || audio_queue_fallbacks % 128 == 0)
+                ocr_diag_event("audio_queue_pressure", "command allocation failed; applying queued controls in order");
+        }
+        for (int i = 0; i < ncmds; ++i) apply(&cmds[i]);
+        ncmds = 0;
+        apply(k); /* do not publish a client status snapshot here */
+    } else cmds[ncmds++] = *k;
 }
 /* Audio: mixer fallback preserves the client status snapshot. */
 static void apply_pending(void) {   /* (with the lock held; no status publication) */
@@ -1410,6 +1425,7 @@ HLE(_ZN2nn5audio17OpenAudioRendererEPNS0_19AudioRendererHandleEPNS_2os11SystemEv
     hos_log("audio: renderer opened");
     hos_log("audio: voice stop/reset fix active (queued loops and playback status)");
     hos_log("audio: timeout status snapshot fix active (client update boundary)");
+    hos_log("audio: command order preserved under memory pressure");
     RET(0);
 }
 HLE(_ZN2nn5audio18StartAudioRendererENS0_19AudioRendererHandleE) { renderer_running = 1; RET(0); }

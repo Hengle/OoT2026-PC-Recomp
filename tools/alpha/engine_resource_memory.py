@@ -111,4 +111,30 @@ void cap_buf_free(''')
     text = replace_once(text, '    for (auto& [last, tex] : order) {\n        // (total_bytes can have drifted', '    // Host-pressure eviction must not retire gigabytes in one render frame.\n    // Dead targets still use the existing sweep path; GPU lifetime/flush guards stay below.\n    const uint64_t ocr_target = ocr_resources::eviction_target(total_bytes, budget, ocr_ram_limited, ocr_ram_urgent);\n    for (auto& [last, tex] : order) {\n        // (total_bytes can have drifted')
     text = replace_once(text, 'total_bytes - pending_bytes <= budget / 8 * 7',
                         'total_bytes - pending_bytes <= ocr_target')
+    text = reclaim_overwritten(text)
     texture.write_text(text, encoding='utf-8', newline='\n')
+
+
+RECLAIM_CHANGES = (
+    ('''        if ((!sweep && !by_hold && (pending_bytes >= total_bytes || total_bytes - pending_bytes <= ocr_target)) ||
+            frame_no - last < need_dead)
+            break;''',
+     '''        // Overwritten-target reclaim: age, not the live budget, ends this scan.
+        if (frame_no - last < need_dead) break;'''),
+    ('''        const bool overwritten = shifted || drawn_over(tex);   // (above)''',
+     '''        const bool overwritten = shifted || drawn_over(tex);   // (above)
+        // Meeting the live-cache budget must not stop reclamation of overwritten
+        // transient targets later in age order. Their contents are already gone.
+        if (!overwritten && !sweep && !by_hold &&
+            (pending_bytes >= total_bytes || total_bytes - pending_bytes <= ocr_target)) continue;'''),
+)
+
+
+def reclaim_overwritten(text):
+    # Validate both anchors before changing either; also accepts an already patched engine.
+    for old, new in RECLAIM_CHANGES:
+        if new not in text and text.count(old) != 1:
+            raise RuntimeError('Overwritten-target reclaim anchor changed: ' + old[:80])
+    for old, new in RECLAIM_CHANGES:
+        text = replace_once(text, old, new)
+    return text

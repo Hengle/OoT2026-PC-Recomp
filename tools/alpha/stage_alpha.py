@@ -733,6 +733,12 @@ def rebrand(H, icon):
     engine_prepare.apply(H)
     import engine_settings_reset
     engine_settings_reset.apply(H)
+    import engine_mark
+    engine_mark.apply(H)
+    import engine_portrait
+    engine_portrait.apply(H)
+    import engine_rupee_hud
+    engine_rupee_hud.apply(H)
     (H / 'NOTICE-OCARINA-REBORN.txt').write_text(
         'Ocarina Reborn builds the game with Hookshot (https://github.com/NotRexed/Hookshot), GPL-3.0 (LICENSE).\n'
         'Changes: the window title, message boxes, menu heading, icon and start-up screen say Ocarina Reborn, the files the build\n'

@@ -28,8 +28,9 @@ class Fsr316Tests(unittest.TestCase):
                 p.parent.mkdir(parents=True, exist_ok=True)
                 p.write_bytes(subprocess.run(['git','show','88e42ea:engine/'+rel], cwd=ROOT, capture_output=True, check=True).stdout)
             engine_fsr316.apply(root)
-            for rel in names:
-                self.assertEqual((root/rel).read_text(encoding='utf-8'), (ROOT/'engine'/rel).read_text(encoding='utf-8'))
+            for rel in names:   # (v1.1.1 as released; what came after has its own test: test_patch_notes.MenuMarkTests)
+                released = subprocess.run(['git','show','8b92903:engine/'+rel], cwd=ROOT, capture_output=True, check=True).stdout
+                self.assertEqual((root/rel).read_text(encoding='utf-8'), released.decode('utf-8'))
             before = {rel:(root/rel).read_bytes() for rel in names}
             engine_fsr316.apply(root)
             self.assertEqual(before, {rel:(root/rel).read_bytes() for rel in names})

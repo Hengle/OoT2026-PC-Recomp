@@ -213,19 +213,8 @@ inline void backdrop(Ctx& c) {
             colors[y][x],colors[y][x+1],colors[y+1][x+1],colors[y+1][x]);
 }
 inline void ocarina(Ctx& c, ImVec2 p, float size) {
-    const float s=size/40.f;
-    auto at=[&](float x,float y) { return p+ImVec2(x*s,y*s); };
-    c.d->PathLineTo(at(11,20)); c.d->PathLineTo(at(7,5));
-    c.d->PathBezierCubicCurveTo(at(7,0),at(16,0),at(18,8)); c.d->PathLineTo(at(21,14));
-    c.d->PathBezierCubicCurveTo(at(29,9),at(42,5),at(39,14));
-    c.d->PathBezierCubicCurveTo(at(34,30),at(10,40),at(3,33));
-    c.d->PathBezierCubicCurveTo(at(-2,28),at(5,23),at(11,20));
-    c.d->PathFillConvex(kGold);
-    for (ImVec2 hole : {at(10,29),at(19,24),at(27,19),at(33,13)}) {
-        c.d->AddCircleFilled(hole,2.4f*s,kCellDark,12);
-        c.d->AddCircle(hole,2.8f*s,kButtonEdge,12,std::max(1.f,s));
-    }
-    c.d->AddLine(at(10,14),at(18,10),kButtonEdge,2*s);
+    // (the launcher's own picture; p is its top left, size its side)
+    if (ImTextureData* picture = mark()) c.d->AddImage(picture->GetTexRef(), p, p + ImVec2(size, size));
 }
 
 inline void glow(Ctx& c, ImVec2 a, ImVec2 b, float rounding=10) {

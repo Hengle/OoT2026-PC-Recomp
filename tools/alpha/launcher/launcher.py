@@ -40,6 +40,7 @@ import interface_theme  # noqa: E402
 import settings_reset  # noqa: E402
 import amiibo  # noqa: E402
 import gamepad  # noqa: E402
+import patch_notes  # noqa: E402
 
 INSTALL = Path(__file__).resolve().parent.parent
 ASSETS = Path(__file__).resolve().parent / 'assets'
@@ -51,6 +52,7 @@ for d in DIRS.values():
     d.mkdir(parents=True, exist_ok=True)
 LICENSE = APP / 'license.dat'
 SETTINGS = DIRS['Config'] / 'settings.json'
+HAD_SETTINGS = SETTINGS.is_file()   # (before this start wrote anything: not a new installation)
 STATE = DIRS['Config'] / 'build-state.json'   # a build in progress: its settings, removed when it completes
 NOW = datetime.datetime.now().strftime('%Y-%m-%d-%H%M%S')
 LOG = DIRS['Logs'] / f'ocarina-reborn-{NOW}.log'
@@ -271,7 +273,19 @@ def settings():
 
 
 def save_settings(s):
-    SETTINGS.write_text(json.dumps(s, indent=2))
+    """written beside the file and moved over it: a crash or power loss in the middle leaves the old settings, not an
+    empty file (which read as defaults: the game folder forgotten). Where the move is refused, written in place as before"""
+    data = json.dumps(s, indent=2)
+    tmp = SETTINGS.with_name(SETTINGS.name + '.tmp')
+    try:
+        tmp.write_text(data)
+        os.replace(tmp, SETTINGS)
+    except OSError:
+        try:
+            tmp.unlink(missing_ok=True)
+        except OSError:
+            pass
+        SETTINGS.write_text(data)
 
 
 def find_nups():
@@ -473,6 +487,7 @@ class App(tk.Tk):
         self.stage = ui.Stage(self, self.canvas)
         self.stage.on_double = self.toggle_max
         self.page_tab = None   # (the settings page's tab while it shows: the controller's LB/RB)
+        self.page_back = self.page_wheel = None
         self.gamepad = gamepad.Gamepad(self, self.stage, back=self.pad_back, play=self.pad_play, tab=self.pad_tab)
         self.stage.on_render = self.gamepad.refresh
         self.chrome = ui.Chrome(self, on_drop=self.dropped)
@@ -485,12 +500,36 @@ class App(tk.Tk):
         self.step = 'files'
         self.update_info = None
         self.news = None
+        self.news_new = False   # (before the check starts: it sets this from its own thread)
         threading.Thread(target=self.check_update, daemon=True).start()
-        self.news_new = False
         self.after(500, self.poll_update)
         self.protocol('WM_DELETE_WINDOW', self.quit_app)
-        self.after(50, self.startup_reporting_tip)
+        self.canvas.bind('<MouseWheel>', self.wheel)
+        self.after(50, self.startup_notes)
         self.after(600, self.start_fairy)
+
+    def startup_notes(self):
+        """the first start after an update opens that version's patch notes by themselves, once (patch_notes.due); a new
+        installation does not. The notes are the launcher's own file, so this needs no network"""
+        ver, text = INFO.get('version', '0'), patch_notes.bundled()
+        if text and patch_notes.due(ver, self.cfg.get('notes_seen_version'), HAD_SETTINGS):
+            log(f'patch notes {ver}: shown after the update')
+            return self.notes_page(ver, text, self.startup_reporting_tip)
+        self.notes_seen(ver)
+        self.startup_reporting_tip()
+
+    def notes_seen(self, ver):
+        if ver != INFO.get('version') or self.cfg.get('notes_seen_version') == ver:
+            return
+        self.cfg['notes_seen_version'] = ver
+        try:
+            save_settings(self.cfg)
+        except OSError as e:   # (they show once more at the next start: nothing else depends on it)
+            log(f'patch notes: could not remember {ver}: {e}')
+
+    def wheel(self, e):
+        if self.page_wheel and not self.stage.pop:
+            self.page_wheel(-1 if e.delta > 0 else 1)
 
     def startup_reporting_tip(self):
         """Shown once per launcher start, independently of game/build/update state."""
@@ -799,10 +838,81 @@ class App(tk.Tk):
             return
         self.after(500, self.poll_update)
 
+    def notes(self):
+        """(version, text) for the New in ... button: the newest release's when the site answered, else this launcher's own"""
+        if self.news and self.news[1].strip():
+            return self.news
+        text = patch_notes.bundled()
+        return (INFO.get('version', '0'), text) if text else None
+
     def show_news(self):
-        ver, body = self.news
-        text = body.replace('**', '').replace('## ', '').split('SHA-256')[0].strip()
-        messagebox.showinfo('Ocarina Reborn', T(f'Neu in {ver}', f'New in {ver}') + '\n\n' + text[:2500])
+        news = self.notes()
+        if news:
+            self.notes_page(news[0], news[1], self.ready)
+
+    def notes_page(self, ver, text, done):
+        """the patch notes as a page of the launcher's own: sections, bullets, bold as written; as many pages as the
+        window's height needs (the buttons, the mouse wheel, a controller). done(): where Got it leads"""
+        title, sections = patch_notes.parse(text)
+        sub = (title or '').split('\u2014')[-1].strip() or T('Das ist neu in dieser Version.', 'What changed in this version.')
+        state = {'page': 0, 'pages': 1}
+
+        def close():
+            self.notes_seen(ver)
+            done()
+
+        def turn(d):
+            page = max(0, min(state['pages'] - 1, state['page'] + d))
+            if page != state['page']:
+                state['page'] = page
+                self.stage.render()
+
+        def body(ctx, top):
+            s = ctx.s
+            x, w = self.content(ctx)
+            (hy, _), (cy, ch), (fy, fh) = layout(ctx, top, [(76, 34, 0), (300, 34, 1), (82, 30, 0)])
+            self.heading(ctx, x, hy, T(f'Neu in {ver}', f'New in {ver}'), sub, icon='info', w=w)
+            ctx.panel(x, cy, w, ch, r=16, fill=ui.PANEL, fill2=ui.CELL, border=ui.LINE)
+            pad, indent, line_h = 34 * s, 26 * s, 28 * s
+            rows = patch_notes.blocks(sections, w - 2 * pad - indent,
+                                      lambda part, bold: ctx.text_width(part, 19, 'semibold' if bold else 'regular'),
+                                      line_h, 34 * s, 6 * s, 20 * s)
+            pages = patch_notes.paginate(rows, ch - 2 * pad + 20 * s)   # (the last row's gap may hang over)
+            state['pages'] = len(pages)
+            state['page'] = min(state['page'], len(pages) - 1)
+            y = cy + pad
+            for row in pages[state['page']]:
+                if row[0] == 'head':
+                    ctx.text(x + pad, y + 2 * s, row[1].upper(), 16, 'semibold', ui.LINK)
+                else:
+                    _, bullet, lines, _ = row
+                    tx = x + pad + (indent if bullet else 0)
+                    if bullet:
+                        ctx.panel(x + pad + 4 * s, y + line_h / 2 - 5 * s, 7 * s, 7 * s, r=3.5, fill=ui.ACCENT_HI, alpha=1,
+                                  border=None)
+                    for i, line in enumerate(lines):
+                        lx = tx
+                        for part, bold in line:
+                            ctx.text(lx, y + i * line_h, part, 19, 'semibold' if bold else 'regular',
+                                     '#ffffff' if bold else ui.TEXT)
+                            lx += ctx.text_width(part, 19, 'semibold' if bold else 'regular')
+                y += row[-1]
+            bw = 260 * s
+            ctx.button(x + w - bw, fy, bw, fh, T('Verstanden', 'Got it'), close, kind='primary', icon='check', size=26,
+                       weight='bold', r=14)
+            if len(pages) > 1:
+                first, last = state['page'] == 0, state['page'] == len(pages) - 1
+                nw = 190 * s
+                ctx.button(x, fy, nw, fh, T('Zurück', 'Previous'), lambda: turn(-1), icon='back', size=22, r=14,
+                           color=ui.SUB if first else None)
+                ctx.button(x + nw + 14 * s, fy, nw, fh, T('Weiter', 'Next'), lambda: turn(1), icon='right', size=22, r=14,
+                           color=ui.SUB if last else None)
+                ctx.text(x + 2 * nw + 40 * s, fy + fh / 2, T(f'Seite {state["page"] + 1} von {len(pages)}',
+                                                              f'Page {state["page"] + 1} of {len(pages)}'),
+                         19, color=ui.SUB, anchor='w')
+        game = Path(self.cfg.get('game_dir', ''))
+        self.show('play' if (game / 'ready.json').is_file() else 'files', body)
+        self.page_back, self.page_wheel = close, turn
 
     def offer_update(self):
         info = self.update_info
@@ -884,6 +994,8 @@ class App(tk.Tk):
     # ---- the frame every page has: the header (logo, name, the steps, music, the window's buttons)
     # ---- the controller (gamepad.py): B back to the ready page, Start plays from it, LB/RB the settings tabs ----------------
     def pad_back(self):
+        if self.page_back:
+            return self.page_back()
         if self.step == 'play' and not self.busy and not any(h.cmd == self.play for h in self.stage.hots):
             self.ready()
 
@@ -900,6 +1012,7 @@ class App(tk.Tk):
         """draws the page: the header, then body(ctx, top) under it"""
         self.step = step
         self.page_tab = None
+        self.page_back = self.page_wheel = None   # (a page's own way back and mouse wheel: set after show())
         if self.float_ctl:
             self.float_ctl.destroy()
             self.float_ctl = None
@@ -1458,8 +1571,9 @@ class App(tk.Tk):
                          T('Beim ersten Start werden Shader vorbereitet. Die Dauer hängt von CPU und Grafiktreiber ab.',
                            'The first start prepares shaders. Time depends on your CPU and graphics driver.'), icon='play', w=w)
             px = x + w
-            if self.news:   # (what the newest release brought, from the site's GitHub)
-                label = T(f'Neu in {self.news[0]}', f'New in {self.news[0]}')
+            news = self.notes()
+            if news:   # (what the newest release brought, from the site's GitHub; offline, this version's own notes)
+                label = T(f'Neu in {news[0]}', f'New in {news[0]}')
                 nw = ctx.text_width(label, 17, 'semibold') + 64 * s
                 px -= nw
                 ctx.button(px, hy + 18 * s, nw, 40 * s, label, self.show_news, kind='pill', icon='info', size=17)

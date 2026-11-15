@@ -45,7 +45,11 @@ HUD = ("{ extern volatile float hos_wide_squeeze; const float _q = hos_wide_sque
        "if (_m00 == %s && _m11 == %s) { const uint64_t _vt = recomp_load64(c, c->x[0] - 0x1b8); "
        "extern volatile uint32_t hos_wide_keep_mask; const uint32_t _kb = %s; "
        "if (!(_kb & hos_wide_keep_mask)) { float _row[4]; memcpy(_row, c->vreg[1], 16); for (int _k = 0; _k < 4; _k++) _row[_k] *= _q; "
-       "memcpy(c->vreg[1], _row, 16); } } } }   /* (nx2/oot_wide.py: HUD in the middle 16:9) */"
+       "memcpy(c->vreg[1], _row, 16); "
+       "extern volatile float hos_wide_ratio; const float _r = hos_wide_ratio; "
+       "if (_r > 0.0f && _r < 1.0f) { memcpy(_row, c->vreg[4], 16); "
+       "for (int _k = 0; _k < 4; _k++) _row[_k] *= _r / (16.0f / 9.0f); "
+       "memcpy(c->vreg[4], _row, 16); } } } } }   /* (nx2/oot_wide.py: HUD in the middle 16:9) */"
        % (UI_M00, UI_M11, " : ".join("_vt == 0x%xULL ? %du" % (v, 1 << k) for k, v in enumerate(KEEP_VTABLES)) + " : 0u"))
 
 MOVIE = ("{ extern volatile float hos_wide_margin; const float _m = hos_wide_margin; if (_m > 0.0f) { "
@@ -67,6 +71,8 @@ THUMB = ("{ extern volatile float hos_wide_ratio; const float _r = hos_wide_rati
          "else { const int _h = (int)(306.0f * (16.0f / 9.0f) / _r + 0.5f); "
          "c->x[2] = (uint32_t)((306 - _h) / 2); c->x[4] = (uint32_t)_h; } } }"
          "   /* (nx2/oot_wide.py: the save's picture, the middle 16:9) */")
+
+MOVIE += '{ extern volatile float hos_wide_ratio; const float _r = hos_wide_ratio; if (_r > 0.0f && _r < 1.0f) { const uint64_t _vp = c->x[29] - 40; uint32_t _ua = (uint32_t)recomp_load32(c, _vp + 12), _ub = (uint32_t)recomp_load32(c, _vp + 20); float _a, _b; memcpy(&_a, &_ua, 4); memcpy(&_b, &_ub, 4); const float _in = (_b - _a) * (1.0f - _r / (16.0f / 9.0f)) * 0.5f; _a += _in; _b -= _in; memcpy(&_ua, &_a, 4); memcpy(&_ub, &_b, 4); recomp_store32(c, _vp + 12, _ua); recomp_store32(c, _vp + 20, _ub); } } /* Ocarina Reborn: portrait movie fit */'
 
 # (main offset, the original instruction word there, the C after it)
 SITES = (

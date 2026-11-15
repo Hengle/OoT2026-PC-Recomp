@@ -12,7 +12,7 @@
 /* The host and the menu accept the same custom output shapes and pixel budget. */
 static inline int hos_output_size_valid(uint32_t w, uint32_t h) {
     return w >= 640 && h >= 360 && (uint64_t)w * h <= 5120ULL * 2880 &&
-           (uint64_t)w * 4 >= (uint64_t)h * 5 && (uint64_t)w * 9 <= (uint64_t)h * 48;
+           (uint64_t)w * 16 >= (uint64_t)h * 9 && (uint64_t)w * 9 <= (uint64_t)h * 48;
 }
 
 /* An output size of a shape of its own: more than 1 % off 16:9 (16:10, 4:3, 21:9, 32:9...), as the Insert menu's Aspect ratio
@@ -24,11 +24,11 @@ static inline int hos_output_own_shape(uint32_t w, uint32_t h) {
     return r > game * 1.01 || r < game * 0.99;
 }
 
-/* The screen's ratio as the picture takes it: 5:4 to 48:9. */
+/* The screen's ratio as the picture takes it: 9:16 to 48:9. */
 static inline double hos_wide_clamp(double want) {
     const double surround = 48.0 / 9.0;
     /* Accept the rounded value commonly used for HOS_ASPECT. */
-    return want >= surround - 0.0001 ? surround : want < 5.0 / 4.0 ? 5.0 / 4.0 : want;
+    return want >= surround - 0.0001 ? surround : want < 9.0 / 16.0 ? 9.0 / 16.0 : want;
 }
 
 /* The most pixels a widescreen picture takes: 5120 x 2160's (a 21:9 screen at the 4K output, native; 7680 x 1440, 48:9 at

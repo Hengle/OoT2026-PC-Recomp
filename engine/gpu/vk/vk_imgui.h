@@ -22,6 +22,10 @@ bool begin(uint32_t w, uint32_t h);
 const Fonts& fonts();
 /// The start-up screen's logo (assets/ocarina_reborn.png), or null; its width over its height in *aspect
 ImTextureData* logo(float* aspect);
+/// (Ocarina Reborn) the banner's mark, the launcher's ocarina picture (square), or null before the first frame
+ImTextureData* mark();
+/// Animated transparent wallet crystal, lazily uploaded once; uv is four floats.
+ImTextureData* rupee(double seconds, float* uv, float* aspect);
 /// The frame's drawing over the window's image `index` (TRANSFER_DST_OPTIMAL before and after): new glyphs and textures
 /// copied in on cmd first (no wait on the queue), then one render pass
 void record(VkCommandBuffer cmd, uint32_t index, uint32_t w, uint32_t h);
