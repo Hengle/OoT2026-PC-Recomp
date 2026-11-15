@@ -6,6 +6,7 @@
 #include <cstdio>
 #include <cstring>
 #include <string>
+#include "load_default.h"
 namespace ocr_prepare {
 constexpr uint64_t MiB = 1024ull * 1024;
 inline unsigned workers(unsigned requested, unsigned cpus, uint64_t available, uint64_t commit) {
@@ -28,5 +29,15 @@ inline bool slow_load_marker(const std::string& path) {
 }
 inline bool avoid_resident_fallback(bool native_mesh, bool slow_marker, uint64_t total) {
     return native_mesh && slow_marker && total && total <= 20ull * 1024 * MiB;
+}
+inline load_default::Choice startup_choice(const char* env, bool native_mesh, bool marker,
+                                         bool slow_marker, uint64_t total, bool compressed) {
+    // Compute-fallback GPUs have a safe create path too: it retains their mesh
+    // fallback programs at startup, not all unrelated graphics/compute variants.
+    // Explicit choices, compressed caches, unknown/missing-cache warnings win.
+    const bool low_memory = total && total <= 20ull * 1024 * MiB;
+    if (!env && !compressed && low_memory && (!marker || slow_marker))
+        return {true, "memory-aware startup (<=20 GiB): mesh fallback ready, other programs loaded at create"};
+    return load_default::choose(env, native_mesh, marker, compressed);
 }
 }

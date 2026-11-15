@@ -110,10 +110,17 @@ void ocr_diag_event(const char *kind, const char *detail) {
     } else atomic_fetch_add(&events_dropped, 1);
     ReleaseSRWLockExclusive(&event_lock);
 }
+extern void hos_input_snapshot(char *out, size_t cap);
+static void camera_input_event(void) {
+    char detail[350];
+    hos_input_snapshot(detail, sizeof detail);
+    ocr_diag_event("camera_input", detail);
+}
 void ocr_diag_mark(void) {
     if (!atomic_load(&enabled)) return;
     atomic_store(&marker, 1);
     ocr_diag_event("user_marker", "Player marked a problem (Ctrl+F8). Add room/boss/song details when exporting.");
+    camera_input_event();
 }
 int ocr_diag_enabled(void) { return atomic_load_explicit(&enabled, memory_order_relaxed); }
 void ocr_diag_frame(const OcrDiagFrame *s) {
@@ -260,6 +267,7 @@ static DWORD WINAPI record_thread(void *unused) {
             active_until=now+10000000000LL; last_incident=now; active_threads(now);
         }
         if(now<=active_until || seq%5==0) write_line(line);
+        if(seq%5==0) camera_input_event();
         memcpy(history[history_at],line,strlen(line)+1); history_at=(history_at+1)%DIAG_HISTORY;
         if(history_count<DIAG_HISTORY) ++history_count;
         char pending[32][512]; unsigned count;

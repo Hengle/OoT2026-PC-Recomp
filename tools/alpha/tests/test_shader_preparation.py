@@ -5,6 +5,7 @@ ALPHA=Path(__file__).resolve().parents[1]
 ROOT=ALPHA.parents[1]
 sys.path.insert(0,str(ALPHA));sys.path.insert(0,str(ALPHA/'launcher'))
 import engine_prepare, performance, advisor
+import engine_tester_fixes
 
 class PreparationTests(unittest.TestCase):
     def test_policy_and_real_compute_selection(self):
@@ -74,10 +75,22 @@ int main(){
                 p=root/rel;p.parent.mkdir(parents=True,exist_ok=True)
                 p.write_bytes(subprocess.run(['git','show','517b661:engine/'+rel],cwd=ROOT,capture_output=True,check=True).stdout)
             engine_prepare.apply(root)
+            for rel, old, new in engine_tester_fixes.CHANGES:
+                if rel in names:
+                    p = root/rel
+                    p.write_text(engine_prepare.replace_once(p.read_text(encoding='utf-8'),old,new),encoding='utf-8')
             for rel in names:
                 self.assertEqual((root/rel).read_text(encoding='utf-8'),(ROOT/'engine'/rel).read_text(encoding='utf-8'))
             before={r:(root/r).read_bytes() for r in names}
+            # The prepare step is repeatable on its own output; follow-up patches
+            # run after it during staging, not backwards over the newer engine.
+            for rel, old, new in reversed(engine_tester_fixes.CHANGES):
+                if rel in names:
+                    p=root/rel;p.write_text(p.read_text(encoding='utf-8').replace(new,old),encoding='utf-8')
             engine_prepare.apply(root)
+            for rel, old, new in engine_tester_fixes.CHANGES:
+                if rel in names:
+                    p=root/rel;p.write_text(engine_prepare.replace_once(p.read_text(encoding='utf-8'),old,new),encoding='utf-8')
             self.assertEqual(before,{r:(root/r).read_bytes() for r in names})
 
     def test_progress_does_not_invent_completed_shader_counts(self):

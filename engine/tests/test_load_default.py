@@ -46,7 +46,9 @@ def check_source():
     for other in ("pskip", "pwait", "left_out", "pending_skips"):
         if other in note:
             raise SystemExit("the safety net counts draws left out again, which a healthy session has in either mode: " + other)
-    if "load_default::choose(getenv(\"RX_VK_LOAD\")" not in progs or "load_default::too_slow(" not in progs:
+    policy = (ROOT / "gpu/vk/ocr_prepare_policy.h").read_text(encoding="utf-8")
+    if "ocr_prepare::startup_choice(getenv(\"RX_VK_LOAD\")" not in progs or \
+            "load_default::choose(env, native_mesh, marker, compressed)" not in policy or "load_default::too_slow(" not in progs:
         raise SystemExit("vk_programs.cpp does not use load_default.h's rule")
     draw = (ROOT / "gpu/vk/vk_draw.cpp").read_text(encoding="utf-8")
     built = draw.index("remove(precompile_built_path().c_str());   // (notes are added here")

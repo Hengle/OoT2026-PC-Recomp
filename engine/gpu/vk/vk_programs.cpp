@@ -345,16 +345,13 @@ PipelineSource& pipeline_source() {
 /// waited too long for loads, start otherwise. Decided once the device is up (vk_main.cpp); start until then
 std::atomic<int> load_mode{-1};
 void programs_load_decide(bool native_mesh) {
-    bool marker = load_default::marker_there(load_fallback_path());
+    const bool marker = load_default::marker_there(load_fallback_path());
     MEMORYSTATUSEX memory{}; memory.dwLength = sizeof memory;
-    if (!getenv("RX_VK_LOAD") && GlobalMemoryStatusEx(&memory) &&
-        ocr_prepare::avoid_resident_fallback(native_mesh,
-            marker && ocr_prepare::slow_load_marker(load_fallback_path()), memory.ullTotalPhys)) {
-        marker = false;
-        logf("vk: memory-aware startup: keeping lazy program loads on a <=20 GiB PC; a previous slow-load marker would retain every listed program");
-    }
-    const load_default::Choice c = load_default::choose(getenv("RX_VK_LOAD"), native_mesh, marker,
-                                                        env_on("RX_VK_PROGRAM_CACHE_ZSTD"));   // (as vk_progcache.cpp disk_init reads it)
+    const uint64_t ram = GlobalMemoryStatusEx(&memory) ? memory.ullTotalPhys : 0;
+    const auto c = ocr_prepare::startup_choice(getenv("RX_VK_LOAD"), native_mesh, marker,
+        marker && ocr_prepare::slow_load_marker(load_fallback_path()), ram, env_on("RX_VK_PROGRAM_CACHE_ZSTD"));
+    // precompile_at_create still prepares every mesh-fallback compute pipeline.
+    // Only unrelated graphics/compute programs wait until the game creates them.   // (as vk_progcache.cpp disk_init reads it)
     load_mode.store(c.create ? 1 : 0, std::memory_order_release);
     logf("vk: programs are loaded %s: %s (RX_VK_LOAD=create or start says which)",
          c.create ? "when the game makes them (create)" : "before the title (start)", c.why);

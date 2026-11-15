@@ -34,6 +34,7 @@ def main():
     fixture = r'''#include <stdint.h>
 #include <stdio.h>
 #include <string.h>
+#include "ocr_input_state.h"
 enum { AX_LX, AX_LY, AX_RX, AX_RY };
 static struct { unsigned rested; signed char held[4]; } pads[2];
 static int options[20];
@@ -42,6 +43,7 @@ static int16_t hos_sdl_pad_axis(void *gc, int axis) { return ((int16_t *)gc)[axi
 ''' + function(hid, "void hos_filter_stick(int16_t x, int16_t y, int zone, int32_t out[2]) {") + r'''
 static void poll(int i, int16_t raw[4], int32_t output[4]) {
     void *gc = raw;
+    OcrPadDiagnostic diagnostic = {0};
 ''' + pad[start:end] + r'''
     memcpy(output, v, sizeof v);
 }
@@ -144,7 +146,7 @@ int main(void) {
         c = Path(folder) / "fixture.c"
         exe = Path(folder) / "fixture.exe"
         c.write_text(fixture, encoding="utf-8")
-        subprocess.run([args.cc, "-std=c11", "-Wall", "-Wextra", "-Werror", str(c), "-o", str(exe)], check=True)
+        subprocess.run([args.cc, "-std=c11", "-Wall", "-Wextra", "-Werror", "-I"+str(args.source/"host"), str(c), "-o", str(exe)], check=True)
         subprocess.run([str(exe)], check=True, timeout=30)
 
 

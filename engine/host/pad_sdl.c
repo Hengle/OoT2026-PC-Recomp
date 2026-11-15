@@ -23,6 +23,7 @@
 #include "hd_rumble.h"
 #include "hos_motion.h"
 #include "steam_pads.h"
+#include "ocr_input_state.h"
 #include "../gpu/vk/vk_api.h"   /* (HOS_PAD_*) */
 #ifndef HOOKSHOT_ENV_H   /* (env_on: the switches' one rule) */
 #include "../gpu/vk/compat/ocarina_reborn_env.h"
@@ -65,6 +66,8 @@ static SRWLOCK state_lock = SRWLOCK_INIT;
 static uint64_t state_buttons;
 static int32_t state_stick[4];
 static int state_count;
+static int64_t state_sample_ns;
+static OcrPadDiagnostic state_diagnostic;
 static char state_name[128];   /* the first controller's name (host/prompts.c: the button prompts' Auto) */
 static volatile LONG rumble_low, rumble_high;   /* 0..65535, set by the vibration HLE */
 /* the game's own vibration values per side (0 left, 1 right: {amp_low, freq_low, amp_high, freq_high}), for the pads
@@ -373,6 +376,7 @@ static void pads_poll(void) {
             }
         }
         uint64_t b = 0;
+        OcrPadDiagnostic diagnostic = {0};
         int32_t s[4] = {0};
         int count = 0;
         int rx_option(int id, int otherwise);
@@ -397,7 +401,8 @@ static void pads_poll(void) {
         for (int i = 0; i < MAX_PADS; i++) stand_in |= pads[i].gc && pads[i].steam;
         for (int i = 0; i < MAX_PADS; i++) {
             void *gc = pads[i].gc;
-            if (!gc) continue;
+            // Do not keep a disconnected device's input until the one-second rescan.
+            if (!gc || !hos_sdl_pad_connected(gc)) continue;
             /* (hookshot) a real Valve pad beside its Steam stand-in: its motion is read (motion_poll), its buttons and
                sticks come through the stand-in as the player's Steam layout maps them, so they are not merged twice,
                and its rumble goes through Steam too. Its own presses still mark it the pad used last, for motion */
@@ -435,8 +440,9 @@ static void pads_poll(void) {
             const int inv_y = rx_option(17, 0);
             const int z = rx_option(11, 0);   /* (the menu's Stick dead zone) */
             int32_t v[4];
+            const int16_t raw_right[2] = {hos_sdl_pad_axis(gc, AX_RX), hos_sdl_pad_axis(gc, AX_RY)};
             hos_filter_stick(hos_sdl_pad_axis(gc, AX_LX), hos_sdl_pad_axis(gc, AX_LY), z, v);
-            hos_filter_stick(hos_sdl_pad_axis(gc, AX_RX), hos_sdl_pad_axis(gc, AX_RY), z, v + 2);
+            hos_filter_stick(raw_right[0], raw_right[1], z, v + 2);
             v[1] = -v[1];   /* SDL's Y axes point down */
             v[3] = -v[3];
             /* (hookshot) An axis steers once it has been seen at rest (inside the dead zone) since the pad was opened. The sticks are
@@ -462,6 +468,13 @@ static void pads_poll(void) {
                toggling the setting admits a held phantom axis, which stays admitted after the setting is restored (#2273). */
             if (inv_x) v[2] = -v[2];
             if (inv_y) v[3] = -v[3];
+            if (diagnostic.sampled_pads < 2) {
+                const int at = diagnostic.sampled_pads++;
+                diagnostic.raw_right[at][0] = raw_right[0];
+                diagnostic.raw_right[at][1] = raw_right[1];
+                diagnostic.rested[at] = pads[i].rested;
+            }
+            diagnostic.zone = z, diagnostic.invert_x = inv_x, diagnostic.invert_y = inv_y;
             for (int k = 0; k < 4; k++)
                 if ((v[k] < 0 ? -v[k] : v[k]) > (s[k] < 0 ? -s[k] : s[k])) s[k] = v[k];
             {   /* (motion: the pad last used; a stick counts by which way it is pushed, not by how far) */
@@ -481,6 +494,8 @@ static void pads_poll(void) {
         state_buttons = b;
         memcpy(state_stick, s, sizeof s);
         state_count = count;
+        state_sample_ns = now; // when polling began; a blocked device call cannot publish a fresh old sample
+        state_diagnostic = diagnostic;
         state_name[0] = 0;
         for (int i = 0; i < MAX_PADS; i++)
             if (pads[i].gc && !pads[i].motion_only) {   /* (the stand-in's name, not its motion-only pad's) */
@@ -534,19 +549,37 @@ int hos_sdl_pads(uint64_t *buttons, int32_t stick[4]) {
     }
     AcquireSRWLockShared(&state_lock);
     const int n = state_count;
-    *buttons |= state_buttons;
-    for (int k = 0; k < 4; k++)
-        if ((state_stick[k] < 0 ? -state_stick[k] : state_stick[k]) > (stick[k] < 0 ? -stick[k] : stick[k]))
-            stick[k] = state_stick[k];
+    if (ocr_pad_sample_fresh(state_sample_ns, hos_now_ns())) {
+        *buttons |= state_buttons;
+        for (int k = 0; k < 4; k++)
+            if ((state_stick[k] < 0 ? -state_stick[k] : state_stick[k]) > (stick[k] < 0 ? -stick[k] : stick[k]))
+                stick[k] = state_stick[k];
+    }
+    // Keep the device count while stale so XInput does not take over the same pad.
     ReleaseSRWLockShared(&state_lock);
     return n;
+}
+
+/* Diagnostic reads never query SDL on the writer thread or wait for its poller.
+   Two device models' axes at most, no serials, button history or text input. */
+void hos_sdl_camera_snapshot(char *out, size_t cap) {
+    if (!cap) return;
+    if (!TryAcquireSRWLockShared(&state_lock)) { snprintf(out, cap, "sdl=busy"); return; }
+    const int64_t now = hos_now_ns();
+    snprintf(out, cap, "sdl=%d age_ms=%.1f fresh=%d right=%d,%d raw0=%d,%d rest0=%x raw1=%d,%d rest1=%x sampled=%d zone=%d inv=%d,%d",
+        state_count, state_sample_ns ? (now-state_sample_ns)/1e6 : -1.0,
+        ocr_pad_sample_fresh(state_sample_ns, now), state_stick[2], state_stick[3],
+        state_diagnostic.raw_right[0][0], state_diagnostic.raw_right[0][1], state_diagnostic.rested[0],
+        state_diagnostic.raw_right[1][0], state_diagnostic.raw_right[1][1], state_diagnostic.rested[1],
+        state_diagnostic.sampled_pads, state_diagnostic.zone, state_diagnostic.invert_x, state_diagnostic.invert_y);
+    ReleaseSRWLockShared(&state_lock);
 }
 
 /* (motion) the latest readings for nn_hid.c's GetSixAxisSensorStates, newest first: up to max, how many there are; 0
    when there are none (Motion controls off, or no pad with a gyroscope) */
 int hos_sdl_motion_history(HosMotionSample *out, int max) {
     AcquireSRWLockShared(&state_lock);
-    const int n = !motion_live ? 0 : motion_count < max ? motion_count : max;
+    const int n = !motion_live || !ocr_pad_sample_fresh(state_sample_ns, hos_now_ns()) ? 0 : motion_count < max ? motion_count : max;
     for (int i = 0; i < n; i++) out[i] = motion_hist[(motion_head - i + HOS_MOTION_HISTORY) % HOS_MOTION_HISTORY];
     ReleaseSRWLockShared(&state_lock);
     return n;

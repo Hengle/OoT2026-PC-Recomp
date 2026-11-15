@@ -49,7 +49,7 @@ def main():
     replay = (ROOT / "gpu" / "vk" / "vk_replay.cpp").read_text(encoding="utf-8")
     menu = (ROOT / "gpu" / "vk" / "vk_menu.cpp").read_text(encoding="utf-8")
 
-    read = block(hid, "static void read_input(")
+    read = block(hid, "static void read_input_impl(").replace("read_input_impl(", "read_input(", 1)
     behind = read[read.index("if (!game_in_front()"):]   # (with or without PR 545's scripted-background test)
     behind = behind[:behind.index("return;") + len("return;")]
     if "pads_in_background(" not in behind or "pads_read(" not in behind:
@@ -68,6 +68,7 @@ def main():
     constants += block(api, "enum { HOS_KEY_MOVE_UP") + ";\n"   # (the keys-only controls)
     constants += block(api, "enum { HOS_OPT_CHEAT_HEARTS") + ";\n"
     constants += block(api, "enum { HOS_BIND_PAD") + ";\n"   # (the live input's !bind)
+    constants += (ROOT / "host/ocr_tools.h").read_text(encoding="utf-8") + "\n"
     for name in ("STATE_SIZE", "NPAD_NO1", "ATTR_CONNECTED"):
         matches = re.findall(r"^#define " + name + r"\s+[^\n]+", hid, re.M)
         assert len(matches) == 1, name

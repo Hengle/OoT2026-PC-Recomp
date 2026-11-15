@@ -71,6 +71,7 @@
 #include "vk_programs.h"
 #include "vk_pipelines.h"
 #include "warm_bounded.h"
+#include "ocr_intel_compute.h"
 #include "vk_work.h"   // (after the others: counts the commands that do GPU work, for full_barrier)
 
 namespace mkwvk {
@@ -1252,7 +1253,18 @@ VkComputePipelineCreateInfo compute_pipeline_info(const Program& q, bool noopt) 
     pin_subgroup(ci.stage, q.workgroup[0]);
     ci.layout = q.layout;
     static const bool noopt_on = env_on("RX_VK_NOOPT");
-    if (noopt && noopt_on) ci.flags |= VK_PIPELINE_CREATE_DISABLE_OPTIMIZATION_BIT;
+    static const bool intel_trial = [] {
+        const char *value = getenv("OCR_INTEL_FOREST_COMPAT");
+        return !value || !env_value_off(value);
+    }();
+    const bool forest = ocr_intel::forest_compute(dev.props.vendorID,
+        dev.driver_id == VK_DRIVER_ID_INTEL_PROPRIETARY_WINDOWS, q.key, intel_trial);
+    if ((noopt && noopt_on) || forest) ci.flags |= VK_PIPELINE_CREATE_DISABLE_OPTIMIZATION_BIT;
+    if (forest) {
+        static std::atomic<unsigned> said{0};
+        if (said.fetch_add(1, std::memory_order_relaxed) < 2)
+            logf("[OcarinaReborn/GPU] Intel forest compatibility trial: program %016llx, optimization disabled; not a confirmed fix (OCR_INTEL_FOREST_COMPAT=0 restores default)", (unsigned long long)q.key);
+    }
     return ci;
 }
 /// (hookshot) That pipeline asked of the caches without compiling (create_cached: the driver's own, then the start's): null when
@@ -8253,14 +8265,8 @@ bool prepare_run(void (*progress)(size_t done, size_t total), bool background, b
     const auto warm_compute = [&](Program& p) {
         if (!warm_cs || taau_key(p.key)) return;
         ensure_layout(p);
-        VkComputePipelineCreateInfo ci{VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO};
-        ci.stage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
-        ci.stage.stage = VK_SHADER_STAGE_COMPUTE_BIT;
-        ci.stage.module = p.stages[0].module;
-        ci.stage.pName = "main";
-        pin_subgroup(ci.stage, p.workgroup[0]);
-        ci.layout = p.layout;
-        if (env_on("RX_VK_NOOPT")) ci.flags |= VK_PIPELINE_CREATE_DISABLE_OPTIMIZATION_BIT;
+        // Use the same Intel trial policy during warming and actual play.
+        const VkComputePipelineCreateInfo ci = compute_pipeline_info(p, true);
         VkPipeline pl = VK_NULL_HANDLE;
         // (into the app's pipeline cache, saved to mkw_vk_pipelines.bin: without it the next start compiled them again in play
         // where the driver's own cache missed them, AMD's 15 s culling compiles each time)

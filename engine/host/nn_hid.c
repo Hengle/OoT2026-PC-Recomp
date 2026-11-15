@@ -25,6 +25,7 @@
    Npad states share one layout (NpadCommonState): { s64 sampling; u64 buttons; s32 lx, ly; s32 rx, ry; u32 attributes;
    pad } = 0x28 bytes. */
 #include "hos.h"
+#include "ocr_diagnostics.h"
 #include "ocr_tools.h"
 #include "hos_paths.h"
 #include "control.h"
@@ -951,7 +952,7 @@ static uint64_t oc_pad_word(uint64_t buttons) {
     return w;
 }
 
-static void read_input(uint64_t *buttons, int32_t stick[4]) {
+static void read_input_impl(uint64_t *buttons, int32_t stick[4]) {
     *buttons = 0;
     memset(stick, 0, 4 * sizeof *stick);
     void hos_mouse_native_stick(int held);
@@ -1042,6 +1043,35 @@ static void read_input(uint64_t *buttons, int32_t stick[4]) {
     /* (hookshot, mouse_native.c) the keys and the pads are the right stick too: while they turn the camera, its angles are
        the native mouse's new start, so the two do not undo each other */
     hos_mouse_native_stick(stick[2] != 0 || stick[3] != 0);
+}
+
+// Only the most recent camera output is kept, for the bounded diagnostic timeline.
+static SRWLOCK input_diagnostic_lock = SRWLOCK_INIT;
+static int32_t input_diagnostic_right[2];
+static int64_t input_diagnostic_ns;
+static void read_input(uint64_t *buttons, int32_t stick[4]) {
+    read_input_impl(buttons, stick);
+    if (ocr_diag_enabled() && TryAcquireSRWLockExclusive(&input_diagnostic_lock)) {
+        input_diagnostic_right[0] = stick[2], input_diagnostic_right[1] = stick[3];
+        input_diagnostic_ns = hos_now_ns();
+        ReleaseSRWLockExclusive(&input_diagnostic_lock);
+    }
+}
+void hos_input_snapshot(char *out, size_t cap) {
+    void hos_sdl_camera_snapshot(char *out, size_t cap);
+    if (!cap) return;
+    hos_sdl_camera_snapshot(out, cap);
+    const size_t at = strlen(out);
+    if (at >= cap || !TryAcquireSRWLockShared(&input_diagnostic_lock)) return;
+    // Observe the OS window only; game_in_front has input-thread state and logging.
+    DWORD foreground_pid = 0;
+    HWND foreground = GetForegroundWindow();
+    if (foreground) GetWindowThreadProcessId(foreground, &foreground_pid);
+    snprintf(out+at, cap-at, " final=%d,%d final_age_ms=%.1f front_os=%d mouse_mode=%d gyro=%d",
+        input_diagnostic_right[0], input_diagnostic_right[1],
+        input_diagnostic_ns ? (hos_now_ns()-input_diagnostic_ns)/1e6 : -1.0,
+        foreground_pid == GetCurrentProcessId(), rx_option(6,0), rx_option(HOS_OPT_GYRO,1));
+    ReleaseSRWLockShared(&input_diagnostic_lock);
 }
 
 static void vibration_send(uint64_t handle, uint64_t value);

@@ -169,6 +169,9 @@ class NativeRecorderTests(unittest.TestCase):
         self.assertTrue(any(t['name']=='処理 CPU' for r in samples.values() for t in r['thread_cpu']))
         self.assertTrue(all(r['map']=='TestRoom' and r['loading']==1 for r in samples.values()))
         self.assertTrue(any(r['dropped_events']>0 for r in samples.values()))
+        camera=[r for r in rows if r.get('kind')=='camera_input']
+        self.assertTrue(camera, 'Camera snapshots must accompany the problem marker')
+        self.assertTrue(all('final=0,0' in r['detail'] for r in camera))
         self.assertEqual(rows[-1]['type'],'end')
 
     def test_cap_rotates_and_keeps_recording(self):

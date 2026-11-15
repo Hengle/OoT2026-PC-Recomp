@@ -68,7 +68,8 @@ def main():
     poll = block(sdl, "static void pads_poll")
     check("rx_option(11, 0)" in poll and
           "hos_filter_stick(hos_sdl_pad_axis(gc, AX_LX), hos_sdl_pad_axis(gc, AX_LY), z, v)" in poll and
-          "hos_filter_stick(hos_sdl_pad_axis(gc, AX_RX), hos_sdl_pad_axis(gc, AX_RY), z, v + 2)" in poll,
+          "raw_right[2] = {hos_sdl_pad_axis(gc, AX_RX), hos_sdl_pad_axis(gc, AX_RY)}" in poll and
+          "hos_filter_stick(raw_right[0], raw_right[1], z, v + 2)" in poll,
           "SDL must filter both sticks with the menu's dead zone")
     option = replay[replay.index("t.option = "):]
     option = option[:option.index("};") + 2]

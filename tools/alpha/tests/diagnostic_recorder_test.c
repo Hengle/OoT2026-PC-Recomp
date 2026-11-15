@@ -3,6 +3,7 @@
 HosThread *hos_self(void) {return NULL;}
 const char *hos_thread_name(HosThread *t) {(void)t;return "fixture";}
 void hos_log(const char *fmt, ...) {(void)fmt;}
+void hos_input_snapshot(char *out,size_t cap) {snprintf(out,cap,"sdl=1 fresh=1 right=0,0 final=0,0");}
 int ocr_diag_cpu_threads(OcrDiagCpuThread *out,int max) {
     if(max<1)return 0;
     out[0].tid=17;out[0].cpu_100ns=(uint64_t)(now_ns()-origin)/10;
