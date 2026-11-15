@@ -61,6 +61,7 @@ int env_switch(const char* name) {   // (-1: unset)
 }
 // (what is known of FSR on this device: -1 not yet, else an FsrWhy. Set when AMD's library has been asked)
 std::atomic<int> g_why{-1};
+std::atomic<int> g_316_why{-1}; // independent provider availability
 }  // namespace
 
 FsrWhy fsr4_why() {
@@ -68,6 +69,14 @@ FsrWhy fsr4_why() {
     static const bool env_off = env_switch("RX_VK_FSR4") == 0;
     if (env_off) return FSR_ENV_OFF;
     const int w = g_why.load(std::memory_order_relaxed);
+    return w < 0 ? FSR_OK : (FsrWhy)w;
+}
+
+FsrWhy fsr316_why() {
+    if (!fsr4_built()) return FSR_NOT_BUILT;
+    static const bool env_off = env_switch("RX_VK_FSR316") == 0;
+    if (env_off) return FSR_ENV_OFF;
+    const int w = g_316_why.load(std::memory_order_relaxed);
     return w < 0 ? FSR_OK : (FsrWhy)w;
 }
 
@@ -91,7 +100,7 @@ struct Library {
     PfnFfxDestroyContext destroy = nullptr;
     PfnFfxQuery query = nullptr;
     PfnFfxDispatch dispatch = nullptr;
-    uint64_t version_id = 0;
+    uint64_t version_id = 0, version316_id = 0;
     VkDeviceContext device_context{};
 };
 // (lib() and st() are never destroyed: Hookshot leaves through ExitProcess / exit() with the device alive, and a destructor
@@ -106,6 +115,7 @@ Library& lib() {
 struct Context {
     ffxCreateBackendVKDesc backend{};
     ffxOverrideVersion version{};
+    ffxCreateContextDescUpscaleVersion api_version{};
 #ifndef _WIN32
     ffxCreateBackendVKDesc_DEPRECATED legacy_backend{};   // (linux) the backend description a Vulkan FSR 4 build like fsr4-vk reads
 #endif
@@ -130,15 +140,15 @@ struct State {
     uint64_t evals = 0;
     int told_resets = 0;
 };
-State& st() {
+template<bool Fsr316> State& st() {
     static State& s = *new State;   // (never destroyed: lib()'s note)
     return s;
 }
 
-void on_message(uint32_t type, const wchar_t* message) {
+template<bool Fsr316> void on_message(uint32_t type, const wchar_t* message) {
     char text[512] = {};
     if (message) WideCharToMultiByte(CP_UTF8, 0, message, -1, text, (int)sizeof text - 1, nullptr, nullptr);
-    logf("vk: AMD FSR 4: AMD's %s: %s", type == FFX_API_MESSAGE_TYPE_ERROR ? "error" : "warning", text);
+    logf("vk: AMD FSR %s: AMD's %s: %s", Fsr316 ? "3.1.6" : "4", type == FFX_API_MESSAGE_TYPE_ERROR ? "error" : "warning", text);
 }
 
 /// The folders the library is looked for in: RX_VK_FSR_DIR, the executable's (bin\ beside the launcher), the game folder
@@ -908,6 +918,7 @@ bool load() {
     l.tried = true;
     const auto no = [](FsrWhy why) {
         g_why = why;
+        g_316_why = why;
         return false;
     };
     std::string where;
@@ -976,40 +987,47 @@ bool load() {
         listed += (listed.empty() ? "" : ", ") + std::string(name);
         unsigned v[3] = {0, 0, 0};
         sscanf(name, "%u.%u.%u", &v[0], &v[1], &v[2]);
+        // Pin the requested analytical provider. Never substitute 4.x or another 3.x.
+        if (!strcmp(name, "3.1.6") && !l.version316_id) l.version316_id = ids[i];
         // (the first of equal versions: a Vulkan FSR 4 build lists its Auto, which picks the GPU's model, before INT8 and FP8)
         if (v[0] == 4 && (!l.version_id || v[1] > best[1] || (v[1] == best[1] && v[2] > best[2]))) {
             std::memcpy(best, v, sizeof best);
             l.version_id = ids[i];
         }
     }
-    if (!l.version_id) {
-        logf("vk: AMD FSR 4: no FSR 4 for this GPU (AMD's library has: %s)", listed.c_str());
-        return no(FSR_NO_MODEL);
-    }
-    logf("vk: AMD FSR 4: upscalers %s; using %u.%u.%u", listed.c_str(), best[0], best[1], best[2]);
-    l.ok = true;
-    g_why = FSR_OK;
-    return true;
+    g_why = l.version_id ? FSR_OK : FSR_NO_MODEL;
+    g_316_why = l.version316_id ? FSR_OK : FSR_NO_MODEL;
+    if (l.version_id)
+        logf("vk: AMD FSR 4: upscalers %s; using %u.%u.%u", listed.c_str(), best[0], best[1], best[2]);
+    else logf("vk: AMD FSR 4: no FSR 4 for this GPU (AMD's library has: %s)", listed.c_str());
+    logf("vk: AMD FSR 3.1.6: %s (AMD's library has: %s)", l.version316_id ? "available" : "unavailable", listed.c_str());
+    l.ok = l.version_id || l.version316_id;
+    return l.ok;
 }
 
 /// A context for outputs of w x h, any render size up to that (the game's dynamic resolution and the Render resolution row
 /// change it every so often: one context takes them all)
-std::shared_ptr<Context> make_context(uint32_t w, uint32_t h, bool hdr) {
+template<bool Fsr316> std::shared_ptr<Context> make_context(uint32_t w, uint32_t h, bool hdr) {
     Library& l = lib();
     auto c = std::make_shared<Context>();
     c->backend.header.type = FFX_API_CREATE_CONTEXT_DESC_TYPE_BACKEND_VK;
     c->backend.deviceContext = l.device_context;
+    // FSR 4's ML shader tuning must never rewrite the analytical 3.1.6 passes.
+    if (Fsr316) c->backend.deviceContext.vkDeviceProcAddr = vkGetDeviceProcAddr;
     c->version.header.type = FFX_API_DESC_TYPE_OVERRIDE_VERSION;
-    c->version.versionId = l.version_id;
+    c->version.versionId = Fsr316 ? l.version316_id : l.version_id;
     c->backend.header.pNext = &c->version.header;
+    c->api_version.header.type = FFX_API_CREATE_CONTEXT_DESC_TYPE_UPSCALE_VERSION;
+    c->api_version.version = FFX_UPSCALER_VERSION;
+    c->version.header.pNext = &c->api_version.header;
 #ifndef _WIN32
     // (linux) fsr4-vk looks for the SDK's older backend description, not ffxCreateBackendVKDesc: without it, it finds no device
     // and creation returns FFX_API_RETURN_ERROR_PARAMETER. Both stay chained
     c->legacy_backend.header.type = FFX_API_CREATE_CONTEXT_DESC_TYPE_BACKEND_VK_DEPRECATED;
     c->legacy_backend.vkDevice = l.device_context.vkDevice;
     c->legacy_backend.vkPhysicalDevice = l.device_context.vkPhysicalDevice;
-    c->legacy_backend.vkDeviceProcAddr = l.device_context.vkDeviceProcAddr;
-    c->version.header.pNext = &c->legacy_backend.header;
+    c->legacy_backend.vkDeviceProcAddr = c->backend.deviceContext.vkDeviceProcAddr;
+    c->api_version.header.pNext = &c->legacy_backend.header;
 #endif
     c->upscale.header.type = FFX_API_CREATE_CONTEXT_DESC_TYPE_UPSCALE;
     c->upscale.header.pNext = &c->backend.header;
@@ -1021,12 +1039,13 @@ std::shared_ptr<Context> make_context(uint32_t w, uint32_t h, bool hdr) {
                        FFX_UPSCALE_ENABLE_DYNAMIC_RESOLUTION;
     c->upscale.maxRenderSize = {w, h};
     c->upscale.maxUpscaleSize = {w, h};
-    c->upscale.fpMessage = &on_message;
+    c->upscale.fpMessage = &on_message<Fsr316>;
+    if (env_switch("OCR_FSR_API_DEBUG") == 1) c->upscale.flags |= FFX_UPSCALE_ENABLE_DEBUG_CHECKING;
     const auto t0 = std::chrono::steady_clock::now();
     const ffxReturnCode_t r = l.create(&c->context, &c->upscale.header, nullptr);
     const double made_ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
     if (r != FFX_API_RETURN_OK || !c->context) {
-        logf("vk: AMD FSR 4: its upscaler was not made (%d) for %ux%u", (int)r, w, h);
+        logf("vk: AMD FSR %s: its upscaler was not made (%d) for %ux%u", Fsr316 ? "3.1.6" : "4", (int)r, w, h);
         c->context = nullptr;
         return nullptr;
     }
@@ -1039,9 +1058,13 @@ std::shared_ptr<Context> make_context(uint32_t w, uint32_t h, bool hdr) {
     ffxQueryGetProviderVersion provider{};
     provider.header.type = FFX_API_QUERY_DESC_TYPE_GET_PROVIDER_VERSION;
     const bool known = l.query(&c->context, &provider.header) == FFX_API_RETURN_OK && provider.versionName;
-    logf("vk: AMD FSR 4: FSR %s made for outputs of %ux%u (frame %llu, %.1f ms of CPU; its own %llu MB)%s",
-         known ? provider.versionName : "?", w, h, (unsigned long long)texture_frame_no(), made_ms,
-         (unsigned long long)(c->memory >> 20), hdr ? ", HDR colour, linear (the game's native HDR)" : "");
+    if (Fsr316 && (!known || strcmp(provider.versionName, "3.1.6"))) {
+        logf("vk: AMD FSR 3.1.6: wrong provider returned (%s); context rejected", known ? provider.versionName : "unknown");
+        return nullptr;
+    }
+    logf("vk: AMD FSR %s: FSR %s made for outputs of %ux%u (frame %llu, %.1f ms of CPU; its own %llu MB)%s",
+         Fsr316 ? "3.1.6" : "4", known ? provider.versionName : "?", w, h, (unsigned long long)texture_frame_no(), made_ms,
+         (unsigned long long)(c->memory >> 20), hdr ? ", linear colour, automatic exposure" : "");
     return c;
 }
 
@@ -1067,8 +1090,8 @@ void barriers(VkCommandBuffer cmd, const VkImageMemoryBarrier2* b, uint32_t n) {
     vkCmdPipelineBarrier2(cmd, &di);
 }
 
-#ifndef _WIN32
-/// (linux) a Vulkan FSR 4 build takes no frame without an exposure, and the chain's colour is tonemapped already: a 1x1 R32F of 1
+/// SDR FSR 4 requires an explicit exposure when automatic exposure is disabled.
+/// The input is already tonemapped: supply a 1x1 R32F of 1 on every platform.
 bool unit_exposure(VkCommandBuffer cmd, TemporalImage& out) {
     static VkImage image = VK_NULL_HANDLE;
     static VmaAllocation allocation{};
@@ -1094,32 +1117,35 @@ bool unit_exposure(VkCommandBuffer cmd, TemporalImage& out) {
     }
     return true;
 }
-#endif
 
 // ---- the engine (vk_temporal.h TemporalEngine) ----
 
-bool start() { return load(); }
+template<bool Fsr316> bool start() {
+    return load() && (Fsr316 ? fsr316_why() : fsr4_why()) == FSR_OK;
+}
 
-void release() {
-    State& s = st();
+template<bool Fsr316> void release() {
+    State& s = st<Fsr316>();
     if (!s.context) return;
     std::shared_ptr<Context> old = std::move(s.context);
     temporal_later([old] {});   // (destroyed with the last copy, a few frames on: recorded dispatches may still use it)
     s.context.reset();
 }
 
-int prepare(VkCommandBuffer, uint32_t rw, uint32_t rh, uint32_t ow, uint32_t oh, bool /*native_aa*/,
+template<bool Fsr316> int prepare(VkCommandBuffer, uint32_t rw, uint32_t rh, uint32_t ow, uint32_t oh, bool /*native_aa*/,
             uint32_t* in_w, uint32_t* in_h, const char** why) {
-    State& s = st();
+    State& s = st<Fsr316>();
     int made = 1;
     // (the game's native HDR: Context::hdr. What the game presents, not the option and the swapchain: with Native picked and
     // the game's picture not PQ, the scene is LDR. RX_VK_FSR4_HDR=0: the LDR context and the clamped colour with Native too)
     static const bool hdr_allowed = env_switch("RX_VK_FSR4_HDR") != 0;
-    const bool hdr = hdr_allowed && present_native_pq.load(std::memory_order_relaxed);
+    // FSR 3.1.6 requires linear colour, also for SDR output. The chain's
+    // existing linear input/output passes provide it without changing display HDR.
+    const bool hdr = Fsr316 || (hdr_allowed && present_native_pq.load(std::memory_order_relaxed));
     if (!s.context || s.context->width != ow || s.context->height != oh || s.context->hdr != hdr) {
         if (s.context && s.context->hdr != hdr) logf("vk: AMD FSR 4: made again: the game's native HDR turned %s", hdr ? "on" : "off");
-        release();
-        s.context = make_context(ow, oh, hdr);
+        release<Fsr316>();
+        s.context = make_context<Fsr316>(ow, oh, hdr);
         if (!s.context) return *why = "its upscaler was not made", -1;
         s.in_w = s.in_h = 0;
         made = 2;
@@ -1131,13 +1157,11 @@ int prepare(VkCommandBuffer, uint32_t rw, uint32_t rh, uint32_t ow, uint32_t oh,
     return made;
 }
 
-bool evaluate(VkCommandBuffer cmd, const TemporalFrame& f) {
-    State& s = st();
+template<bool Fsr316> bool evaluate(VkCommandBuffer cmd, const TemporalFrame& f) {
+    State& s = st<Fsr316>();
     Library& l = lib();
-#ifndef _WIN32
     TemporalImage exposure{};
-    if (!unit_exposure(cmd, exposure)) return false;
-#endif
+    if (!s.context->hdr && !unit_exposure(cmd, exposure)) return false;
     const auto now = std::chrono::steady_clock::now();
     const float frame_ms = s.evals ? std::chrono::duration<float, std::milli>(now - s.last).count() : 1000.0f / 30.0f;
     s.last = now;
@@ -1157,10 +1181,8 @@ bool evaluate(VkCommandBuffer cmd, const TemporalFrame& f) {
     d.depth = resource(f.depth, VK_IMAGE_USAGE_SAMPLED_BIT, FFX_API_RESOURCE_STATE_COMPUTE_READ);
     d.motionVectors = resource(f.motion, VK_IMAGE_USAGE_SAMPLED_BIT, FFX_API_RESOURCE_STATE_COMPUTE_READ);
     d.output = resource(f.output, VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT, FFX_API_RESOURCE_STATE_UNORDERED_ACCESS);
-#ifndef _WIN32
     if (!s.context->hdr)   // (an HDR context works out its own exposure: FFX_UPSCALE_ENABLE_AUTO_EXPOSURE)
         d.exposure = resource(exposure, VK_IMAGE_USAGE_SAMPLED_BIT, FFX_API_RESOURCE_STATE_COMPUTE_READ);
-#endif
     d.jitterOffset = {f.jitter[0], f.jitter[1]};   // (render pixels, as the projection was offset: the same as DLSS's)
     d.motionVectorScale = {1.0f, 1.0f};             // (render pixels already, towards the frame before)
     d.renderSize = {f.render_w, f.render_h};
@@ -1175,7 +1197,7 @@ bool evaluate(VkCommandBuffer cmd, const TemporalFrame& f) {
     d.flags = s.context->hdr ? 0u : (uint32_t)FFX_UPSCALE_FLAG_NON_LINEAR_COLOR_SRGB;   // (HDR: linear light)
     ffxReturnCode_t r;
     {
-        GprofSpan timed(cmd, "fsr4 ffxDispatch (AMD's passes)");   // (RX_VK_PASS_TIMING=1: AMD's own GPU time, named)
+        GprofSpan timed(cmd, Fsr316 ? "fsr316 ffxDispatch (AMD's passes)" : "fsr4 ffxDispatch (AMD's passes)");   // (RX_VK_PASS_TIMING=1: AMD's own GPU time, named)
         ::mkwvk::rec::boundary(::mkwvk::rec::B_DIRECT);   // (ffxDispatch records into cmd itself: what this thread recorded through vk_work.h reaches cmd first)
         r = l.dispatch(&s.context->context, &d.header);
         note_work();   // (AMD's dispatches: full_barrier must not take the next barrier for a repeat of the one before them)
@@ -1187,36 +1209,43 @@ bool evaluate(VkCommandBuffer cmd, const TemporalFrame& f) {
                                           barrier(f.output.image, any, any, G, G)};
     barriers(cmd, out, 4);
     if (r != FFX_API_RETURN_OK) {
-        logf("vk: AMD FSR 4: its dispatch failed (%d)", (int)r);
+        logf("vk: AMD FSR %s: its dispatch failed (%d)", Fsr316 ? "3.1.6" : "4", (int)r);
         return false;
     }
     // (the first evaluation, and the first resets: a camera cut each)
     if (s.evals++ == 0 || (f.reset && s.told_resets < 40))
-        s.told_resets++, logf("vk: AMD FSR 4: %ux%u -> %ux%u, jitter %+.3f %+.3f px%s", f.render_w, f.render_h, f.output.width,
+        s.told_resets++, logf("vk: AMD FSR %s: %ux%u -> %ux%u, jitter %+.3f %+.3f px%s", Fsr316 ? "3.1.6" : "4", f.render_w, f.render_h, f.output.width,
                               f.output.height, f.jitter[0], f.jitter[1], f.reset ? " (history reset)" : "");
     return true;
 }
 
-uint64_t memory() {
-    State& s = st();
+template<bool Fsr316> uint64_t memory() {
+    State& s = st<Fsr316>();
     return s.context ? s.context->memory : 0;
 }
 
 /// Its context takes HDR colour (made for the game's native HDR): the chain gives it linear light, unclamped
-bool hdr() {
-    State& s = st();
+template<bool Fsr316> bool hdr() {
+    State& s = st<Fsr316>();
     return s.context && s.context->hdr;
 }
 
-const TemporalEngine kEngine{"AMD FSR 4", "FSR", start, prepare, evaluate, release, memory, hdr};
+const TemporalEngine kEngine{"AMD FSR 4", "FSR", start<false>, prepare<false>, evaluate<false>, release<false>, memory<false>, hdr<false>};
+const TemporalEngine kEngine316{"AMD FSR 3.1.6", "FSR316", start<true>, prepare<true>, evaluate<true>, release<true>, memory<true>, hdr<true>};
 
 }  // namespace
 
 bool fsr4_built() { return true; }
 const TemporalEngine* fsr4_engine() { return &kEngine; }
+const TemporalEngine* fsr316_engine() { return &kEngine316; }
 
 void fsr4_probe() {
     if (fsr4_why() != FSR_OK || g_why.load(std::memory_order_relaxed) >= 0 || !dev.device) return;
+    load();
+}
+
+void fsr316_probe() {
+    if (fsr316_why() != FSR_OK || g_316_why.load(std::memory_order_relaxed) >= 0 || !dev.device) return;
     load();
 }
 
@@ -1237,6 +1266,8 @@ bool fsr4_wants_descriptor_buffer() {
 
 bool fsr4_built() { return false; }
 const TemporalEngine* fsr4_engine() { return nullptr; }
+const TemporalEngine* fsr316_engine() { return nullptr; }
+void fsr316_probe() {}
 void fsr4_probe() {}
 void fsr4_close() {}
 bool fsr4_wants_descriptor_buffer() { return false; }

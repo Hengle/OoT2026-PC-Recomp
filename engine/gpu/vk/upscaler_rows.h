@@ -12,7 +12,7 @@ namespace mkwvk::upscaler_rows {
 /// gpu/vk/vk_fsr4.cpp), and Off: no upscaler at all, the game's network left out too and its input stretched to the output
 /// with a plain linear filter (vk_temporal.cpp temporal_off: the fastest, and the roughest picture). The saved values keep
 /// their meaning: each came after the ones before, so a saved 1 or 2 is still DLSS or DLAA and a saved 3 FSR 3.1
-enum { GAME = 0, DLSS = 1, DLAA = 2, FSR3 = 3, FSR4 = 4, FSR4_AA = 5, OFF = 6, kUpscalers = 7 };
+enum { GAME = 0, DLSS = 1, DLAA = 2, FSR3 = 3, FSR4 = 4, FSR4_AA = 5, OFF = 6, FSR316 = 7, kUpscalers = 8 };
 /// One bit per upscaler that can run here (1 << GAME and 1 << OFF always: the menu's upscalers_available()): what the row
 /// steps through
 inline unsigned bit(int upscaler) { return 1u << upscaler; }
@@ -20,6 +20,8 @@ inline unsigned bit(int upscaler) { return 1u << upscaler; }
 inline unsigned dlss_bits(bool dlss_ok) { return dlss_ok ? bit(DLSS) | bit(DLAA) : 0u; }
 /// FSR 4's two, the same way (fsr4_ok: fsr4_why() == FSR_OK)
 inline unsigned fsr4_bits(bool fsr4_ok) { return fsr4_ok ? bit(FSR4) | bit(FSR4_AA) : 0u; }
+/// Keep separate histories/failed states for the runtime 3.1.6 provider.
+inline int temporal_slot(int mode) { return mode == FSR316 ? 3 : (mode == FSR4 || mode == FSR4_AA) ? 1 : mode == FSR3 ? 2 : 0; }
 inline bool is_dlss(int upscaler) { return upscaler == DLSS || upscaler == DLAA; }
 inline bool is_fsr4(int upscaler) { return upscaler == FSR4 || upscaler == FSR4_AA; }
 /// The 3D drawn at full size, the upscaler anti-aliasing alone (DLAA, FSR 4's native AA): the Render resolution row does not
@@ -27,7 +29,7 @@ inline bool is_fsr4(int upscaler) { return upscaler == FSR4 || upscaler == FSR4_
 inline bool full_scale(int upscaler) { return upscaler == DLAA || upscaler == FSR4_AA; }
 /// FSR 3.1 and FSR 4 scale from a smaller 3D at the shares DLSS's modes use: Quality 1.5x (67%), Balanced 1.7x (58%),
 /// Performance 2x (50%) and Ultra Performance 3x (33%) per axis, AMD's own ratios too
-inline bool scales_by_mode(int upscaler) { return upscaler == DLSS || upscaler == FSR3 || upscaler == FSR4; }
+inline bool scales_by_mode(int upscaler) { return upscaler == DLSS || upscaler == FSR3 || upscaler == FSR316 || upscaler == FSR4; }
 
 /// opts.resolution: 0 Auto (the game's dynamic resolution), else a share of the output in percent. 1 to 4 are the values from
 /// before (100, 75, 67, 50: saved options keep their meaning); 5 and 6 came with DLSS's Balanced and Ultra Performance. Each
@@ -50,7 +52,7 @@ constexpr int kDlssSteps[] = {0, 3, 5, 4, 6};
 constexpr int kFsr3Steps[] = {0, 1, 9, 8, 2, 3, 5, 4, 6};
 constexpr int kOffSteps[] = {0, 1, 2, 3, 4, 6};
 inline const int* steps(int upscaler, int& n) {
-    if (upscaler == FSR3) return n = sizeof kFsr3Steps / sizeof kFsr3Steps[0], kFsr3Steps;
+    if (upscaler == FSR3 || upscaler == FSR316) return n = sizeof kFsr3Steps / sizeof kFsr3Steps[0], kFsr3Steps;
     if (scales_by_mode(upscaler)) return n = sizeof kDlssSteps / sizeof kDlssSteps[0], kDlssSteps;
     if (upscaler == OFF) return n = sizeof kOffSteps / sizeof kOffSteps[0], kOffSteps;
     return n = sizeof kGameSteps / sizeof kGameSteps[0], kGameSteps;
@@ -125,7 +127,7 @@ inline int native_of(int engine) { return engine == DLSS ? DLAA : engine == FSR4
 /// value that runs). From a Native to an engine that has one: its Native; else the engine's scaled form. A value that
 /// cannot run here steps as the game's own does
 inline int step_engine(int upscaler, int dir, unsigned available) {
-    constexpr int kEngines[] = {GAME, DLSS, FSR3, FSR4, OFF};   // (Off: no upscaler, last)
+    constexpr int kEngines[] = {GAME, DLSS, FSR3, FSR316, FSR4, OFF};   // (Off: no upscaler, last)
     constexpr int n = sizeof kEngines / sizeof kEngines[0];
     available |= bit(GAME);
     const bool native = full_scale(upscaler);

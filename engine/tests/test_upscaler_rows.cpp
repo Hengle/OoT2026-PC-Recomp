@@ -124,7 +124,7 @@ int main() {
         using ur::OFF;
         const unsigned menu_min = ur::bit(GAME) | ur::bit(OFF);   // (the menu's mask on a PC with nothing else)
         const unsigned every = menu_min | ur::dlss_bits(true) | ur::bit(ur::FSR3) | ur::fsr4_bits(true);
-        CHECK("Off is the last value", OFF == 6 && ur::kUpscalers == 7);
+        CHECK("saved Off stays 6; 3.1.6 is appended", OFF == 6 && ur::FSR316 == 7 && ur::kUpscalers == 8);
         CHECK("Off steps after FSR 4's native AA and wraps to the game's own",
               ur::step_upscaler(ur::FSR4_AA, 1, every) == OFF && ur::step_upscaler(OFF, 1, every) == GAME &&
               ur::step_upscaler(GAME, -1, every) == OFF && ur::step_upscaler(OFF, -1, every) == ur::FSR4_AA);
@@ -264,6 +264,16 @@ int main() {
         CHECK("no bias for the game's own, Off and FSR 4's native AA",
               ur::upscale_lod_bias_for(GAME, 6667, -1.0f) == 0.0f && ur::upscale_lod_bias_for(ur::OFF, 5000, -1.0f) == 0.0f &&
                   ur::upscale_lod_bias_for(ur::FSR4_AA, 0, -1.0f) == 0.0f);
+    }
+    {
+        const unsigned available = ur::bit(GAME) | ur::bit(ur::FSR3) | ur::bit(ur::FSR316) | ur::fsr4_bits(true) | ur::bit(ur::OFF);
+        CHECK("3.1.6 engine navigation", ur::step_engine(ur::FSR3, 1, available) == ur::FSR316 &&
+              ur::step_engine(ur::FSR316, 1, available) == ur::FSR4 && ur::step_engine(ur::FSR4, -1, available) == ur::FSR316);
+        CHECK("unavailable runtime skipped", ur::step_engine(ur::FSR3, 1, available & ~ur::bit(ur::FSR316)) == ur::FSR4);
+        CHECK("3.1.6 native and Quality scale", ur::snap_render(ur::FSR316, 1) == 1 && ur::snap_render(ur::FSR316, 3) == 3);
+        CHECK("separate provider histories", ur::temporal_slot(ur::FSR316) == 3 && ur::temporal_slot(ur::FSR3) == 2 &&
+              ur::temporal_slot(ur::FSR4) == 1 && ur::temporal_slot(ur::FSR4_AA) == 1 && ur::temporal_slot(DLAA) == 0);
+        CHECK("3.1.6 follows FSR mip policy", ur::upscale_lod_bias_for(ur::FSR316, 5000, 0) == ur::upscale_lod_bias_for(ur::FSR3, 5000, 0));
     }
     std::puts("upscaler rows: all checks passed");
 }

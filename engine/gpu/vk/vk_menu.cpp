@@ -210,13 +210,14 @@ namespace ur = upscaler_rows;
 /// One bit per upscaler that runs here (upscaler_rows.h bit). Each backend caches its own answer, so this costs nothing
 unsigned upscalers_available() {
     return ur::bit(ur::GAME) | ur::bit(ur::OFF) | ur::dlss_bits(dlss_why() == DLSS_OK) |
-           (fsr3::supported() ? ur::bit(ur::FSR3) : 0u) | ur::fsr4_bits(fsr4_why() == FSR_OK);
+           (fsr3::supported() ? ur::bit(ur::FSR3) : 0u) | ur::fsr4_bits(fsr4_why() == FSR_OK) |
+           (fsr316_why() == FSR_OK ? ur::bit(ur::FSR316) : 0u);
 }
 /// (FSR 3.1 has inputs of its own; DLSS and FSR 4 run on the frame chain they share, temporal_mode; Off is neither)
 int upscaler() { return fsr3_wanted() ? (int)ur::FSR3 : temporal_off() ? (int)ur::OFF : temporal_mode(); }
 const char* tx_upscaler(int) {
     static const char* t[ur::kUpscalers] = {"Game's own", "NVIDIA DLSS", "NVIDIA DLAA", "AMD FSR 3.1", "AMD FSR 4",
-                                            "AMD FSR 4 Native AA", "Off (no upscaling)"};
+                                            "AMD FSR 4 Native AA", "Off (no upscaling)", "AMD FSR 3.1.6"};
     // (by engine: DLAA and FSR 4's native AA are the Render resolution row's Native, upscaler_rows.h engine)
     return t[std::clamp(ur::engine(upscaler()), 0, ur::kUpscalers - 1)];
 }
@@ -236,6 +237,7 @@ const char* hn_upscaler(int v, int variant) {
         "AMD's machine-learned upscaler, the 3D at full size with its edges smoothed; the slowest.",
         "No upscaler, not even the game's network: the 3D is stretched to the output with a plain linear filter. The "
         "fastest choice and the roughest picture: no edge smoothing, and softer below 100%.",
+        "AMD FSR 3.1.6 upscaling. Select 67% for Quality, 58% for Balanced, or 100% for native anti-aliasing.",
     };
     static const char* const dlss_no[DLSS_WHY_COUNT] = {
         nullptr,
@@ -254,6 +256,8 @@ const char* hn_upscaler(int v, int variant) {
         "AMD FSR 4: AMD's files have no FSR 4 for this GPU.",
     };
     // (now: the value shown and what runs here, with both engines' reasons; every one: as said above)
+    if (variant < 0 && opts.dlss == ur::FSR316 && fsr316_why() != FSR_OK)
+        return "AMD FSR 3.1.6 is unavailable in this run. The game's own upscaler is active; the saved choice is kept.";
     int d = 0, f = 0;
     if (variant < 0) {
         v = std::clamp(upscaler(), 0, ur::kUpscalers - 1), d = (int)dlss_why(), f = (int)fsr4_why();
@@ -4123,6 +4127,7 @@ static void probe_upscalers_soon() {
             const auto t0 = std::chrono::steady_clock::now();
             dlss_probe();
             fsr4_probe();
+            fsr316_probe();
             (void)fsr3::supported();
             logf("menu: the upscalers asked in the background while the start-up screen shows (%.0f ms)",
                  std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count());
@@ -4867,7 +4872,7 @@ void menu_tick() {
         // (the layout row shows the controls as they are: host/nn_hid.c keeps them, the ini's pad_ lines, and a saved
         // layout is not applied over them at start)
         if (open_now.load()) opts.pad_layout = detect_pad_layout();
-        if (open_now.load()) dlss_probe(), fsr4_probe();   // (whether the Upscaler row can offer DLSS and FSR here: asked once)
+        if (open_now.load()) dlss_probe(), fsr4_probe(), fsr316_probe();   // (whether the Upscaler row can offer DLSS and FSR here: asked once)
         if (open_now.load()) refresh_mics();   // (the microphones as they are now)
     }
     if (open_now.load() && page == 5) {   // (hookshot) the restart question: Later (the default) or Restart now

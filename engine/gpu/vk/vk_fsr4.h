@@ -14,6 +14,10 @@ bool fsr4_built();
 /// Why FSR 4 cannot be chosen here (the Upscaler row says it), FSR_OK when it can or is not known yet
 enum FsrWhy { FSR_OK, FSR_NOT_BUILT, FSR_ENV_OFF, FSR_NO_LIBRARY, FSR_NO_MODEL, FSR_WHY_COUNT };
 FsrWhy fsr4_why();
+/// Analytical FSR 3.1.6 from the same AMD runtime; independent of FSR 4 support.
+FsrWhy fsr316_why();
+void fsr316_probe();
+const TemporalEngine* fsr316_engine();
 /// Loads AMD's library once and asks it for an FSR 4 upscaler for this device, so fsr4_why knows before the first upscale
 /// (the menu, when it opens). Nothing in a build without FSR, or before the device is made
 void fsr4_probe();

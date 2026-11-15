@@ -102,8 +102,9 @@ int temporal_mode() {
     if (fsr3_on_chain() && fsr3_chosen()) return ur::FSR3;
     // (with RX_VK_FSR3_CHAIN=0 FSR 3.1 upscales with its own inputs, vk_fsr3_inputs.cpp: the game's own as far as this chain is
     // concerned. Nor anything while it upscales: one upscaler at a time, and one camera jitter)
-    if (!ur::is_dlss(v) && !ur::is_fsr4(v)) return ur::GAME;
+    if (!ur::is_dlss(v) && !ur::is_fsr4(v) && v != ur::FSR316) return ur::GAME;
     if (fsr3_wanted()) return ur::GAME;
+    if (v == ur::FSR316 && fsr316_why() != FSR_OK) return ur::GAME;
     if (ur::is_dlss(v) && dlss_why() != DLSS_OK) return ur::GAME;
     if (ur::is_fsr4(v) && fsr4_why() != FSR_OK) return ur::GAME;
     return v;
@@ -144,7 +145,7 @@ struct Engine {
 
 struct State {
     std::mutex mu;
-    Engine engines[3];               // (DLSS, FSR 4, FSR 3.1: engine_of)
+    Engine engines[4];               // (DLSS, FSR 4, FSR 3.1: engine_of)
     const TemporalEngine* drawing = nullptr;   // (the engine that drew last: another one starts a new history)
     int drawn_mode = ur::GAME;
     bool dlaa_waiting = false;
@@ -234,9 +235,9 @@ void note_output(const Texture* out, uint32_t level) {
 /// temporal_jitter_sample picks the same one)
 Engine& engine_of(int mode) {
     State& s = st();
-    const int slot = ur::is_fsr4(mode) ? 1 : mode == ur::FSR3 ? 2 : 0;
+    const int slot = ur::temporal_slot(mode);
     Engine& k = s.engines[slot];
-    if (!k.e) k.e = slot == 1 ? fsr4_engine() : slot == 2 ? fsr3_engine() : dlss_engine();
+    if (!k.e) k.e = slot == 3 ? fsr316_engine() : slot == 1 ? fsr4_engine() : slot == 2 ? fsr3_engine() : dlss_engine();
     return k;
 }
 const char* name_of(int mode) {
@@ -246,6 +247,7 @@ const char* name_of(int mode) {
     case ur::FSR4: return "AMD FSR 4";
     case ur::FSR4_AA: return "AMD FSR 4 Native AA";
     case ur::FSR3: return "AMD FSR 3.1";
+    case ur::FSR316: return "AMD FSR 3.1.6";
     default: return "the game's own";
     }
 }
@@ -713,7 +715,7 @@ MkwVkJitter temporal_jitter_sample() {
     const int mode = temporal_mode();
     if (off || mode == ur::GAME || (mode == ur::FSR3 && fsr3_off)) return {};
     const uint64_t last = s.last_frame.load(std::memory_order_relaxed);
-    if (s.engines[ur::is_fsr4(mode) ? 1 : mode == ur::FSR3 ? 2 : 0].failed.load(std::memory_order_relaxed) || !last) return {};
+    if (s.engines[ur::temporal_slot(mode)].failed.load(std::memory_order_relaxed) || !last) return {};
     return s.jitter.read(texture_frame_no());
 }
 

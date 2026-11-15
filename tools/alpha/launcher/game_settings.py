@@ -44,11 +44,14 @@ SECTIONS = [
         # hides them in its own menu too. A saved 1 or 2 is shown as such and runs as the game's own: UNAVAILABLE below)
         ('dlss', 'Upscaler', 'Upscaler',
          [(0, 'Spiel-eigener', 'Game\'s own'), (3, 'AMD FSR 3.1', 'AMD FSR 3.1'),
+          (7, 'AMD FSR 3.1.6', 'AMD FSR 3.1.6'),
           (4, 'AMD FSR 4', 'AMD FSR 4'), (5, 'AMD FSR 4 Native AA', 'AMD FSR 4 Native AA')],
-         'Was das 3D-Bild auf die Ausgabe-Auflösung hochrechnet. AMD FSR 3.1 läuft auf jeder Grafikkarte. AMD FSR 4 auf '
+         'FSR 3.1.6 nutzt die mitgelieferte AMD-Bibliothek auf unterstützten Grafikkarten. 67 % entspricht Qualität. '
+         'FSR 3.1 bleibt als Alternative verfügbar. AMD FSR 4 auf '
          'AMD-Karten, für die AMDs Treiber es anbietet (RX 9000, mit aktuellem Treiber auch RX 7000); sonst rechnet das '
          'Spiel mit seinem eigenen.',
-         'What scales the 3D up to the output. AMD FSR 3.1 runs on any graphics card. AMD FSR 4 on AMD cards its driver '
+         'FSR 3.1.6 uses the included AMD runtime on supported GPUs. Select 67% for Quality. '
+         'FSR 3.1 remains available as an alternative. AMD FSR 4 on AMD cards its driver '
          'offers it for (RX 9000; with a recent driver RX 7000 too); otherwise the game uses its own.', 'medium'),
         ('resolution', 'Render-Auflösung', 'Render resolution',
          [(0, 'Auto (dynamisch)', 'Auto (dynamic)'), (1, '100 %', '100%'), (2, '75 %', '75%'), (3, '67 % (Qualität)', '67% (Quality)'),
