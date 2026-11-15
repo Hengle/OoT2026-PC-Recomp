@@ -75,6 +75,92 @@ int main(){
             p=m.Progress();p.programs=38809;p.line('@@stage shaders');p.line('@@progress 0.8')
         last=messages[-1];self.assertNotIn('count',last);self.assertLess(last['total_pct'],100)
 
+    def test_real_precompile_counts_compute_work_and_releases_pipelines(self):
+        # Run the production warm pass with a deterministic driver. Regression:
+        # graphics reached 100% and left the watchdog frozen while compute work
+        # was still progressing. Also check filtered work and temporary lifetime.
+        draw=(ROOT/'engine/gpu/vk/vk_draw.cpp').read_text(encoding='utf-8')
+        a=draw.index('void precompile_warm(void (*progress)(size_t done, size_t total)) {')
+        function=draw[a:draw.index('\n}\n',a)+2]
+        harness=r'''
+#include <algorithm>
+#include <atomic>
+#include <cassert>
+#include <chrono>
+#include <cstdio>
+#include <cstdlib>
+#include <memory>
+#include <string>
+#include <unordered_map>
+#include <unordered_set>
+#include <vector>
+#include "warm_bounded.h"
+using VkPipeline=unsigned long long;
+using VkPrimitiveTopology=int;
+constexpr VkPipeline VK_NULL_HANDLE=0;
+constexpr int VK_SUCCESS=0;
+struct VkComputePipelineCreateInfo {};
+struct {int device=1;} dev;
+struct Stage {int module=1;};
+struct Program {bool fallback=false,compute=false,failed=false;unsigned variant=1;uint64_t key=0;std::vector<Stage> stages{{}};std::vector<VkPipeline> fallback_compute;};
+struct NoteRef {uint64_t prog;unsigned variant;size_t at;};
+struct PipeNote {int s=0,topo=0;};
+struct ComputePlan {bool all=false,none=false;std::unordered_set<uint64_t> keys{200,201};};
+std::vector<std::pair<size_t,size_t>> progress_values;
+std::atomic<unsigned> destroyed=0,computed=0,borrowed=0;
+unsigned saved=0,marked=0;
+std::string precompile_built_path(){return "built";}
+void pcache_init(){}
+std::vector<NoteRef> pipe_notes_refs(){return {{100,1,0},{101,1,1}};}
+void precompile_built_write(size_t){marked++;}
+template<class... T>void logf(const char*,T...){}
+ComputePlan computes_plan(const char*,bool){return {};}
+bool env_on(const char* name){return std::string(name)=="HOOKSHOT_PREPARE_ONLY";}
+std::vector<uint64_t> program_cache_compute_keys(){return {200,201,999};}
+std::string pipe_notes_path(){return "notes";}
+unsigned usable_cpus(){return 4;}
+unsigned ocr_shader_workers(unsigned){return 1;}
+void ub_thread_off(){}
+bool prepare_stopped(){return false;}
+template<class F>void program_cache_borrow(uint64_t key,F callback){
+    assert(key!=999);borrowed++;Program p;p.key=key;p.fallback=key==100;p.compute=key>=200;callback(p);assert(p.fallback_compute.empty());
+}
+void ensure_layout(Program&){}
+void fallback_compute_pipelines(Program& p){p.fallback_compute.push_back(88);}
+bool pipe_note_at(FILE*,size_t,PipeNote*){return true;}
+int note_targets(const PipeNote&){return 0;}
+VkPipeline build_graphics(Program&,int,int,int){return 77;}
+void vkDestroyPipeline(int,VkPipeline p,void*){assert(p);destroyed++;}
+template<class... T>void prepare_progress_log(T...){}
+bool taau_key(uint64_t){return false;}
+VkComputePipelineCreateInfo compute_pipeline_info(Program&,bool){return {};}
+int cached_compute(const VkComputePipelineCreateInfo*,VkPipeline* out){
+    std::this_thread::sleep_for(std::chrono::milliseconds(75));computed++;*out=99;return VK_SUCCESS;
+}
+void pipeline_cache_save(bool){assert(computed==2);saved++;}
+/* PRODUCTION */
+int main(){
+    FILE* f=fopen("notes","wb");assert(f);fclose(f);
+    precompile_warm([](size_t done,size_t total){progress_values.emplace_back(done,total);});
+    assert(borrowed==4 && computed==2 && destroyed==5 && saved==1 && marked==0);
+    assert(!progress_values.empty());
+    size_t last=0;bool compute_advance=false;
+    for(size_t i=0;i<progress_values.size();i++){
+        auto [done,total]=progress_values[i];assert(total==4 && done>=last && done<=total);
+        if(done==3)compute_advance=true;
+        if(i+1<progress_values.size())assert(done<total);
+        last=done;
+    }
+    assert(last==4 && compute_advance);
+}'''.replace('/* PRODUCTION */',function)
+        compiler=shutil.which('clang++');self.assertIsNotNone(compiler)
+        with tempfile.TemporaryDirectory() as tmp:
+            p=Path(tmp);(p/'test.cpp').write_text(harness)
+            r=subprocess.run([compiler,'-std=c++20','-O2','-static','-I'+str(ROOT/'engine/gpu/vk'),str(p/'test.cpp'),'-o',str(p/'test.exe')],capture_output=True,text=True)
+            self.assertEqual(r.returncode,0,r.stderr)
+            r=subprocess.run([str(p/'test.exe')],cwd=p,capture_output=True,text=True,timeout=10)
+            self.assertEqual(r.returncode,0,r.stderr)
+
     def test_low_ram_is_not_an_allocation_failure(self):
         lines=['[hos Presentation Thread] [OcarinaReborn/MEM] system: commit free 407 MB, RAM free 331 MB, reserve 3072 MB']
         self.assertEqual(performance.memory_events(lines),0)

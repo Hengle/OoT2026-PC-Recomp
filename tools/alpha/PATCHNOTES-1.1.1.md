@@ -4,7 +4,7 @@
 - First-time preparation now focuses on recorded pipelines instead of compiling tens of thousands of speculative pipeline variants.
 - Temporary pipelines are released during preparation, and shader worker counts adapt to available RAM and Windows commit headroom.
 - Preparation reuses existing caches. New effects can still cause brief stutters on first use; preparation time depends on your CPU and driver.
-- Fixed misleading shader counts in the build screen.
+- Fixed misleading shader counts and false stall warnings while compute pipelines are still being prepared.
 
 **🛠️ Performance and stability**
 - New **Streaming and memory** modes: **Balanced** and **Lower memory**. Lower memory reduces cache sizes and startup reservations without changing texture quality.
