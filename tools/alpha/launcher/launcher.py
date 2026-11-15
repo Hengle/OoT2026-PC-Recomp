@@ -471,8 +471,51 @@ class App(tk.Tk):
         self.news_new = False
         self.after(500, self.poll_update)
         self.protocol('WM_DELETE_WINDOW', self.quit_app)
-        self.after(50, self.route)
+        self.after(50, self.startup_reporting_tip)
         self.after(600, self.start_fairy)
+
+    def startup_reporting_tip(self):
+        """Shown once per launcher start, independently of game/build/update state."""
+        if self.cfg.get('hide_reporting_tip', False):
+            return self.route()
+
+        def dismiss(hide=False):
+            if hide:
+                updated = dict(self.cfg, hide_reporting_tip=True)
+                try:
+                    save_settings(updated)
+                except OSError as e:
+                    messagebox.showerror('Ocarina Reborn',
+                        'Could not save this preference. Please try again.\n\n' + str(e), parent=self)
+                    return
+                self.cfg.update(updated)
+            self.route()
+
+        def body(ctx, top):
+            s = ctx.s
+            x, w = self.content(ctx)
+            (hy, _), (cy, ch), (fy, fh) = layout(ctx, top, [(76, 34, 0), (300, 34, 1), (82, 30, 0)])
+            self.heading(ctx, x, hy, 'Help improve Ocarina Reborn',
+                         'Stutters or crashes? Your reports help us improve the game.', icon='bug', w=w)
+            ctx.panel(x, cy, w, ch, r=16, fill=ui.PANEL, fill2=ui.CELL, border=ui.LINE)
+            ctx.text(x + 32*s, cy + 24*s, '1. MARK THE PROBLEM', 16, 'semibold', ui.LINK)
+            ctx.text(x + 32*s, cy + 58*s,
+                     'If you notice stutters or crashes, press Ctrl+F8 when the problem happens, '
+                     'then close the game and create a fresh Debug Package.',
+                     22, color=ui.TEXT, width=w - 64*s)
+            second = cy + ch * .52
+            ctx.hline(x + 32*s, second - 16*s, w - 64*s, ui.LINE, .7)
+            ctx.text(x + 32*s, second, '2. SHARE YOUR REPORT', 16, 'semibold', ui.LINK)
+            ctx.text(x + 32*s, second + 34*s,
+                     'Send it in #post-your-logs-here, in the Discord together with the area and what happened. '
+                     'Reports from lower-end PCs are especially helpful.',
+                     22, color=ui.TEXT, width=w - 64*s)
+            ctx.button(x, fy, 320*s, fh, T('Nicht mehr anzeigen', "Don't show again"),
+                       lambda: dismiss(True), size=22, r=14)
+            ctx.button(x + w - 260*s, fy, 260*s, fh, T('Verstanden', 'Got it'),
+                       dismiss, kind='primary', icon='check', size=26, weight='bold', r=14)
+        game = Path(self.cfg.get('game_dir', ''))
+        self.show('play' if (game / 'ready.json').is_file() else 'files', body)
 
     def sync_interface_theme(self):
         """The game owns the shared RGB after an F1 edit; never overwrite it at launch."""
