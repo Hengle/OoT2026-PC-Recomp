@@ -1,17 +1,4 @@
-"""The Insert menu's Threaded rendering (Auto / On / Off): its rule (gpu/vk/threaded_rendering.h) and how the row reaches
-the replay, the recorder and the host. A compiled check of the rule plus source checks; no game, no GPU.
-
-The rule is one function every reader shares: On is the render thread and the recorder thread together, Off neither,
-and Auto picks them where the process may run on 12 or more logical processors and the mode is safe. All of Auto is
-behind one constant, threaded::kAutoEnabled, which is on: turned off, Auto is Off on every PC and the row changes
-nobody's default. The source checks: that constant is the only gate and is on; the row is Auto by default,
-takes a restart and is in the readme and the development guide; RX_VK_ASYNC is read in one place (vk_replay.cpp
-render_thread_mode, the switch over the row), which async_on takes; the recorder asks the row only
-with RX_VK_RECORDER unset; and the host's present poll asks the renderer (HOS_OPT_RENDER_THREAD) instead of reading
-RX_VK_ASYNC itself, so the row's On answers the poll exactly as RX_VK_ASYNC=1 does.
-
-python -I -B tests/test_threaded_rendering.py [--cxx g++]
-"""
+"""Check the conservative default and explicit render-thread overrides in the port."""
 import argparse
 import re
 import subprocess
@@ -56,10 +43,13 @@ int main() {
             CHECK(!choose(AUTO, cpus, unsafe, false).on && choose(AUTO, cpus, unsafe, false).why == Why::AutoGate);
     // (a value that is none of the row's: Auto)
     CHECK(choose(7, 64, false, true).why == Why::AutoCpus && choose(-1, 64, false, false).why == Why::AutoGate);
-    // (as built: the gate is on, so Auto is its rule: on from 12 logical processors where the mode is safe)
-    CHECK(kAutoEnabled);
-    for (const unsigned cpus : {0u, 8u, 11u}) CHECK(!choose(AUTO, cpus, false).on);
-    for (const unsigned cpus : {12u, 16u, 64u}) CHECK(choose(AUTO, cpus, false).on && !choose(AUTO, cpus, true).on);
+    // The incomplete asynchronous port must not activate merely because a CPU has more cores.
+    CHECK(!kAutoEnabled);
+    for (const unsigned cpus : {0u, 8u, 11u, 12u, 16u, 64u, 256u})
+        for (const bool unsafe : {false, true}) {
+            CHECK(!choose(AUTO, cpus, unsafe).on);
+            CHECK(choose(AUTO, cpus, unsafe).why == Why::AutoGate);
+        }
     CHECK(choose(ON, 4, false).on && !choose(OFF, 64, false).on);
     std::printf("PASS: the Threaded rendering rule\n");
 }
@@ -88,10 +78,9 @@ def main():
     api = (vk / "vk_api.h").read_text(encoding="utf-8")
     native = (ROOT / "host" / "nvn_native.c").read_text(encoding="utf-8")
 
-    # (the gate: one constant, on, and Auto's rule behind it)
-    if len(re.findall(r"constexpr bool \w+ = ", rule)) != 1 or "constexpr bool kAutoEnabled = true;" not in rule:
-        raise SystemExit("threaded_rendering.h: Auto's gate is not the one constant kAutoEnabled, on (turning it off changes "
-                         "the default for every PC with 12 threads: that is its own change)")
+    # The default stays conservative independently of CPU count.
+    if len(re.findall(r"constexpr bool \w+ = ", rule)) != 1 or "constexpr bool kAutoEnabled = false;" not in rule:
+        raise SystemExit("threaded_rendering.h: automatic asynchronous rendering must remain gated off")
     choose = block(rule, "constexpr Choice choose(")
     if "bool auto_enabled = kAutoEnabled" not in choose or "if (!auto_enabled) return {false, Why::AutoGate};" not in choose:
         raise SystemExit("threaded_rendering.h: choose() no longer keeps Auto behind the gate")

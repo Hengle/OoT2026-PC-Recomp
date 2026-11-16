@@ -1186,6 +1186,9 @@ uint64_t cap_ranges_ver = 1;   // (any of the captures' range lists changed: cap
 std::vector<std::pair<uint64_t, uint64_t>> pool_cap_ranges;   // (merged; cap_ranges_mu)
 uint32_t pool_cap_gen = 0;
 uint64_t captures_made = 0, pool_cap_built = 0;              // (cap_ranges_mu)
+// (Ocarina Reborn) how many captures have been begun (capture_make, before it collects the written pages), for any thread to
+// read: what a thread wrote before it read N is in capture N+1, or in an older one (memory_captures_begun)
+std::atomic<uint64_t> captures_begun{0};
 std::unordered_map<uint64_t, uint64_t> pool_first_seen;     // (a pool's start -> the capture it was first seen at)
 uint64_t capture_pool_max() {
     static const uint64_t v = (getenv("RX_VK_CAPTURE_POOL_MB") ? (uint64_t)atoll(getenv("RX_VK_CAPTURE_POOL_MB")) : 64) << 20;
@@ -1813,8 +1816,10 @@ void memory_capture_submit() {
     captures.push_back(std::move(c));
 }
 /// (the pages the CPU wrote since the last capture, copied now: a submit's capture, or memory_capture_now's)
+uint64_t memory_captures_begun() { return captures_begun.load(std::memory_order_acquire); }
 std::unique_ptr<Capture> capture_make() {
     if (!capture_on()) return nullptr;
+    captures_begun.fetch_add(1, std::memory_order_release);   // (before the written pages are collected: memory_captures_begun)
     const auto t0 = std::chrono::steady_clock::now();
     std::unique_ptr<Capture> c;
     {

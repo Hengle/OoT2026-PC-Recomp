@@ -332,8 +332,8 @@ PERF = Path(__file__).parent / 'engine-perf.patch'
 
 
 def apply_perf(root):
-    """Renderer and host performance work on top of the fixes above (engine-perf.patch): threaded rendering (Auto from 12
-    logical processors, OCR_THREADED_RENDERING=0/1), the game's occlusion queries answered with the GPU's counts, sparse VRAM
+    """Renderer and host performance work on top of the fixes above (engine-perf.patch): threaded rendering (explicit
+    OCR_THREADED_RENDERING=1 only until capture ordering is validated), the game's occlusion queries, sparse VRAM
     mirrors, per-draw costs, quick pipelines while a full build runs, and native float adds on Intel Arc and Xe-LPG"""
     import os
     import subprocess
