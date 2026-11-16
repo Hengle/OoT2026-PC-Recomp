@@ -60,4 +60,4 @@ Name: "{group}\Uninstall Ocarina Reborn"; Filename: "{uninstallexe}"
 Name: "{userdesktop}\Ocarina Reborn"; Filename: "{app}\OcarinaReborn.exe"; IconFilename: "{app}\OcarinaReborn.ico"; Tasks: desktopicon
 
 [Run]
-Filename: "{app}\OcarinaReborn.exe"; Description: "Launch Ocarina Reborn"; Flags: nowait postinstall skipifsilent
+Filename: "{app}\OcarinaReborn.exe"; Description: "Launch Ocarina Reborn Launcher"; Flags: nowait postinstall skipifsilent
