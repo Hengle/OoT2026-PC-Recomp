@@ -380,11 +380,12 @@ LOW_END_ROWS = (
 )
 LOW_END_ROWS += (
     ('fps_target', 'Auto-Auflösung: FPS-Ziel', 'Auto resolution: FPS target',
-     ['Aus', '30 FPS', '45 FPS', '60 FPS'], ['Off', '30 FPS', '45 FPS', '60 FPS'],
-     'Senkt die Render-Auflösung schrittweise (bis 50 %), wenn die Grafikkarte das Ziel nicht schafft, und hebt sie wieder an, '
+     ['Aus', '30 FPS', '45 FPS', '60 FPS', '60 FPS (schwacher PC, bis 33 %)'],
+     ['Off', '30 FPS', '45 FPS', '60 FPS', '60 FPS (weak PC, down to 33%)'],
+     'Senkt die Render-Auflösung schrittweise (bis 50 %, bei „schwacher PC“ bis 33 %), wenn die Grafikkarte das Ziel nicht schafft, und hebt sie wieder an, '
      'wenn Luft ist – höchstens bis zur eingestellten Render-Auflösung. Prüft alle 5 Sekunden, damit es nicht ständig springt. '
      'Hilft nur, wenn die Grafikkarte bremst. Spiel neu starten.',
-     'Lowers the render resolution step by step (down to 50%) when the graphics card misses the target, and raises it again '
+     'Lowers the render resolution step by step (down to 50%, or 33% on the weak-PC choice) when the graphics card misses the target, and raises it again '
      'when there is room, up to the Render resolution setting. Checks every 5 seconds so it does not jump around. Only helps '
      'when the graphics card is the bottleneck. Restart the game.', 'low'),
 )
@@ -420,7 +421,9 @@ def low_end_env(cfg):
     if get('vram_compact'):
         env['RX_VK_COMPACT'] = '1'
     if get('fps_target'):
-        env['OCARINA_FPS_TARGET'] = str((0, 30, 45, 60)[min(get('fps_target'), 3)])
+        env['OCARINA_FPS_TARGET'] = str((0, 30, 45, 60, 60)[max(0, min(get('fps_target'), 4))])
+        if get('fps_target') >= 4:   # (very weak PCs: the render scale may go down to a third)
+            env['OCARINA_FPS_TARGET_MIN'] = '33'
     if get('fast_pipelines'):
         env['RX_VK_GPL'] = '1'
     return env
@@ -2268,6 +2271,7 @@ class App(tk.Tk):
                 bx += ctx.text_width(T('Presets:', 'Presets:'), 16, 'semibold') + 14 * s
                 for key, label in (('recommended', T('Empfohlen', 'Recommended') + (f' · {gpu}' if gpu else '')),
                                    ('performance', T('Leistung', 'Performance')),
+                                   ('minimum', T('Schwacher PC', 'Low-end PC')),
                                    ('quality', T('Qualität', 'Quality'))):
                     bw_ = ctx.text_width(label, 15, 'semibold') + 34 * s
                     ctx.button(bx, gy + 18 * s, bw_, 36 * s, label, lambda k=key: self.apply_preset(k),

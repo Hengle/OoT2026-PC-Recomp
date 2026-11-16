@@ -147,6 +147,37 @@ int main(){
         self.assertLess(source.index('ocr_faults::keep_earlier_faults(dev.props.vendorID, driver_faults_mode())',load),
                         source.index('q.load(keys);',load))
 
+    def test_low_end_preset_for_very_weak_pcs(self):
+        sys.path.insert(0,str(ALPHA/'launcher'))
+        import advisor
+        for facts in ({'gpus':[('Intel(R) UHD Graphics',None)],'cpu_threads':4,'cpu_cores':2,'ram_gb':8},
+                      {'gpus':[('NVIDIA GeForce GTX 1050',2.0)],'cpu_threads':8,'cpu_cores':4,'ram_gb':16}):
+            s=advisor.build_preset('minimum',facts)
+            self.assertEqual((s['output_res'],s['resolution'],s['fps_target'],s['texture_memory']),('1280x720',4,4,1))
+            for k in ('view_distance','grass','shadow_distance','soft_shadows','texture_detail','frame_generation'):
+                self.assertEqual(s[k],0,k)
+        igpu=advisor.build_preset('minimum',{'gpus':[('Intel(R) UHD Graphics',None)],'cpu_threads':4,'cpu_cores':2,'ram_gb':8})
+        self.assertEqual((igpu['dlss'],igpu['streaming_mode'],igpu['low_spec']),(0,2,1))
+        card=advisor.build_preset('minimum',{'gpus':[('NVIDIA GeForce GTX 1050',2.0)],'cpu_threads':8,'cpu_cores':4,'ram_gb':16})
+        self.assertEqual(card['dlss'],3);self.assertNotIn('streaming_mode',card)
+        # The other presets keep their earlier choices.
+        self.assertEqual(advisor.build_preset('performance',{'gpus':[('AMD Radeon RX 6600',8.0)]})['fps_target'],3)
+
+    def test_weak_pc_fps_target_reaches_engine_floor(self):
+        import ast
+        tree=ast.parse((ALPHA/'launcher/launcher.py').read_text(encoding='utf-8'))
+        nodes=[n for n in tree.body if isinstance(n,ast.Assign) and any(getattr(x,'id','')=='LOW_END_DEFAULTS' for x in n.targets)]
+        nodes+=[n for n in tree.body if isinstance(n,ast.FunctionDef) and n.name=='low_end_env']
+        scope={};exec(compile(ast.Module(nodes,[]),'launcher','exec'),scope)
+        env=scope['low_end_env']
+        self.assertEqual((env({'fps_target':4})['OCARINA_FPS_TARGET'],env({'fps_target':4})['OCARINA_FPS_TARGET_MIN']),('60','33'))
+        self.assertEqual(env({'fps_target':3})['OCARINA_FPS_TARGET'],'60')
+        self.assertNotIn('OCARINA_FPS_TARGET_MIN',env({'fps_target':3}))
+        source=(ROOT/'engine/host/nn_vi.c').read_text(encoding='utf-8')
+        self.assertIn('getenv("OCARINA_FPS_TARGET_MIN")',source)
+        self.assertIn('cur > floor_scale',source)
+        self.assertNotIn('cur > 0.5f',source)
+
     def test_fresh_and_repeat_staging_match_checked_source(self):
         names={rel for rel,_,_ in engine_tester_fixes.CHANGES}
         with tempfile.TemporaryDirectory() as tmp:

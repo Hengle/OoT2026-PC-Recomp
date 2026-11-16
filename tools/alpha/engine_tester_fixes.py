@@ -167,6 +167,15 @@ change('gpu/vk/vk_draw.cpp', '''        const auto keys = driver_faults::parse(t
         }
         q.load(keys);''')
 
+change('host/nn_vi.c', '''            if (gpu_us > budget * 1.05f && cur > 0.5f) cur = cur - 0.1f < 0.5f ? 0.5f : cur - 0.1f;''', '''            /* OCARINA_FPS_TARGET_MIN=<percent>: the lowest render scale (the launcher's weak-PC choice: 33) */
+            static float floor_scale = -1.0f;
+            if (floor_scale < 0.0f) {
+                const char *m = getenv("OCARINA_FPS_TARGET_MIN");
+                const int pct = m ? atoi(m) : 50;
+                floor_scale = (pct < 25 ? 25 : pct > 100 ? 100 : pct) / 100.0f;
+            }
+            if (gpu_us > budget * 1.05f && cur > floor_scale) cur = cur - 0.1f < floor_scale ? floor_scale : cur - 0.1f;''')
+
 def apply(root):
     root = Path(root)
     pending = {}

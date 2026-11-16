@@ -28,6 +28,11 @@ PRESETS = {
     'performance': dict(COMMON, resolution=4, dlss=3, sharpness=50, texture_detail=0, frame_generation=0,
                         view_distance=0, grass=1, shadow_distance=0, frame_rate_cap=0,
                         anisotropic_filtering=2, soft_shadows=0, output_res='1920x1080'),
+    # (very weak PCs: everything at its lowest, 720p output, the 3D from half of that, and the FPS target allowed down to a
+    # third (fps_target 4) so the GPU's time fits 60 fps. Distance, grass and shadows also save the CPU's draw work)
+    'minimum': dict(COMMON, resolution=4, dlss=3, sharpness=60, texture_detail=0, frame_generation=0,
+                    view_distance=0, grass=0, shadow_distance=0, frame_rate_cap=0, bloom=0, fxaa=0,
+                    anisotropic_filtering=0, texture_filtering=0, soft_shadows=0, output_res='1280x720'),
 }
 
 
@@ -176,6 +181,19 @@ def build_preset(key, facts, dlss_ready=False):
             # (an RX 6600 at 50% render scale still needed 12.5 ms GPU a frame, 44 fps: the FPS target lowers the render
             # scale further only while the card misses 60. A launcher setting, not the game's options file)
             s['fps_target'] = 3
+    if key == 'minimum':
+        threads = (facts or {}).get('cpu_threads') or 0
+        cores = (facts or {}).get('cpu_cores') or 0
+        ram = (facts or {}).get('ram_gb')
+        s.update(texture_memory=1, shader_threads=1, fps_target=4, tex_max_dim=1)
+        if is_integrated(name):
+            s.update(dlss=0, upscaling=1)   # (FSR's own pass costs a shared-memory GPU more than it saves)
+        if ram is not None and ram <= 8.5:
+            s['streaming_mode'] = 2   # (a 3 GB RAM reserve would leave an 8 GB PC almost nothing: the guard stays Standard)
+        elif ram is not None and ram <= 16.5:
+            s['ram_guard'] = 2
+        if (cores and cores <= 4) or (threads and threads <= 4):
+            s['low_spec'] = 1
     # Experimental texture reduction remains a separate, explicit player choice.
     return s
 

@@ -356,7 +356,14 @@ static void realtime_step(int64_t now) {
         if (gpu_us > 0 && gpu_us != last_gpu) {   /* (a new five-second window) */
             last_gpu = gpu_us;
             const float budget = 1e6f / (float)ocr_fps_target * 0.85f, was = cur;
-            if (gpu_us > budget * 1.05f && cur > 0.5f) cur = cur - 0.1f < 0.5f ? 0.5f : cur - 0.1f;
+            /* OCARINA_FPS_TARGET_MIN=<percent>: the lowest render scale (the launcher's weak-PC choice: 33) */
+            static float floor_scale = -1.0f;
+            if (floor_scale < 0.0f) {
+                const char *m = getenv("OCARINA_FPS_TARGET_MIN");
+                const int pct = m ? atoi(m) : 50;
+                floor_scale = (pct < 25 ? 25 : pct > 100 ? 100 : pct) / 100.0f;
+            }
+            if (gpu_us > budget * 1.05f && cur > floor_scale) cur = cur - 0.1f < floor_scale ? floor_scale : cur - 0.1f;
             else if (gpu_us < budget * 0.65f && cur < top) cur = cur + 0.1f > top ? top : cur + 0.1f;
             if (cur != was)
                 hos_log("[OcarinaReborn/RES] FPS target %d: GPU %.1f ms a frame, render scale %.2f -> %.2f", ocr_fps_target,
