@@ -111,7 +111,8 @@ class MenuMarkTests(unittest.TestCase):
                     # mark itself here; portrait has its own patch/roundtrip tests.
                     import engine_portrait
                     import engine_rupee_hud
-                    expected = (ROOT / 'engine/gpu/vk' / name).read_text(encoding='utf-8')
+                    import engine_tester_fixes
+                    expected = engine_tester_fixes.pre_perf_text('gpu/vk/' + name) if (ROOT / 'engine/gpu/vk' / name).exists() else ''
                     for rel, old, new in reversed(engine_rupee_hud.CHANGES):
                         if rel == 'gpu/vk/' + name:
                             expected = expected.replace(new, old)

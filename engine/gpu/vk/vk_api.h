@@ -53,6 +53,12 @@ enum { HOS_OPT_FOV = 51 };
    and Navi waking Link. 44 stays reserved for Skip title, 49 and 50 for Walk, 60 for the item wheel. A new option id
    answered by the existing option callback does not change MkwVkHost or MkwVkRenderer.) */
 enum { HOS_OPT_SKIP_OPENING = 52 };
+/* ocr-stamp-neutral: begin */
+/* (HOS_OPT_RENDER_THREAD, 58: whether the render thread runs on this run, 1 or 0, as the renderer resolved it once at the
+   start (gpu/vk/vk_replay.cpp threaded_rendering_on: RX_VK_ASYNC, or OCR_THREADED_RENDERING, or Auto's choice).
+   host/nvn_native.c answers the game's present poll at once with it. The existing option callback: no new member.) */
+enum { HOS_OPT_RENDER_THREAD = 58 };
+/* ocr-stamp-neutral: end */
 
 /* (hookshot) the controls' names (host/nn_hid.c, host/pad_sdl.c, the pad_ and key_ lines of ocarina_reborn_options.ini):
    the Switch's buttons in nn::hid's bit order, and a gamepad's inputs by position (the bottom face button first:

@@ -200,16 +200,23 @@ int main(){
         self.assertIn('std::lock_guard lk(light_mu)',ready)
 
     def test_fresh_and_repeat_staging_match_checked_source(self):
+        import re as _re
+        perf=(ALPHA/'engine-perf.patch').read_text(encoding='utf-8',errors='replace')
+        touched={m for m in _re.findall(r'^diff --git a/(\S+) b/',perf,_re.M)}
         names={rel for rel,_,_ in engine_tester_fixes.CHANGES}
         with tempfile.TemporaryDirectory() as tmp:
             root=Path(tmp)
-            for rel in names:
+            for rel in names|touched:
+                got=subprocess.run(['git','show','457c544:engine/'+rel],cwd=ROOT,capture_output=True)
+                if got.returncode:continue   # (a file the performance patch adds)
                 p=root/rel;p.parent.mkdir(parents=True,exist_ok=True)
-                p.write_bytes(subprocess.run(['git','show','457c544:engine/'+rel],cwd=ROOT,capture_output=True,check=True).stdout)
-            engine_tester_fixes.apply(root)
+                p.write_bytes(got.stdout)
+            engine_tester_fixes.apply(root,perf=False)
             first={r:(root/r).read_bytes() for r in names}
-            engine_tester_fixes.apply(root)
+            engine_tester_fixes.apply(root,perf=False)
             self.assertEqual(first,{r:(root/r).read_bytes() for r in names})
+            engine_tester_fixes.apply_perf(root)
+            names=names|{r for r in touched if (root/r).exists()}
             for rel in names:self.assertEqual((root/rel).read_text(),(ROOT/'engine'/rel).read_text())
             for rel in ('host/ocr_input_state.h','gpu/vk/ocr_intel_compute.h','gpu/vk/ocr_prepare_policy.h','gpu/vk/ocr_fault_policy.h'):
                 self.assertEqual((root/rel).read_bytes(),(ROOT/'engine'/rel).read_bytes())

@@ -19,6 +19,7 @@
 #include <deque>
 #include <exception>
 #include <mutex>
+#include <shared_mutex>
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
@@ -56,6 +57,7 @@
 #include "driver_faults.h"
 #include "fallback_size_policy.h"
 #include "translate_wait.h"
+#include "quick_pipe.h"
 
 #include "shaders/clear_f_frag_spv.h"
 #include "shaders/clear_i_frag_spv.h"
@@ -744,6 +746,70 @@ PipelineCacheFile pcache_file_read(const std::string& path) {
 }
 std::string pcache_dir;
 
+// (hookshot) Intel's Windows driver faults in vkGetPipelineCacheData (igvk64.dll+0x79ddf3, an access violation) when it fetches
+// a cache's data while other threads build pipelines with that cache: the game closes with no message
+// (https://github.com/NotRexed/Hookshot/issues/999: the Arc 140V, and 4 runs of 6 on a Core Ultra 7 155H, driver 101.9175).
+// Vulkan allows it; on Intel the fetches and the builds take turns: a build holds this shared, a fetch alone.
+// The fetch holds it around the vkGetPipelineCacheData calls only, never across a file's write nor across a wait for the
+// builds (play_cache_save's wait for a generation's users: a builder counted in there may be between two of its builds, waiting
+// for this lock, and would never count itself out). The background save does not queue behind the builds: it tries a while,
+// then leaves the save to the next one; after kFetchPutOffs saves put off in a row it queues, for a bounded time. With the lock
+// on, the window's close waits a bounded time too: a build stuck in the driver costs the play file, not the close. With it off,
+// every wait is as before (a build on AMD's Windows driver can take 5-13 s: the close waits for it rather than lose the file).
+// RX_VK_PCACHE_FETCH_LOCK=0: off, =1: on any GPU
+std::shared_timed_mutex pcache_fetch_mu;
+bool pcache_fetch_lock_on() {
+    static const bool on = [] {
+        const char* e = getenv("RX_VK_PCACHE_FETCH_LOCK");
+#ifdef _WIN32
+        return e ? env_on("RX_VK_PCACHE_FETCH_LOCK") : dev.props.vendorID == 0x8086;
+#else
+        return e && env_on("RX_VK_PCACHE_FETCH_LOCK");
+#endif
+    }();
+    return on;
+}
+thread_local int pcache_fetch_depth = 0;   // (a fetch inside a fetch on the same thread: pcache_saved_now's save)
+constexpr int kFetchPollMs = 2000;    // (the background save's patience, polled)
+constexpr int kFetchPutOffs = 3;      // (saves put off in a row before the next one queues)
+constexpr int kFetchQueueMs = 10000;  // (how long a queued fetch waits: the window's close, a save put off kFetchPutOffs times)
+/// A fetch of a pipeline cache's data, the builds held off while it lasts (held() says whether it was had).
+/// wait_ms < 0: waits until the builds under way are done. queue: waits in the lock, as a writer (new builds wait behind it), at
+/// most wait_ms; not queue: polled for wait_ms, had only at a moment no build is under way (a writer waiting in the lock would
+/// stall the builds behind it, the replay thread's draw-time asks among them)
+struct PcacheFetch {
+    bool owns = false, outer = true;
+    explicit PcacheFetch(int wait_ms, bool queue = true) {
+        if (!pcache_fetch_lock_on()) return;
+        if (pcache_fetch_depth > 0) {
+            outer = false, pcache_fetch_depth++;
+            return;
+        }
+        if (wait_ms < 0) pcache_fetch_mu.lock(), owns = true;
+        else if (queue) owns = pcache_fetch_mu.try_lock_for(std::chrono::milliseconds(wait_ms));
+        else
+            for (const auto until = std::chrono::steady_clock::now() + std::chrono::milliseconds(wait_ms);
+                 !(owns = pcache_fetch_mu.try_lock()) && std::chrono::steady_clock::now() < until;)
+                std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        if (owns) pcache_fetch_depth = 1;
+    }
+    ~PcacheFetch() {
+        if (!outer) pcache_fetch_depth--;
+        else if (owns) pcache_fetch_depth = 0, pcache_fetch_mu.unlock();
+    }
+    bool held() const { return !pcache_fetch_lock_on() || !outer || owns; }
+};
+/// A pipeline built with a cache, while no fetch of one is under way (PcacheFetch)
+struct PcacheUse {
+    bool on = false;
+    explicit PcacheUse(VkPipelineCache cache) : on(cache && pcache_fetch_lock_on() && pcache_fetch_depth == 0) {
+        if (on) pcache_fetch_mu.lock_shared();
+    }
+    ~PcacheUse() {
+        if (on) pcache_fetch_mu.unlock_shared();
+    }
+};
+
 // ---- (hookshot) What play makes goes into a cache of its own, one per save ----
 // pcache takes what the start-up builds and is then left as it was read. Every save in play wrote it whole again for what play had
 // added: NVIDIA's driver copies into the cache a pipeline is made with each pipeline it takes from its own disk cache, so a first
@@ -765,12 +831,20 @@ constexpr size_t kPlayFilesKept = 16;
 std::string play_path(uint32_t n) {
     return pcache_dir + "mkw_vk_pipelines_play_" + std::to_string(n) + ".bin";
 }
-/// A cache's data written whole to path, through a .tmp moved over it: its size, 0 when it is not in place
-size_t play_file_write(VkPipelineCache cache, const std::string& path) {
+/// A cache's data written whole to path, through a .tmp moved over it: its size, 0 when it is not in place (also when the
+/// fetch lock was not had within wait_ms, PcacheFetch: the file's write is outside it)
+size_t play_file_write(VkPipelineCache cache, const std::string& path, int wait_ms = -1, bool queue = true) {
     size_t n = 0;
-    if (vkGetPipelineCacheData(dev.device, cache, &n, nullptr) != VK_SUCCESS || !n) return 0;
+    {
+        PcacheFetch fetch(wait_ms, queue);
+        if (!fetch.held() || vkGetPipelineCacheData(dev.device, cache, &n, nullptr) != VK_SUCCESS || !n) return 0;
+    }
     auto data = PipelineCacheFile::writable(path, n);
-    if (data.empty() || vkGetPipelineCacheData(dev.device, cache, &n, data.data()) != VK_SUCCESS) return 0;
+    if (data.empty()) return 0;
+    {   // (a cache grown since its size was asked does not fit: not written, tried again at the next save)
+        PcacheFetch fetch(wait_ms, queue);
+        if (!fetch.held() || vkGetPipelineCacheData(dev.device, cache, &n, data.data()) != VK_SUCCESS) return 0;
+    }
     return data.publish(n) ? n : 0;
 }
 /// (pcache_init, before any other thread has pcache) the play files the last starts wrote, merged into pcache; at kPlayFilesKept
@@ -832,8 +906,12 @@ void play_cache_begin() {
     }
 }
 /// (pipeline_cache_save's thread, or the window's close) play's generation taken away once nothing is being made with it, a new one
-/// in its place, and written alone. One not written is kept and tried again at the next save
-void play_cache_save() {
+/// in its place, and written alone. One not written is kept and tried again at the next save. wait_ms and queue: the fetch lock's
+/// (PcacheFetch), which is never held across the wait for a generation's users. With the fetch lock on, a bounded save (the
+/// window's close, the background save's poll) waits for the users that long too: a build stuck in the driver leaves its
+/// generation for a next save, and neither the save nor a close behind it (mu) hangs. With the lock off the users are waited
+/// for as before. The close's worst case: wait_ms for the users, then wait_ms for each of play_file_write's two fetches
+void play_cache_save(int wait_ms = -1, bool queue = true) {
     static std::mutex mu;   // (a save's thread and the window's close, pipeline_cache_close)
     std::lock_guard lk(mu);
     static std::vector<PlayCache*> unsaved;
@@ -841,13 +919,22 @@ void play_cache_save() {
         unsaved.reserve(unsaved.size() + 1);   // (before it is taken away: it cannot then be lost to a failed allocation)
         if (PlayCache* next = play_cache_make()) {
             play_cache.store(next);
-            while (g->users.load()) Sleep(1);
             unsaved.push_back(g);
         }
     }
+    const bool bounded = pcache_fetch_lock_on() && wait_ms >= 0;   // (queue or not: a polled save holds mu too)
+    const auto until = std::chrono::steady_clock::now() + std::chrono::milliseconds(bounded ? wait_ms : 0);
     for (auto it = unsaved.begin(); it != unsaved.end();) {
         PlayCache* old = *it;
-        if (const size_t wrote = play_file_write(old->cache, play_path(play_seq + 1))) {
+        // (written once nothing is being made with it)
+        while (old->users.load() && (!bounded || std::chrono::steady_clock::now() < until)) Sleep(1);
+        if (old->users.load()) {
+            static std::atomic<int> told{0};
+            if (told++ < 4) logf("vk: pipeline cache: a play file not written yet: a pipeline was still being built in it");
+            ++it;
+            continue;
+        }
+        if (const size_t wrote = play_file_write(old->cache, play_path(play_seq + 1), wait_ms, queue)) {
             play_seq++;
             logf("vk: pipeline cache: play file %u saved (%zu KB): %lld pipelines, %lld from the driver's cache, %lld compiled; %lld "
                  "more from the start's cache",
@@ -983,6 +1070,7 @@ void pcache_init() {
     if (pcache) play_files_merge();
     // (what it holds as read, the play files too: a save of data that size has nothing to add to the files)
     size_t held = 0;
+    PcacheFetch fetch(-1);
     if (pcache && vkGetPipelineCacheData(dev.device, pcache, &held, nullptr) == VK_SUCCESS) pcache_saved_size = held;
 }
 
@@ -1034,6 +1122,7 @@ struct PipeEntry {
     std::atomic<bool> ready{false};
     std::atomic<VkPipeline> pipeline{VK_NULL_HANDLE};   // (a fast-linked one first, the worker's full build over it)
     std::atomic<uint8_t> how{0};   // (the census: how play made it, UseCounters::made_how; 0: before play, or not made)
+    std::atomic<uint8_t> quick{0};   // (hookshot: quick_pipeline's, before the full build: quick_pipe.h's kNone, kMaking, kTried)
 };
 std::unordered_map<uint64_t, std::unique_ptr<PipeEntry>> pipelines;   // (the replay thread's)
 // (hookshot) Pipelines made ahead of their first draw by the load at a program's create call (vk_programs.cpp), by their keys.
@@ -1239,14 +1328,39 @@ bool gpl_libs_cached() {
     return on;
 }
 thread_local bool driver_cache_only = false;   // (predict_run's: pipelines for the driver's own cache, not into ours)
+thread_local bool quick_build = false;   // (hookshot: quick_pipeline's, without the driver's optimizer and into no cache)
+thread_local bool gate_busy = false;   // (hookshot: set by build_graphics when the driver-fault gate answered kBusy: quick_pipeline's)
+thread_local bool slow_full_build = false;   // (hookshot: the worker's full build in graphics_pipeline's job: RX_VK_TEST_SLOW_MS's)
+/// (hookshot, a test from Mako) RX_VK_TEST_SLOW_MS=<ms> holds each full build that long, as AMD's optimizer on a cold cache, to
+/// see quick pipelines and the brief wait at work on any GPU. Off unless set; a value not a number is ignored. Read once
+int test_slow_ms() {
+    static const int slow_ms = [] {
+        const char* e = getenv("RX_VK_TEST_SLOW_MS");
+        bool bad = false;
+        const int ms = quick_pipe::slow_ms(e, &bad);
+        if (bad) logf("vk: RX_VK_TEST_SLOW_MS=%s is not a number of milliseconds: ignored", e);
+        if (ms > 0) logf("vk: every full pipeline build is held %d ms (RX_VK_TEST_SLOW_MS, a test)", ms);
+        return ms;
+    }();
+    return slow_ms;
+}
 // (with driver_cache_only: the cache handed to the driver instead of none, predicted_check's empty one, as play hands its generation's)
 thread_local VkPipelineCache driver_ask_cache = VK_NULL_HANDLE;
 /// (with the pipeline cache: from it, or in play into the play generation's, create_cached)
+/// (the guards with the cache held from a fetch, PcacheFetch)
+VkResult guarded_graphics_held(VkPipelineCache cache, const VkGraphicsPipelineCreateInfo* ci, VkPipeline* pl) {
+    PcacheUse use(cache);
+    return guarded_graphics(cache, ci, pl);
+}
+VkResult guarded_compute_held(VkPipelineCache cache, const VkComputePipelineCreateInfo* ci, VkPipeline* pl) {
+    PcacheUse use(cache);
+    return guarded_compute(cache, ci, pl);
+}
 VkResult cached_graphics(const VkGraphicsPipelineCreateInfo* ci, VkPipeline* pl) {
-    return create_cached(guarded_graphics, ci, pl);
+    return create_cached(guarded_graphics_held, ci, pl);
 }
 VkResult cached_compute(const VkComputePipelineCreateInfo* ci, VkPipeline* pl) {
-    return create_cached(guarded_compute, ci, pl);
+    return create_cached(guarded_compute_held, ci, pl);
 }
 /// (hookshot) What a compute program's pipeline is made from: its one stage, pinned to 32 lanes where the GPU can, and its
 /// layout (ensure_layout first). noopt: RX_VK_NOOPT is followed, as play's builds follow it (the precompile's do not)
@@ -1284,7 +1398,7 @@ VkPipeline compute_pipeline_cached(const Program& q, bool noopt) {
 }
 /// (a graphics pipeline made with the cache chosen for it: pcache through the play caches, another or none as it is)
 VkResult graphics_with(VkPipelineCache cache, const VkGraphicsPipelineCreateInfo* ci, VkPipeline* pl) {
-    return cache && cache == pcache ? cached_graphics(ci, pl) : guarded_graphics(cache, ci, pl);
+    return cache && cache == pcache ? cached_graphics(ci, pl) : guarded_graphics_held(cache, ci, pl);
 }
 
 /// A target's write mask: the state's channel mask, nothing for a target the fragment shader leaves unwritten
@@ -2256,9 +2370,25 @@ PipeEntry* graphics_pipeline(const Program& p, const NvnState& s, const Targets&
     auto job = std::make_shared<Job>();
     job->e = e, job->p = &p, job->s = s, job->at = at, job->topo = topo, job->cold[0] = cold[0], job->cold[1] = cold[1];
     jobs_push([job] {
-        // (over a linked one, which is left alone: draws recorded with it may still be on their way)
+        // (over a linked one or a quick one, which are left alone: draws recorded with them may still be on their way. Neither is
+        // destroyed: nothing here knows when the recordings that read the handle are done on the GPU, so a replaced quick
+        // pipeline stays for the session, one more per entry that got one, counted in quick_pipeline's log line)
         use_counters.made_how = 0;
-        if (const VkPipeline full = build_graphics(*job->p, job->s, job->at, job->topo)) job->e->pipeline = full;
+        VkPipeline full;
+        {   // (RX_VK_TEST_SLOW_MS: held inside the driver-fault gate, build_graphics)
+            const quick_pipe::Raise slow(slow_full_build);
+            full = build_graphics(*job->p, job->s, job->at, job->topo);
+        }
+        if (full) {
+            job->e->pipeline = full;
+        } else if (job->e->pipeline.load(std::memory_order_acquire)) {
+            // (hookshot, deliberate) a full build that failed, or that the driver faulted on, leaves a quick pipeline (no optimizer)
+            // the entry's for the session: its draws are drawn with it, where without one they would be left out (SKIP_HERE)
+            static std::atomic<int> told{0};
+            if (told++ < 10)
+                logf("vk: the full pipeline of %016llx was not made: the one made ahead of it is drawn with for the session",
+                     (unsigned long long)job->p->key);
+        }
         job->e->how.store(use_counters.made_how, std::memory_order_relaxed);
         job->e->ready.store(true, std::memory_order_release);
         // (the cold libraries after it and behind what is queued, with no flag: the draw waits for the pipeline above, and
@@ -2483,6 +2613,10 @@ VkPipeline build_graphics(const Program& p, const NvnState& s, const Targets& at
         if (driver.driverID == VK_DRIVER_ID_AMD_PROPRIETARY) ci.flags |= VK_PIPELINE_CREATE_DISABLE_OPTIMIZATION_BIT;
     }
 #endif
+    if (quick_build) {   // (hookshot) quick_pipeline's: none when the full build is made without the optimizer already
+        if (part >= 0 || (ci.flags & VK_PIPELINE_CREATE_DISABLE_OPTIMIZATION_BIT)) return VK_NULL_HANDLE;
+        ci.flags |= VK_PIPELINE_CREATE_DISABLE_OPTIMIZATION_BIT;
+    }
     if (cold) ci.flags |= VK_PIPELINE_CREATE_FAIL_ON_PIPELINE_COMPILE_REQUIRED_BIT;
     // (the two shader libraries go into our cache, as whole pipelines do: asked for under the flag, the driver answers from a cache
     // it is handed and not from its own on disk, so a library the warm pass built and let go was cold again at its first draw
@@ -2491,11 +2625,12 @@ VkPipeline build_graphics(const Program& p, const NvnState& s, const Targets& at
     const bool lib_cached = (part == 1 || part == 2) && gpl_libs_cached();
     // (hookshot) a program the driver faulted on is not asked of it again, and on AMD one program's builds go to it one at a
     // time, so a second build waits here and not inside the driver behind a faulted one (driver_faults.h, issue 996). A cold
-    // probe does not wait: another build of its program under way is, for it, a compile that is required
+    // probe does not wait: another build of its program under way is, for it, a compile that is required. Nor does a quick
+    // build: behind the program's full build it would be no quicker; the draw goes on without it
     const bool gated = driver_faults_on();
     if (gated) {
-        const auto gate = fault_quarantine().begin(p.key, !cold);
-        if (gate == driver_faults::Quarantine::kBusy) return *cold = true, VK_NULL_HANDLE;
+        const auto gate = fault_quarantine().begin(p.key, !cold && !quick_build);
+        if (gate == driver_faults::Quarantine::kBusy) return gate_busy = true, cold ? (*cold = true, VK_NULL_HANDLE) : VK_NULL_HANDLE;
         if (gate == driver_faults::Quarantine::kFaulted) {
             static std::atomic<int> told{0};
             if (told++ < 10)
@@ -2504,7 +2639,12 @@ VkPipeline build_graphics(const Program& p, const NvnState& s, const Targets& at
             return VK_NULL_HANDLE;
         }
     }
-    const VkPipelineCache cache = lib_cached || (part < 0 && !driver_cache_only) ? pcache : driver_ask_cache;
+    // (hookshot, RX_VK_TEST_SLOW_MS) the worker's full build held here, inside the gate, where AMD's optimizer holds it: a quick
+    // build meets the gate busy as on AMD, where the gate is serial (RX_VK_DRIVER_FAULTS=2 makes it so on every driver)
+    if (slow_full_build && test_slow_ms() > 0) std::this_thread::sleep_for(std::chrono::milliseconds(test_slow_ms()));
+    // (hookshot) a quick build into no cache: an unoptimized pipeline saved would be what a later run's full build is answered with
+    const VkPipelineCache cache = quick_build ? VK_NULL_HANDLE
+                                  : lib_cached || (part < 0 && !driver_cache_only) ? pcache : driver_ask_cache;
     VkResult r = graphics_with(cache, &ci, &pl);
     // The AMD Windows compiler can reject ordinary graphics pipelines with its optimizer on. (A fault caught in it is kDriverFault
     // now, VK_ERROR_UNKNOWN before: the retry stays for both, under the gate)
@@ -2536,10 +2676,95 @@ VkPipeline build_graphics(const Program& p, const NvnState& s, const Targets& at
         if (logged++ < 10) logf("vk: graphics pipeline for %016llx not made (%d)", (unsigned long long)p.key, (int)r);
         pl = VK_NULL_HANDLE;
     }
-    st_pipelines++;
-    pcache_built_since_save += !driver_cache_only;
-    st_pipeline_us += std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - t0).count();
+    pcache_built_since_save += !driver_cache_only && !quick_build;
+    if (!quick_build) {   // (hookshot: quick builds are counted apart, in quick_pipeline's log line)
+        st_pipelines++;
+        st_pipeline_us += std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - t0).count();
+    }
     return pl;
+}
+
+/// (hookshot) RX_VK_QUICK_MS, read once and logged: quick_pipe.h
+double quick_budget_ms() {
+    static const double ms = [] {
+        const char* e = getenv("RX_VK_QUICK_MS");
+        bool bad = false;
+        const double v = quick_pipe::quick_ms(e, &bad);
+        if (bad)
+            logf("vk: RX_VK_QUICK_MS=%s is not a number of milliseconds: ignored, quick pipelines off (%.0f is the suggested value)",
+                 e, quick_pipe::kQuickSuggestedMs);
+        if (v > 0)
+            logf("vk: a draw whose pipeline is still being built gets one from the caches or made without the driver's optimizer, "
+                 "%.0f ms of those a frame on each recording thread (RX_VK_QUICK_MS)", v);
+        return v;
+    }();
+    return ms;
+}
+/// (hookshot) RX_VK_PIPE_WAIT_MS, read once and logged: quick_pipe.h
+double pipe_wait_budget_ms() {
+    static const double ms = [] {
+        const char* e = getenv("RX_VK_PIPE_WAIT_MS");
+        bool bad = false;
+        const double v = quick_pipe::wait_ms(e, &bad);
+        if (bad) logf("vk: RX_VK_PIPE_WAIT_MS=%s is not a number of milliseconds: ignored", e);
+        if (v > 0)
+            logf("vk: a pipeline still being built, for a draw on earlier frames' targets, is moved to the queue's front and waited "
+                 "for at most %.0f ms a frame on each recording thread before the draw is left out (RX_VK_PIPE_WAIT_MS)", v);
+        return v;
+    }();
+    return ms;
+}
+/// (hookshot, ported from Mako, by sharkiix, 8292d363) A pipeline for a draw whose full build is not done (quick_pipe::take):
+/// the full one if a cache has it compiled, asked without compiling, else one made here without the driver's optimizer and
+/// into no cache, set as the entry's pipeline and not ready: the worker's full build replaces it. At most RX_VK_QUICK_MS a frame
+/// on each recording thread, but for a draw that cannot be left out (must). true: the entry has one to draw with
+bool quick_pipeline(PipeEntry& e, const Program& p, const NvnState& s, const Targets& at, VkPrimitiveTopology topo, bool must) {
+    const double budget_ms = quick_budget_ms();
+    if (budget_ms <= 0) return false;
+    static thread_local quick_pipe::FrameBudget budget;
+    const auto now_ms = [] {
+        return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now().time_since_epoch()).count();
+    };
+    // (busy: the driver-fault gate had another build of the program in the driver (AMD): the entry is tried again later)
+    const auto ask = [&](bool& busy) -> VkPipeline {   // (needs pipelineCreationCacheControl, as pipeline_from_caches)
+        if (!dev.vk13.pipelineCreationCacheControl) return VK_NULL_HANDLE;
+        bool cold = false;
+        gate_busy = false;
+        const quick_pipe::Raise asking(ask_start_first);
+        const VkPipeline pl = build_graphics(p, s, at, topo, -1, &cold);
+        busy = gate_busy;
+        return pl;
+    };
+    double quick_took = 0;
+    const auto build = [&](bool& busy) -> VkPipeline {
+        const double t0 = now_ms();
+        gate_busy = false;
+        const quick_pipe::Raise quick(quick_build);
+        const VkPipeline pl = build_graphics(p, s, at, topo);
+        busy = gate_busy;
+        quick_took = now_ms() - t0;
+        return pl;
+    };
+    const auto destroy = [](VkPipeline pl) { vkDestroyPipeline(dev.device, pl, nullptr); };
+    const auto poll = [] { std::this_thread::sleep_for(std::chrono::milliseconds(1)); };
+    const quick_pipe::Got got = quick_pipe::take(e, must, budget_ms, budget, texture_frame_no(), ask, build, destroy, now_ms, poll);
+    // (each one made here stays for the session once the full build replaces it: graphics_pipeline's job. The counts below
+    // are those kept pipelines)
+    if (got == quick_pipe::Got::kCached) {
+        static std::atomic<int64_t> hits{0};
+        const int64_t h = ++hits;
+        if (h <= 5 || h % 200 == 0)
+            logf("vk: pipeline from the caches for a draw ahead of its build (%lld so far, each kept for the session)", (long long)h);
+    } else if (got == quick_pipe::Got::kQuick) {
+        static std::atomic<int64_t> n{0}, total_us{0};
+        const int64_t k = ++n;
+        total_us += (int64_t)(quick_took * 1000);
+        if (k <= 20 || k % 50 == 0)
+            logf("vk: quick pipeline (no optimizer) for %016llx in %.1f ms, drawn with until its full build is done (%lld so far, "
+                 "%.0f ms in all, each kept for the session)", (unsigned long long)p.key, quick_took, (long long)k,
+                 total_us.load() / 1000.0);
+    }
+    return got != quick_pipe::Got::kNothing;
 }
 
 // ---- samplers (by NVN sampler parameters) ----
@@ -3286,25 +3511,53 @@ bool table_track_open(int logged, int seen, int unlimited) {
     return logged < 60 && (unlimited || seen < kTableTrackLooks);
 }
 
+/// A program's descriptor counts in one word (Program::desc_counts): buffers, images, texel views, 10 bits each (more than
+/// 1023 of one kind: not kept, counted at each build)
+uint32_t desc_counts_pack(size_t nbuf, size_t nimg, size_t nview) {
+    constexpr size_t kMost = (1u << 10) - 1;
+    if (nbuf > kMost || nimg > kMost || nview > kMost) return ~0u;
+    return (uint32_t)nbuf | (uint32_t)nimg << 10 | (uint32_t)nview << 20;
+}
+void desc_counts_unpack(uint32_t packed, size_t* nbuf, size_t* nimg, size_t* nview) {
+    constexpr uint32_t kMask = (1u << 10) - 1;
+    *nbuf = (size_t)(packed & kMask), *nimg = (size_t)(packed >> 10 & kMask), *nview = (size_t)(packed >> 20 & kMask);
+}
+
 void build_descriptors(const NvnState& s, const Program& p) {
-    dw().reset();
-    dw().prog = &p;
+    // (hookshot) the thread's writer asked for once: each dw() is a thread-local lookup, a call in a shared library, and a
+    // build made dozens of them
+    DescWriter& out = dw();
+    out.reset();
+    out.prog = &p;
     desc_fp().clear(), desc_fp_dummy = false;   // (Descriptor reuse: the samplers' generation is read before the first handle,
     desc_samp_seen = sampler_registrations_generation();   // (so one registered during the build still forces the next rebuild)
     desc_destroy_seen = texture_destroy_generation();      // (an eviction retires views behind the slots' backs: it bumps only this)
     draw_sampled().clear();
     dump_written().clear();
     dump_inputs().clear();
+    // (hookshot) how many of each the program has: its own, the same at every build. Counted once and kept with the program
+    // (desc_counts): every build walked six lists a stage only for these three numbers. RX_VK_DESC_COUNTS=0: counted each time
     size_t nbuf = 0, nimg = 0, nview = 0;
-    for (const Stage& st : p.stages) {
-        for (const auto& d : st.info.constant_buffer_descriptors) nbuf += d.count;
-        for (const auto& d : st.info.storage_buffers_descriptors) nbuf += d.count;
-        for (const auto& d : st.info.texture_buffer_descriptors) nview += d.count;
-        for (const auto& d : st.info.image_buffer_descriptors) nview += d.count;
-        for (const auto& d : st.info.texture_descriptors) nimg += d.count;
-        for (const auto& d : st.info.image_descriptors) nimg += d.count;
+    static const bool keep_counts = !getenv("RX_VK_DESC_COUNTS") || strcmp(getenv("RX_VK_DESC_COUNTS"), "0") != 0;
+    const uint32_t kept = keep_counts ? p.desc_counts.load(std::memory_order_relaxed) : ~0u;
+    if (kept != ~0u) {
+        desc_counts_unpack(kept, &nbuf, &nimg, &nview);
+    } else {
+        for (const Stage& st : p.stages) {
+            for (const auto& d : st.info.constant_buffer_descriptors) nbuf += d.count;
+            for (const auto& d : st.info.storage_buffers_descriptors) nbuf += d.count;
+            for (const auto& d : st.info.texture_buffer_descriptors) nview += d.count;
+            for (const auto& d : st.info.image_buffer_descriptors) nview += d.count;
+            for (const auto& d : st.info.texture_descriptors) nimg += d.count;
+            for (const auto& d : st.info.image_descriptors) nimg += d.count;
+        }
+        // (kept only once the program is whole: its stages are filled in by a worker before `ready`)
+        if (keep_counts && p.ready.load(std::memory_order_acquire)) {
+            const uint32_t packed = desc_counts_pack(nbuf, nimg, nview);
+            if (packed != ~0u) p.desc_counts.store(packed, std::memory_order_relaxed);
+        }
     }
-    dw().bufs.reserve(nbuf), dw().imgs.reserve(nimg), dw().views.reserve(nview);   // (stable pointers below)
+    out.bufs.reserve(nbuf), out.imgs.reserve(nimg), out.views.reserve(nview);   // (stable pointers below)
     FINE_N(FC_DESCS, (int64_t)(nbuf + nimg + nview));
     uint32_t binding = 0;
     auto write = [&](VkDescriptorType type, uint32_t count) {
@@ -3320,24 +3573,24 @@ void build_descriptors(const NvnState& s, const Program& p) {
         const int ns = st.nvn_stage;
         for (const auto& d : info.constant_buffer_descriptors) {
             VkWriteDescriptorSet w = write(VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, d.count);
-            const size_t first = dw().bufs.size();
+            const size_t first = out.bufs.size();
             for (uint32_t k = 0; k < d.count; k++) {
                 const auto t0 = slow_desc_timing() ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
-                dw().bufs.push_back(uniform_range(s, st, d.index + k));
-                if (slow_desc_timing()) slow_descriptor(t0, "uniform buffer", d.index + k, dw().bufs.back().range);
+                out.bufs.push_back(uniform_range(s, st, d.index + k));
+                if (slow_desc_timing()) slow_descriptor(t0, "uniform buffer", d.index + k, out.bufs.back().range);
             }
-            w.pBufferInfo = &dw().bufs[first];
-            dw().writes.push_back(w);
+            w.pBufferInfo = &out.bufs[first];
+            out.writes.push_back(w);
         }
         for (const auto& d : info.storage_buffers_descriptors) {
             FINE_SCOPE(FT_STORAGE);
             FINE_N(FC_SSBO_DESCS, d.count);
             VkWriteDescriptorSet w = write(VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, d.count);
-            const size_t first = dw().bufs.size();
+            const size_t first = out.bufs.size();
             for (uint32_t k = 0; k < d.count; k++) {
                 const uint32_t off = d.cbuf_offset + k * 16;
                 if (d.count == 1 && d.cbuf_index == 0 && d.cbuf_offset == 0xff0) {   // (EvilOOT, RX_VK_MISS_LOG)
-                    dw().bufs.push_back(miss_binding(p.key));
+                    out.bufs.push_back(miss_binding(p.key));
                     continue;
                 }
                 // (AyyBeeDee20738, PR 138; EvilOOT the same before it, for OoT's culling tables in c4) through the stage's banks as
@@ -3539,7 +3792,7 @@ void build_descriptors(const NvnState& s, const Program& p) {
                              "%#llx%s", (unsigned long long)p.key, ns, (unsigned)d.cbuf_index, off,
                              (unsigned long long)addr, (unsigned long long)size, d.is_written ? " (written)" : "");
                 }
-                dw().bufs.push_back(b ? VkDescriptorBufferInfo{b.buffer, b.offset, n}
+                out.bufs.push_back(b ? VkDescriptorBufferInfo{b.buffer, b.offset, n}
                                     : VkDescriptorBufferInfo{dev.null_descriptor ? VK_NULL_HANDLE : zero_buffer, 0,
                                                              dev.null_descriptor ? VK_WHOLE_SIZE : 16});
                 {   // (RX_VK_LOG_WRITTEN=1: every storage buffer range a program writes, once, 300 of them)
@@ -3560,13 +3813,13 @@ void build_descriptors(const NvnState& s, const Program& p) {
                     if (slow_desc_timing()) slow_descriptor(t1, "stamp", base, n);
                 }
             }
-            w.pBufferInfo = &dw().bufs[first];
-            dw().writes.push_back(w);
+            w.pBufferInfo = &out.bufs[first];
+            out.writes.push_back(w);
         }
         auto texel_views = [&](const auto& list, VkDescriptorType type, bool storage) {
             for (const auto& d : list) {
                 VkWriteDescriptorSet w = write(type, d.count);
-                const size_t first = dw().views.size();
+                const size_t first = out.views.size();
                 for (uint32_t k = 0; k < d.count; k++) {
                     const uint32_t handle = handle_of(s, st, d, k);
                     desc_fp_note(handle);   // (Descriptor reuse)
@@ -3578,10 +3831,10 @@ void build_descriptors(const NvnState& s, const Program& p) {
                         ParLock lk;
                         bv = texel_buffer_view(&t, has_view ? &v : nullptr, storage);
                     }
-                    dw().views.push_back(bv);
+                    out.views.push_back(bv);
                 }
-                w.pTexelBufferView = &dw().views[first];
-                dw().writes.push_back(w);
+                w.pTexelBufferView = &out.views[first];
+                out.writes.push_back(w);
             }
         };
         texel_views(info.texture_buffer_descriptors, VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER, false);
@@ -3589,7 +3842,7 @@ void build_descriptors(const NvnState& s, const Program& p) {
         for (const auto& d : info.texture_descriptors) {
             FINE_SCOPE(FT_TEX);
             VkWriteDescriptorSet w = write(VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, d.count);
-            const size_t first = dw().imgs.size();
+            const size_t first = out.imgs.size();
             const VkImageViewType vt = view_type(d.type);
             for (uint32_t k = 0; k < d.count; k++) {
                 // (Fritchii d603d98bb) A handle word where a storage buffer of the same program keeps its address is not a
@@ -3608,7 +3861,7 @@ void build_descriptors(const NvnState& s, const Program& p) {
                 VkImageView view = handle ? texture_view_of(handle, vt, ViewUse::Sample, VK_FORMAT_UNDEFINED, &tex)
                                           : VK_NULL_HANDLE;
                 upload_defer_ok = false;
-                if (dump_on()) dump_input('t', (uint32_t)(dw().imgs.size() - 0), handle, view ? tex : nullptr);
+                if (dump_on()) dump_input('t', (uint32_t)(out.imgs.size() - 0), handle, view ? tex : nullptr);
                 if (view && tex && trace_tex_wanted(tex)) trace_tex_hit = tex;
                 if (log_img_wanted(p.key)) {
                     static std::atomic<int> told{0};
@@ -3634,14 +3887,14 @@ void build_descriptors(const NvnState& s, const Program& p) {
                                (void*)view, view ? "" : " (dummy)");
                 if (view && tex && tex->gpu_written) draw_sampled().push_back(tex);
                 if (!view) view = dummies.view[(int)vt], st_dummy_textures += handle != 0;
-                dw().imgs.push_back({sampler_for((int)(handle >> 20), d.is_depth), view, VK_IMAGE_LAYOUT_GENERAL});
+                out.imgs.push_back({sampler_for((int)(handle >> 20), d.is_depth), view, VK_IMAGE_LAYOUT_GENERAL});
             }
-            w.pImageInfo = &dw().imgs[first];
-            dw().writes.push_back(w);
+            w.pImageInfo = &out.imgs[first];
+            out.writes.push_back(w);
         }
         for (const auto& d : info.image_descriptors) {
             VkWriteDescriptorSet w = write(VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, d.count);
-            const size_t first = dw().imgs.size();
+            const size_t first = out.imgs.size();
             const VkImageViewType vt = view_type(d.type);
             for (uint32_t k = 0; k < d.count; k++) {
                 const uint32_t handle = handle_of(s, st, d, k);
@@ -3668,12 +3921,12 @@ void build_descriptors(const NvnState& s, const Program& p) {
                              view ? "view made" : "NO view");
                 }
                 if (view && tex && d.is_written && (dump_on() || probe_on())) dump_written().push_back({tex, level});
-                if (dump_on()) dump_input(d.is_written ? 'W' : 'R', (uint32_t)dw().imgs.size(), handle, view ? tex : nullptr);
+                if (dump_on()) dump_input(d.is_written ? 'W' : 'R', (uint32_t)out.imgs.size(), handle, view ? tex : nullptr);
                 if (!view && !dev.null_descriptor) view = VK_NULL_HANDLE;
-                dw().imgs.push_back({VK_NULL_HANDLE, view, VK_IMAGE_LAYOUT_GENERAL});
+                out.imgs.push_back({VK_NULL_HANDLE, view, VK_IMAGE_LAYOUT_GENERAL});
             }
-            w.pImageInfo = &dw().imgs[first];
-            dw().writes.push_back(w);
+            w.pImageInfo = &out.imgs[first];
+            out.writes.push_back(w);
         }
     }
 }
@@ -3776,10 +4029,11 @@ int words_same_store(const VkWriteDescriptorSet& w, uint64_t* o, const uint64_t*
 }
 
 bool bind_descriptors(VkCommandBuffer cmd, VkPipelineBindPoint bp, const Program& p) {
-    if (dw().writes.empty()) return true;
+    DescWriter& wr = dw();   // (once: the accessor is a call and a thread-local read at each use. The same object for the thread's life: build_descriptors resets it in place)
+    if (wr.writes.empty()) return true;
     // A failed sampler is retryable, but cannot be published to either descriptor path.
     // Check the entire array before updating the pushed-state cache or allocating a set.
-    for (const auto& w : dw().writes)
+    for (const auto& w : wr.writes)
         if (w.descriptorType == VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER)
             for (uint32_t k = 0; k < w.descriptorCount; k++)
                 if (!w.pImageInfo[k].sampler) return false;
@@ -3787,22 +4041,22 @@ bool bind_descriptors(VkCommandBuffer cmd, VkPipelineBindPoint bp, const Program
     if (p.push) {
         static const bool whole = env_on("RX_VK_PUSH_ALL");   // (A/B: every binding every time)
         static const bool old_state = env_on("RX_VK_PUSH_STATE_OLD");   // (A/B: a vector of words a write, as before)
-        if (whole || ps.cmd != cmd || ps.layout != p.layout || ps.n != dw().writes.size()) {
+        if (whole || ps.cmd != cmd || ps.layout != p.layout || ps.n != wr.writes.size()) {
             if (g_fine) {
-                fine_n[FC_PUSH_FULL]++, fine_n[FC_PUSH_WRITES] += (int64_t)dw().writes.size();
-                for (const VkWriteDescriptorSet& w : dw().writes) fine_n[FC_PUSH_DESCS] += w.descriptorCount;
+                fine_n[FC_PUSH_FULL]++, fine_n[FC_PUSH_WRITES] += (int64_t)wr.writes.size();
+                for (const VkWriteDescriptorSet& w : wr.writes) fine_n[FC_PUSH_DESCS] += w.descriptorCount;
             }
             {
                 FINE_SCOPE(FT_PUSHCALL);
-                vkCmdPushDescriptorSetKHR(cmd, bp, p.layout, 0, (uint32_t)dw().writes.size(), dw().writes.data());
+                vkCmdPushDescriptorSetKHR(cmd, bp, p.layout, 0, (uint32_t)wr.writes.size(), wr.writes.data());
             }
-            ps.cmd = cmd, ps.layout = p.layout, ps.n = dw().writes.size();
+            ps.cmd = cmd, ps.layout = p.layout, ps.n = wr.writes.size();
             if (old_state) {
-                ps.writes.resize(dw().writes.size());
-                for (size_t i = 0; i < dw().writes.size(); i++) write_words(dw().writes[i], ps.writes[i]);
+                ps.writes.resize(wr.writes.size());
+                for (size_t i = 0; i < wr.writes.size(); i++) write_words(wr.writes[i], ps.writes[i]);
             } else {
                 ps.words.clear(), ps.at.clear();
-                for (const VkWriteDescriptorSet& w : dw().writes) ps.at.push_back((uint32_t)ps.words.size()), words_append(w, ps.words);
+                for (const VkWriteDescriptorSet& w : wr.writes) ps.at.push_back((uint32_t)ps.words.size()), words_append(w, ps.words);
             }
             return true;
         }
@@ -3810,19 +4064,19 @@ bool bind_descriptors(VkCommandBuffer cmd, VkPipelineBindPoint bp, const Program
         static thread_local std::vector<uint64_t> words;
         changed.clear();
         if (old_state) {
-            for (size_t i = 0; i < dw().writes.size(); i++) {
-                write_words(dw().writes[i], words);
-                if (words != ps.writes[i]) changed.push_back(dw().writes[i]), ps.writes[i].swap(words);
+            for (size_t i = 0; i < wr.writes.size(); i++) {
+                write_words(wr.writes[i], words);
+                if (words != ps.writes[i]) changed.push_back(wr.writes[i]), ps.writes[i].swap(words);
             }
         } else {   // (the same layout, so the same count of words in each write: compared and kept in place)
-            for (size_t i = 0; i < dw().writes.size(); i++) {
+            for (size_t i = 0; i < wr.writes.size(); i++) {
                 const uint64_t* end = ps.words.data() + (i + 1 < ps.at.size() ? ps.at[i + 1] : ps.words.size());
-                const int same = words_same_store(dw().writes[i], ps.words.data() + ps.at[i], end);
+                const int same = words_same_store(wr.writes[i], ps.words.data() + ps.at[i], end);
                 if (same < 0) {   // (not so: nothing is known of what is pushed; the whole set again)
                     ps.cmd = VK_NULL_HANDLE;
                     return bind_descriptors(cmd, bp, p);
                 }
-                if (!same) changed.push_back(dw().writes[i]);
+                if (!same) changed.push_back(wr.writes[i]);
             }
         }
         if (!changed.empty()) {
@@ -3840,7 +4094,7 @@ bool bind_descriptors(VkCommandBuffer cmd, VkPipelineBindPoint bp, const Program
     ps.cmd = VK_NULL_HANDLE;   // (a set bound: what was pushed is not known to stay)
     if (g_fine) {
         fine_n[FC_POOL_SETS]++;
-        for (const VkWriteDescriptorSet& w : dw().writes) fine_n[FC_POOL_DESCS] += w.descriptorCount;
+        for (const VkWriteDescriptorSet& w : wr.writes) fine_n[FC_POOL_DESCS] += w.descriptorCount;
     }
     VkDescriptorSetAllocateInfo ai{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
     ai.descriptorPool = cur->extra.empty() ? cur->pool : cur->extra.back();
@@ -3863,8 +4117,8 @@ bool bind_descriptors(VkCommandBuffer cmd, VkPipelineBindPoint bp, const Program
             return false;
         }
     }
-    for (auto& w : dw().writes) w.dstSet = set;
-    vkUpdateDescriptorSets(dev.device, (uint32_t)dw().writes.size(), dw().writes.data(), 0, nullptr);
+    for (auto& w : wr.writes) w.dstSet = set;
+    vkUpdateDescriptorSets(dev.device, (uint32_t)wr.writes.size(), wr.writes.data(), 0, nullptr);
     vkCmdBindDescriptorSets(cmd, bp, p.layout, 0, 1, &set, 0, nullptr);
     return true;
 }
@@ -4249,9 +4503,10 @@ bool targets_persistent(const Targets& at) {
 }
 
 void begin_pass(VkCommandBuffer cmd, const Targets& at) {
-    bool same = pass().open && pass().depth == at.depth_view && pass().n == at.n && pass().width == at.width &&
-                pass().height == at.height;
-    for (int i = 0; i < at.n && same; i++) same = pass().color[i] == at.color_view[i];
+    Pass& ps = pass();   // (once: the accessor is a call and a thread-local read at each use. The same object for the thread's life: draw_begin_recording resets it in place)
+    bool same = ps.open && ps.depth == at.depth_view && ps.n == at.n && ps.width == at.width &&
+                ps.height == at.height;
+    for (int i = 0; i < at.n && same; i++) same = ps.color[i] == at.color_view[i];
     if (same) return;
     end_pass(cmd);
     if (at.has_block_images) {
@@ -4274,13 +4529,13 @@ void begin_pass(VkCommandBuffer cmd, const Targets& at) {
         ca[i].imageLayout = VK_IMAGE_LAYOUT_GENERAL;
         ca[i].loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
         ca[i].storeOp = VK_ATTACHMENT_STORE_OP_STORE;
-        pass().color[i] = at.color_view[i];
-        pass().block_image[i] = at.block_image[i];
-        pass().tex[i] = at.color[i], pass().level[i] = at.color_level[i], pass().layer[i] = at.color_layer[i];
+        ps.color[i] = at.color_view[i];
+        ps.block_image[i] = at.block_image[i];
+        ps.tex[i] = at.color[i], ps.level[i] = at.color_level[i], ps.layer[i] = at.color_layer[i];
         texture_written(at.color[i], "a pass's colour target");
         texture_rendered(at.color[i]);
     }
-    for (int i = at.n; i < 8; i++) pass().color[i] = VK_NULL_HANDLE;
+    for (int i = at.n; i < 8; i++) ps.color[i] = VK_NULL_HANDLE;
     VkRenderingAttachmentInfo da{VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO};
     if (at.depth) {
         da.imageView = at.depth_view;
@@ -4290,10 +4545,10 @@ void begin_pass(VkCommandBuffer cmd, const Targets& at) {
         texture_written(at.depth, "a pass's depth target");
         texture_rendered(at.depth);
     }
-    pass().depth = at.depth_view;
-    pass().has_block_images = at.has_block_images;
-    pass().depth_tex = at.depth, pass().depth_level = at.depth_level, pass().depth_layer = at.depth_layer;
-    pass().n = at.n, pass().width = at.width, pass().height = at.height;
+    ps.depth = at.depth_view;
+    ps.has_block_images = at.has_block_images;
+    ps.depth_tex = at.depth, ps.depth_level = at.depth_level, ps.depth_layer = at.depth_layer;
+    ps.n = at.n, ps.width = at.width, ps.height = at.height;
     VkRenderingInfo ri{VK_STRUCTURE_TYPE_RENDERING_INFO};
     ri.renderArea = {{0, 0}, {at.width, at.height}};
     ri.layerCount = 1;
@@ -4302,12 +4557,12 @@ void begin_pass(VkCommandBuffer cmd, const Targets& at) {
     if (at.depth && depth_aspect(at.depth_format)) ri.pDepthAttachment = &da;
     if (at.depth && has_stencil(at.depth_format)) ri.pStencilAttachment = &da;
     gprof_begin(cmd);
-    pass().draws = 0, pass().format0 = at.n ? at.color_format[0] : at.depth_format;
-    pass().wm_or = 0, pass().wm_n = 0;
-    pass().clears = 0, pass().first_prog = 0;
-    pass().sampled.clear(), pass().sampled_targets = 0, pass().written = 0;
+    ps.draws = 0, ps.format0 = at.n ? at.color_format[0] : at.depth_format;
+    ps.wm_or = 0, ps.wm_n = 0;
+    ps.clears = 0, ps.first_prog = 0;
+    ps.sampled.clear(), ps.sampled_targets = 0, ps.written = 0;
     vkCmdBeginRendering(cmd, &ri);
-    pass().open = true;
+    ps.open = true;
     st_passes++;
 }
 
@@ -4391,13 +4646,14 @@ int dyn_pack(const NvnState& s, const Targets& at, VkPrimitiveTopology topo, boo
 }
 
 void dynamic_state(VkCommandBuffer cmd, const NvnState& s, const Targets& at, VkPrimitiveTopology topo, bool mesh) {
+    Pass& ps = pass();   // (once: the accessor is a call and a thread-local read at each use. The same object for the thread's life: draw_begin_recording resets it in place)
     float df[kDynF];
     uint32_t du[kDynU];
     uint8_t db[160];
     const int nb = dyn_pack(s, at, topo, mesh, df, du, db);
     if (!dump_on() && last_dyn_valid && dyn_fast.on && dyn_fast.nb == nb &&
         dyn_same(df, kDynF, du, kDynU, db, nb, dyn_fast.fp, dyn_fast.up, dyn_fast.raw)) {
-        pass().wm_or |= dyn_fast.wm0, pass().wm_n = dyn_fast.wm_n;   // (the pass trace still sees the masks)
+        ps.wm_or |= dyn_fast.wm0, ps.wm_n = dyn_fast.wm_n;   // (the pass trace still sees the masks)
         FINE_N(FC_DYN_FAST, 1);
         return;
     }
@@ -4576,7 +4832,7 @@ void dynamic_state(VkCommandBuffer cmd, const NvnState& s, const Targets& at, Vk
     std::memcpy(dyn_fast.up, du, sizeof du);
     std::memcpy(dyn_fast.raw, db, (size_t)nb);
     dyn_fast.wm0 = d.n ? (uint32_t)d.wm[0] : 0, dyn_fast.wm_n = (uint32_t)d.n;
-    pass().wm_or |= dyn_fast.wm0, pass().wm_n = dyn_fast.wm_n;
+    ps.wm_or |= dyn_fast.wm0, ps.wm_n = dyn_fast.wm_n;
 }
 #undef DYN_CHANGED
 
@@ -4778,6 +5034,7 @@ bool writes_sampled_target(uint16_t writes, uint16_t sampled_targets) {
 /// the targets' writes with each other only, not with the draws' texture reads of them. (A draw that samples a target
 /// it writes itself is left as it is.) Returns the targets the draw writes. RX_VK_NO_PASS_HAZARDS=1: not checked.
 uint16_t draw_hazards(VkCommandBuffer cmd, const Program& p, const NvnState& s, const Targets& at) {
+    Pass& ps = pass();   // (once: the accessor is a call and a thread-local read at each use. The same object for the thread's life: draw_begin_recording resets it in place)
     uint16_t writes = 0;
     for (int i = 0; i < at.n; i++)
         if (at.color[i] && target_write_mask(p, s, i)) writes |= (uint16_t)(1u << i);
@@ -4798,9 +5055,9 @@ uint16_t draw_hazards(VkCommandBuffer cmd, const Program& p, const NvnState& s, 
             }
     }
     static const bool off = env_on("RX_VK_NO_PASS_HAZARDS");
-    if (off || !pass().open) return writes;
-    bool same = pass().depth == at.depth_view && pass().n == at.n && pass().width == at.width && pass().height == at.height;
-    for (int i = 0; i < at.n && same; i++) same = pass().color[i] == at.color_view[i];
+    if (off || !ps.open) return writes;
+    bool same = ps.depth == at.depth_view && ps.n == at.n && ps.width == at.width && ps.height == at.height;
+    for (int i = 0; i < at.n && same; i++) same = ps.color[i] == at.color_view[i];
     if (!same) return writes;   // (other targets: begin_pass ends this pass with a barrier anyway)
     auto slot_of = [&](const Texture* t) {
         for (int i = 0; i < at.n; i++)
@@ -4810,15 +5067,15 @@ uint16_t draw_hazards(VkCommandBuffer cmd, const Program& p, const NvnState& s, 
     const char* kind = nullptr;
     for (const Texture* t : gfx_sampled()) {
         const int k = slot_of(t);
-        if (k >= 0 && (pass().written >> k & 1) && !(writes >> k & 1)) { kind = "samples a target the pass wrote"; break; }
+        if (k >= 0 && (ps.written >> k & 1) && !(writes >> k & 1)) { kind = "samples a target the pass wrote"; break; }
     }
-    if (!kind && writes_sampled_target(writes, pass().sampled_targets))
+    if (!kind && writes_sampled_target(writes, ps.sampled_targets))
         kind = "writes a target an earlier draw sampled";
     if (!kind) return writes;
     static int logged;
     if (logged++ < 8)
         logf("vk: a draw (program %016llx) %s, after %d draws of the pass (%ux%u): a pass of its own", (unsigned long long)p.key,
-             kind, pass().draws, pass().width, pass().height);
+             kind, ps.draws, ps.width, ps.height);
     end_pass(cmd);
     return writes;
 }
@@ -4916,8 +5173,11 @@ void draw_begin_recording(int slot, VkCommandBuffer cmd, uint64_t value) {
     if (!r.pool) {
         r.pool = make_pool();
     } else {
-        vkResetDescriptorPool(dev.device, r.pool, 0);
-        for (VkDescriptorPool p : r.extra) vkDestroyDescriptorPool(dev.device, p, nullptr);
+        {
+            rec::OwnSlot own;   // (RX_VK_RECORDER_OWN: the slot's own pools, vk_recorder.h; begin_recording's slot_begin)
+            vkResetDescriptorPool(dev.device, r.pool, 0);
+            for (VkDescriptorPool p : r.extra) vkDestroyDescriptorPool(dev.device, p, nullptr);
+        }
         r.extra.clear();
         // (the streams the last recording of the slot grew into: given back after 120 recordings that stayed in the first, the
         // slot's last one being done (recording_wait). RX_VK_STREAM_KEEP=1: kept)
@@ -5199,15 +5459,16 @@ namespace {
 TLS_OBJECT(dump_mesh_indirect, std::vector<std::pair<uint64_t, uint64_t>>)   // (program key, indirect address)
 } // namespace
 void end_pass(VkCommandBuffer cmd) {
-    if (!pass().open) return;
+    Pass& ps = pass();   // (once: the accessor is a call and a thread-local read at each use. The same object for the thread's life: draw_begin_recording resets it in place)
+    if (!ps.open) return;
     vkCmdEndRendering(cmd);
-    pass().open = false;
+    ps.open = false;
     note_pass_end(cmd);   // (before the dumps and probes below: they record work, and the next pass's barrier is then a full one)
-    if (pass().has_block_images) {
+    if (ps.has_block_images) {
         full_barrier(cmd, "barrier (before BC slice stores)");
-        for (int i = 0; i < pass().n; i++)
-            if (pass().block_image[i])
-                copy_block_attachment(cmd, *pass().tex[i], pass().block_image[i], pass().level[i], pass().layer[i], false);
+        for (int i = 0; i < ps.n; i++)
+            if (ps.block_image[i])
+                copy_block_attachment(cmd, *ps.tex[i], ps.block_image[i], ps.level[i], ps.layer[i], false);
         full_barrier(cmd, "barrier (after BC slice stores)");
     }
     if (dump_on() && !dump_mesh_indirect().empty()) {
@@ -5220,51 +5481,51 @@ void end_pass(VkCommandBuffer cmd) {
         dump_mesh_indirect().clear();
     }
     if (probe_on())
-        for (int i = 0; i < pass().n; i++)
-            if (pass().color[i] && pass().tex[i]) probe_image(cmd, pass().tex[i], pass().level[i], pass().layer[i], pass().prog, 'p', pass().draws);
+        for (int i = 0; i < ps.n; i++)
+            if (ps.color[i] && ps.tex[i]) probe_image(cmd, ps.tex[i], ps.level[i], ps.layer[i], ps.prog, 'p', ps.draws);
     if (pass_trace_on()) {
         char sampled[160] = "";
         int k = 0;
-        for (size_t i = 0; i < pass().sampled.size() && i < 6 && k < 140; i++)
-            k += snprintf(sampled + k, sizeof sampled - k, " %#llx", (unsigned long long)pass().sampled[i]->gpu);
+        for (size_t i = 0; i < ps.sampled.size() && i < 6 && k < 140; i++)
+            k += snprintf(sampled + k, sizeof sampled - k, " %#llx", (unsigned long long)ps.sampled[i]->gpu);
         trace_line("pass %ux%u f%d %dc%s wm%x/%u: %d draws %d clears, c0 %#llx/%u, depth %#llx/%u, progs %016llx..%016llx, "
-                   "sampled%s", pass().width, pass().height, (int)pass().format0, pass().n, pass().depth ? "+d" : "", pass().wm_or, pass().wm_n, pass().draws,
-                   pass().clears, (unsigned long long)(pass().n && pass().tex[0] ? pass().tex[0]->gpu : 0), pass().layer[0],
-                   (unsigned long long)(pass().depth_tex ? pass().depth_tex->gpu : 0), pass().depth_layer,
-                   (unsigned long long)pass().first_prog, (unsigned long long)pass().prog, sampled);
+                   "sampled%s", ps.width, ps.height, (int)ps.format0, ps.n, ps.depth ? "+d" : "", ps.wm_or, ps.wm_n, ps.draws,
+                   ps.clears, (unsigned long long)(ps.n && ps.tex[0] ? ps.tex[0]->gpu : 0), ps.layer[0],
+                   (unsigned long long)(ps.depth_tex ? ps.depth_tex->gpu : 0), ps.depth_layer,
+                   (unsigned long long)ps.first_prog, (unsigned long long)ps.prog, sampled);
     }
     if (gprof_on()) {
         char label[160];
-        snprintf(label, sizeof label, "pass %ux%u f%d %dc%s, %s draws, first prog %016llx, last prog %016llx", pass().width, pass().height,
-                 (int)pass().format0, pass().n, pass().depth ? "+d" : "", pass().draws > 256 ? ">256" : pass().draws > 32 ? "33-256" : pass().draws > 4 ? "5-32" : "0-4",
-                 (unsigned long long)pass().first_prog, (unsigned long long)pass().prog);
-        gprof_end(cmd, label, pass().draws);
+        snprintf(label, sizeof label, "pass %ux%u f%d %dc%s, %s draws, first prog %016llx, last prog %016llx", ps.width, ps.height,
+                 (int)ps.format0, ps.n, ps.depth ? "+d" : "", ps.draws > 256 ? ">256" : ps.draws > 32 ? "33-256" : ps.draws > 4 ? "5-32" : "0-4",
+                 (unsigned long long)ps.first_prog, (unsigned long long)ps.prog);
+        gprof_end(cmd, label, ps.draws);
     }
     if (dump_on())
-        for (int i = 0; i < pass().n; i++)
-            if (pass().color[i] && pass().tex[i]) {
+        for (int i = 0; i < ps.n; i++)
+            if (ps.color[i] && ps.tex[i]) {
                 char what[64];
-                snprintf(what, sizeof what, "pass c%d prog %016llx", i, (unsigned long long)pass().prog);
-                dump_image(cmd, pass().tex[i], pass().level[i], pass().layer[i], what);
+                snprintf(what, sizeof what, "pass c%d prog %016llx", i, (unsigned long long)ps.prog);
+                dump_image(cmd, ps.tex[i], ps.level[i], ps.layer[i], what);
             }
-    if (dump_on() && pass().depth && pass().depth_tex) {
+    if (dump_on() && ps.depth && ps.depth_tex) {
         char what[64];
-        snprintf(what, sizeof what, "pass depth prog %016llx", (unsigned long long)pass().prog);
-        dump_image(cmd, pass().depth_tex, pass().depth_level, pass().depth_layer, what);
+        snprintf(what, sizeof what, "pass depth prog %016llx", (unsigned long long)ps.prog);
+        dump_image(cmd, ps.depth_tex, ps.depth_level, ps.depth_layer, what);
     }
     if (dump_on())
         for (Texture* t : dump_sampled()) {
             char what[64];
-            snprintf(what, sizeof what, "sampled by %016llx", (unsigned long long)pass().prog);
+            snprintf(what, sizeof what, "sampled by %016llx", (unsigned long long)ps.prog);
             for (uint32_t l = 0; l < std::min<uint32_t>(t->layers, 2); l++) dump_image(cmd, t, 0, l, what);
             if (t->guest_size >= (8u << 20)) texture_log_guest(t);   // (and what the game's memory holds of it)
             for (uint32_t lv = 1; t->layers == 1 && lv < std::min<uint32_t>(t->levels, 8); lv++) {   // (every level)
-                snprintf(what, sizeof what, "sampled by %016llx level %u", (unsigned long long)pass().prog, lv);
+                snprintf(what, sizeof what, "sampled by %016llx level %u", (unsigned long long)ps.prog, lv);
                 dump_image(cmd, t, lv, 0, what);
             }
         }
     dump_sampled().clear();
-    pass().prog = 0;
+    ps.prog = 0;
 }
 
 const std::vector<uint64_t>& record_progs();
@@ -5963,6 +6224,39 @@ void StatsQuery::gpu_dump(VkCommandBuffer cmd, const NvnState& s, uint64_t prog,
 }
 /// The arguments as the GPU holds them: copied outside the pass, which the next draw opens again, as RX_VK_DUMP_EACH
 /// does. A dispatch's before the dispatch (what it launched with: it may reset them itself), a draw's after it.
+// (hookshot) A draw's occlusion query (vk_replay.cpp, RX_VK_OCC_QUERIES). A query only says something when its draw drew: it
+// is begun just before the draw command is recorded (issue), inside the draw's pass, and ended as draw() returns. A draw
+// that returns before its command, or whose vertex input could not all be bound (zero_buffer in its place: drop), never
+// begins it: the query has no result, and its report stays "visible" (occ_collect). An empty query ended would read 0, an
+// object hidden that may be in view. Made after StatsQuery, so it ends first: StatsQuery's end copies outside the pass.
+enum OccNotBegun { kOccReturned, kOccVertexInput, kOccTaskBatches };
+std::atomic<uint64_t> occ_not_begun[3];
+struct OccGuard {
+    VkCommandBuffer cmd = VK_NULL_HANDLE;
+    VkQueryPool pool = VK_NULL_HANDLE;
+    uint32_t q = 0;
+    bool begun = false;
+    OccGuard(VkCommandBuffer c, const DrawArgs& d) : cmd(c), pool(d.occ_pool), q(d.occ_query) {}
+    OccGuard(const OccGuard&) = delete;
+    OccGuard& operator=(const OccGuard&) = delete;
+    /// the draw command comes next: its query begins
+    void issue() {
+        if (!pool || begun) return;
+        vkCmdBeginQuery(cmd, pool, q, dev.occlusion_precise ? VK_QUERY_CONTROL_PRECISE_BIT : 0);
+        begun = true;
+    }
+    /// the draw's count would not be the game's (why: OccNotBegun): its query is never begun
+    void drop(OccNotBegun why) {
+        if (!pool || begun) return;
+        occ_not_begun[why].fetch_add(1, std::memory_order_relaxed);
+        pool = VK_NULL_HANDLE;
+    }
+    ~OccGuard() {
+        if (begun) vkCmdEndQuery(cmd, pool, q);
+        else drop(kOccReturned);
+    }
+};
+
 void StatsQuery::copy_args(VkCommandBuffer cmd, const DrawArgs& d, uint32_t index) {
     {
         if (!d.indirect || !stats_args) return;
@@ -5993,6 +6287,10 @@ void StatsQuery::copy_args(VkCommandBuffer cmd, const DrawArgs& d, uint32_t inde
     }
 }
 } // namespace
+/// (hookshot) the occlusion queries draw() left unbegun since the last call, by why (vk_draw.h)
+void occ_draw_counts(uint64_t out[3]) {
+    for (int i = 0; i < 3; i++) out[i] = occ_not_begun[i].exchange(0, std::memory_order_relaxed);
+}
 
 // ---- (EvilOOT) NVN2's indirect mesh draws in Vulkan's layout ----
 // NVN2 keeps an indirect mesh draw as {task count, first task} (as its direct DrawMeshTasks(first, count) and NVIDIA's
@@ -6678,6 +6976,7 @@ static bool fallback_list_held(uint64_t list) {
 }
 
 void draw(VkCommandBuffer cmd, NvnState& s, const DrawArgs& d) {
+    Pass& ps = pass();   // (once: the accessor is a call and a thread-local read at each use. The same object for the thread's life: draw_begin_recording resets it in place)
     PROF_HOT(PROF_DRAW);
     FINE_N(FC_DRAWS, 1);
     stats_tick();
@@ -6800,9 +7099,16 @@ void draw(VkCommandBuffer cmd, NvnState& s, const DrawArgs& d) {
     auto wait_for = [&](const std::atomic<bool>& ready) {
         PROF_EXACT();
         const auto t0 = std::chrono::steady_clock::now();
-        jobs_wait(ready);
+        const int queued = jobs_pending();
+        const bool here = jobs_wait(ready);
+        const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
         st_waits++;
-        st_wait_ms += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+        st_wait_ms += ms;
+        static std::atomic<int> told{0};
+        if (here && told++ < 10)   // (hookshot: that the steal ran, with the queue the wait would have stood behind)
+            logf("vk: a draw's %s ran where it waited, ahead of the queue (%d other jobs queued or running), in %.1f ms "
+                 "(RX_VK_JOB_STEAL=0: waited in turn)",
+                 &ready == &cp->ready ? "shader translation" : "pipeline build", queued > 0 ? queued - 1 : 0, ms);
     };
     // (hookshot) RX_VK_TRANSLATE_WAIT_MS=<ms> (off unless set): a translation not ready, for a draw whose targets hold an
     // earlier frame's picture, is waited for at most this long a frame in all, on each recording thread, without taking the
@@ -6857,6 +7163,9 @@ void draw(VkCommandBuffer cmd, NvnState& s, const DrawArgs& d) {
         if (!batch_size) SKIP_HERE();
         if (d.groups[0] > batch_size) {
             DrawArgs batch = d;
+            // (hookshot) one draw of the game's in several: one query cannot be begun in each (and a count of the last batch
+            // alone could be 0 while an earlier one drew). Not counted: its report stays "visible"
+            if (batch.occ_pool) OccGuard(cmd, batch).drop(kOccTaskBatches), batch.occ_pool = VK_NULL_HANDLE;
             for (int remaining = d.groups[0]; remaining > 0; remaining -= batch.groups[0]) {
                 batch.groups[0] = std::min(remaining, batch_size);
                 draw(cmd, s, batch);
@@ -6880,8 +7189,35 @@ void draw(VkCommandBuffer cmd, NvnState& s, const DrawArgs& d) {
     }
     if (!pe->ready.load(std::memory_order_acquire)) {
         const bool may_skip = !always_wait && targets_persistent(at) && !writes_memory(p);
-        if (may_skip) return use.skipped(), void(st_pending_skips++);
-        wait_for(pe->ready);
+        // (hookshot, from Mako) one to draw with until the full build is done: from the caches, or quick (quick_pipeline). Else a
+        // draw that may be left out first waits briefly for its build, moved to the queue's front (RX_VK_PIPE_WAIT_MS, off unless
+        // set), and one that may not waits for it, running it here if no worker has (jobs_wait). RX_VK_PIPE_SKIP=0 waits for
+        // every full pipeline, as it says: no quick one
+        if (always_wait) {
+            wait_for(pe->ready);
+        } else if (!pe->pipeline.load(std::memory_order_acquire) && !quick_pipeline(*pe, p, s, at, topo, !may_skip)) {
+            if (may_skip) {
+                static thread_local quick_pipe::FrameBudget wait_budget;
+                const auto now_ms = [] {
+                    return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now().time_since_epoch()).count();
+                };
+                double waited = -1;
+                const bool ready = quick_pipe::brief(
+                    pe->ready, pipe_wait_budget_ms(), wait_budget, texture_frame_no(), [&] { jobs_hurry(pe->ready); },
+                    [&](double ms) {
+                        PROF_EXACT();
+                        const double t0 = now_ms();
+                        const bool ok = jobs_wait_for(pe->ready, ms);
+                        waited = now_ms() - t0;
+                        return ok;
+                    },
+                    now_ms);
+                if (waited >= 0) st_waits++, st_wait_ms += waited;
+                if (!ready) return use.skipped(), void(st_pending_skips++);
+            } else {
+                wait_for(pe->ready);
+            }
+        }
     }
     if (use.on) use.pipeline_made(pe->how.load(std::memory_order_relaxed));
     const VkPipeline pl = pe->pipeline;
@@ -7068,20 +7404,20 @@ void draw(VkCommandBuffer cmd, NvnState& s, const DrawArgs& d) {
         FINE_SCOPE(FT_HAZARD);
         begin_pass(cmd, at);
     }
-    probe_draw(s, p, pass().draws);   // (hookshot: RX_VK_PROBE)
+    probe_draw(s, p, ps.draws);   // (hookshot: RX_VK_PROBE)
     gprof_run(cmd, p.key);   // (RX_VK_PASS_TIMING=2)
-    pass().prog = p.key;
-    if (!pass().first_prog) pass().first_prog = p.key;
+    ps.prog = p.key;
+    if (!ps.first_prog) ps.first_prog = p.key;
     for (const Texture* t : gfx_sampled()) {
-        if (std::find(pass().sampled.begin(), pass().sampled.end(), t) != pass().sampled.end()) continue;
-        pass().sampled.push_back(t);
+        if (std::find(ps.sampled.begin(), ps.sampled.end(), t) != ps.sampled.end()) continue;
+        ps.sampled.push_back(t);
         int slot = -1;
         for (int i = 0; i < at.n; i++)
             if (at.color[i] == t) { slot = i; break; }
         if (slot < 0 && at.depth == t) slot = 8;
-        if (slot >= 0) pass().sampled_targets |= (uint16_t)(1u << slot);
+        if (slot >= 0) ps.sampled_targets |= (uint16_t)(1u << slot);
     }
-    pass().written |= writes;
+    ps.written |= writes;
     if (pl != last_pipeline) {
         FINE_SCOPE(FT_BINDPL);
         FINE_N(FC_BIND_PIPE, 1);
@@ -7173,6 +7509,7 @@ void draw(VkCommandBuffer cmd, NvnState& s, const DrawArgs& d) {
         }
     }
     StatsQuery stats_query(cmd, p.key, d);   // (EvilOOT, RX_VK_DRAW_STATS)
+    OccGuard occ(cmd, d);   // (hookshot: after stats_query, so it ends first, inside the pass; begun by occ.issue())
     if (stats_frame_now() && stats_prog_wanted(p.key)) {   // (and the wanted programs' buffers: a mesh draw's stages, fragment)
         for (const int stage : {6, 7, 1}) stats_dump_stage(p.key, s, stage);
         // (and as the GPU holds them, after it: RX_VK_GPU_DUMP=1 only; its bindings can sync a pool's mirror mid-frame, and
@@ -7182,9 +7519,10 @@ void draw(VkCommandBuffer cmd, NvnState& s, const DrawArgs& d) {
     }
     if (d.mesh) {
         if (p.fallback) {   // (hookshot: the generated vertex stage reads the records; one vertex a corner)
+            occ.issue();
             vkCmdDrawIndirect(cmd, fallback_draw_records, 0, 1, sizeof(VkDrawIndirectCommand));   // (its count: the records taken)
             st_mesh++;
-            st_draws++, pass().draws++;
+            st_draws++, ps.draws++;
             return;
         }
         {   // (amd-fix, diagnosis) RX_VK_LOG_MESH_PROGS=1: each mesh program's first draw and every 600th, with what its
@@ -7243,13 +7581,14 @@ void draw(VkCommandBuffer cmd, NvnState& s, const DrawArgs& d) {
             if (mesh_conv_buf) {   // (EvilOOT: the records as {count, 1, 1}, mesh_indirect_convert)
                 // (hookshot: as many records as mesh_indirect_convert wrote, not the game's maximum)
                 const uint32_t conv_n = (uint32_t)std::clamp(d.max, 1, 4096);
+                occ.issue();
                 if (cnt && vkCmdDrawMeshTasksIndirectCountEXT)
                     vkCmdDrawMeshTasksIndirectCountEXT(cmd, mesh_conv_buf, mesh_conv_off, cnt.buffer, cnt.offset, conv_n, 12);
                 else
                     vkCmdDrawMeshTasksIndirectEXT(cmd, mesh_conv_buf, mesh_conv_off, conv_n, 12);
                 mesh_conv_buf = VK_NULL_HANDLE;
                 st_mesh++;
-                st_draws++, pass().draws++;
+                st_draws++, ps.draws++;
                 return;
             }
             if (d.max < 0 || d.stride < 0) SKIP_HERE();   // (hookshot: the game's ints; a negative count was ~4e9 draws)
@@ -7262,6 +7601,7 @@ void draw(VkCommandBuffer cmd, NvnState& s, const DrawArgs& d) {
                 const uint64_t firsts = mesh_args_address + mesh_args.offset + 12;
                 vkCmdPushConstants(cmd, p.layout, p.push_stages, Shader::Backend::SPIRV::MESH_FIRST_PUSH_OFFSET, 8, &firsts);
             }
+            occ.issue();
             if (cnt && vkCmdDrawMeshTasksIndirectCountEXT)
                 vkCmdDrawMeshTasksIndirectCountEXT(cmd, mesh_args.buffer, mesh_args.offset, cnt.buffer, cnt.offset, d.max, step);
             else
@@ -7276,11 +7616,12 @@ void draw(VkCommandBuffer cmd, NvnState& s, const DrawArgs& d) {
                 const uint64_t firsts = mesh_args_address + (uint64_t)at * 16 + 12;
                 vkCmdPushConstants(cmd, p.layout, p.push_stages, Shader::Backend::SPIRV::MESH_FIRST_PUSH_OFFSET, 8, &firsts);
             }
+            occ.issue();
             vkCmdDrawMeshTasksEXT(cmd, (uint32_t)std::max(d.groups[0], 0), (uint32_t)std::max(d.groups[1], 1),
                                   (uint32_t)std::max(d.groups[2], 1));
         }
         st_mesh++;
-        st_draws++, pass().draws++;
+        st_draws++, ps.draws++;
         return;
     }
     // vertex streams (from their pools, strides dynamic) and the zero stream
@@ -7296,6 +7637,7 @@ void draw(VkCommandBuffer cmd, NvnState& s, const DrawArgs& d) {
         vaddr[i] = s.vbuf[i].address, vsize[i] = s.vbuf[i].size, vstride_key[i] = s.vstream[i].stride;
     }
     const uint64_t vstamp = gpu_bind_stamp();
+    bool vertex_complete = true;   // (hookshot: every stream bound; else a zero_buffer stands in, and a count means nothing)
     if (!vertex_set_same(vstamp, vaddr, vsize, vstride_key, vertex_set.stamp, vertex_set.addr, vertex_set.size,
                          vertex_set.stride, vertex_set.on)) {
         VkBuffer vbufs[16];
@@ -7328,6 +7670,7 @@ void draw(VkCommandBuffer cmd, NvnState& s, const DrawArgs& d) {
             std::memcpy(last_vb.z, vsizes, sizeof vsizes), std::memcpy(last_vb.s, vstrides, sizeof vstrides);
             last_vb_valid = true;
         }
+        vertex_complete = complete;
         if (complete && gpu_bind_stamp() == vstamp) {
             vertex_set.stamp = vstamp;
             for (int i = 0; i < 16; i++) {
@@ -7341,6 +7684,7 @@ void draw(VkCommandBuffer cmd, NvnState& s, const DrawArgs& d) {
             vertex_set.on = false;
     }
     if (g_fine) fine_ns[FT_VERTEX] += prof_now() - fine_vertex_t0;
+    if (!vertex_complete) occ.drop(kOccVertexInput);
     const VkIndexType itype = d.itype == 0 ? VK_INDEX_TYPE_UINT8_EXT : d.itype == 1 ? VK_INDEX_TYPE_UINT16 : VK_INDEX_TYPE_UINT32;
     if (d.indexed && d.itype == 0 && !dev.index_uint8) SKIP_HERE();
     if (d.prim == NVN_DRAW_PRIMITIVE_QUADS) {   // (quads as two triangles each: indices made in the stream)
@@ -7368,9 +7712,10 @@ void draw(VkCommandBuffer cmd, NvnState& s, const DrawArgs& d) {
             std::memcpy(out + q * 6, tri, sizeof tri);
         }
         bind_index(cmd, cur->stream, at6, VK_INDEX_TYPE_UINT32);
+        occ.issue();
         vkCmdDrawIndexed(cmd, quads * 6, (uint32_t)std::max(1, d.instances), 0, d.indexed ? d.base_vertex : 0,
                          (uint32_t)d.base_instance);
-        st_draws++, pass().draws++;
+        st_draws++, ps.draws++;
         return;
     }
     if (d.indirect) {
@@ -7385,9 +7730,11 @@ void draw(VkCommandBuffer cmd, NvnState& s, const DrawArgs& d) {
             BufferRef ib = gpu_buffer_bind(d.ibuf, 4, false);
             if (!ib) SKIP_HERE();
             bind_index(cmd, ib.buffer, ib.offset, itype);
+            occ.issue();
             if (cnt) vkCmdDrawIndexedIndirectCount(cmd, args.buffer, args.offset, cnt.buffer, cnt.offset, std::max(d.max, 1), ind_stride);
             else vkCmdDrawIndexedIndirect(cmd, args.buffer, args.offset, std::max(d.max, 1), ind_stride);
         } else {
+            occ.issue();
             if (cnt) vkCmdDrawIndirectCount(cmd, args.buffer, args.offset, cnt.buffer, cnt.offset, std::max(d.max, 1), ind_stride);
             else vkCmdDrawIndirect(cmd, args.buffer, args.offset, std::max(d.max, 1), ind_stride);
         }
@@ -7402,12 +7749,14 @@ void draw(VkCommandBuffer cmd, NvnState& s, const DrawArgs& d) {
             bind_index(cmd, ib.buffer, ib.offset, itype);
         }
         FINE_SCOPE(FT_DRAWCALL);
+        occ.issue();
         vkCmdDrawIndexed(cmd, (uint32_t)d.count, (uint32_t)std::max(1, d.instances), 0, d.base_vertex, (uint32_t)d.base_instance);
     } else {
         FINE_SCOPE(FT_DRAWCALL);
+        occ.issue();
         vkCmdDraw(cmd, (uint32_t)d.count, (uint32_t)std::max(1, d.instances), (uint32_t)d.first, (uint32_t)d.base_instance);
     }
-    st_draws++, pass().draws++;
+    st_draws++, ps.draws++;
 }
 
 /// A dispatch over 2 ms is logged, 60 times, and only while RX_VK_SLOW_DISPATCH is set. Off, the clock is not read.
@@ -8098,7 +8447,11 @@ bool prepare_is_update() {
 /// before the stamp says they are: a start that ended before the save would otherwise find them cold for good)
 bool pcache_saved_now() {
     size_t before = 0;
-    if (!pcache || vkGetPipelineCacheData(dev.device, pcache, &before, nullptr) != VK_SUCCESS) return false;
+    if (!pcache) return false;
+    {
+        PcacheFetch fetch(-1);
+        if (vkGetPipelineCacheData(dev.device, pcache, &before, nullptr) != VK_SUCCESS) return false;
+    }
     pipeline_cache_save(true);
     std::error_code ec;
     const auto size = std::filesystem::file_size(pcache_path, ec);
@@ -8277,7 +8630,7 @@ bool prepare_run(void (*progress)(size_t done, size_t total), bool background, b
         VkPipeline pl = VK_NULL_HANDLE;
         // (into the app's pipeline cache, saved to mkw_vk_pipelines.bin: without it the next start compiled them again in play
         // where the driver's own cache missed them, AMD's 15 s culling compiles each time)
-        if (guarded_compute(pcache, &ci, &pl) == VK_SUCCESS && pl) {
+        if (guarded_compute_held(pcache, &ci, &pl) == VK_SUCCESS && pl) {
             vkDestroyPipeline(dev.device, pl, nullptr);
             libs++;
             pcache_built_since_save++;
@@ -9699,8 +10052,8 @@ std::string load_fallback_path() {
 void program_layout(Program& p) { ensure_layout(p); }
 std::vector<std::pair<uint64_t, uint64_t>> compute_variants_learned() { return compute_variants_read(); }
 void pipeline_cache_close() {
-    try {
-        if (play_cache.load()) play_cache_save();
+    try {   // (with the fetch lock on, bounded: a build stuck in the driver costs the play file, not the close)
+        if (play_cache.load()) play_cache_save(kFetchQueueMs);
     } catch (const std::exception& e) {
         logf("vk: pipeline cache save failed: %s", e.what());
     }
@@ -9717,7 +10070,7 @@ void pipeline_cache_save_play() {
 
 void pipeline_cache_save(bool force) {
     if (!pcache || pcache_no_save || (!force && pcache_built_since_save < 32)) return;
-    pcache_built_since_save = 0;
+    const int64_t built = pcache_built_since_save.exchange(0);
     // (on a thread of its own unless forced, at exit: ~100 MB fetched and written took the replay thread 100+ ms at
     // each scene change; the cache is internally synchronized, pipelines go on being built meanwhile)
     static std::atomic<bool> busy{false};
@@ -9726,8 +10079,20 @@ void pipeline_cache_save(bool force) {
         while (busy.load()) Sleep(1);   // (the one under way, then this one)
         busy = true;
     }
-    auto save = [force] {
+    auto save = [force, built] {
         struct Done { ~Done() { busy = false; } } done;
+        // (Intel: no build under way while the caches' data is fetched, PcacheFetch, the lock held around each fetch alone. A
+        // forced save waits for the builds; the background one polls, and is put off when builds ran throughout; after
+        // kFetchPutOffs of those in a row it queues for kFetchQueueMs, so a stretch of back-to-back builds cannot put it off for good)
+        static std::atomic<int> put_off{0};
+        const bool queue = force || put_off.load() >= kFetchPutOffs;
+        const int wait_ms = force ? -1 : queue ? kFetchQueueMs : kFetchPollMs;
+        bool had = true;
+        auto fetch = [&](size_t* n, void* data) {
+            PcacheFetch lock(wait_ms, queue);
+            had = lock.held();
+            return had && vkGetPipelineCacheData(dev.device, pcache, n, data) == VK_SUCCESS;
+        };
         try {
             size_t n = 0;
             // (the size last read or written: nothing new, not fetched nor written again; see pcache_saved_size)
@@ -9737,7 +10102,14 @@ void pipeline_cache_save(bool force) {
             // so a folder prepared before the warm pass keeps its libraries through a crash. The window's close does not write it
             // (pipeline_cache_close saves the generation only); a forced save does: Restart now, the prepare. RX_VK_PLAY_SAVE_START_MB=<n>: the growth it is written at in play (64; 0: any, as before))
             static const size_t play_grown = (size_t)(getenv("RX_VK_PLAY_SAVE_START_MB") ? std::max<long long>(0, atoll(getenv("RX_VK_PLAY_SAVE_START_MB"))) : 64) << 20;
-            bool write = vkGetPipelineCacheData(dev.device, pcache, &n, nullptr) == VK_SUCCESS && n && n != pcache_saved_size;
+            const auto put_off_now = [&] {
+                const int times = ++put_off;
+                if (times <= 4 || times % 16 == 0)
+                    logf("vk: pipeline cache save put off (%d in a row): pipelines were being built throughout", times);
+                pcache_built_since_save += built;   // (still to save: the next request writes them, not only after 32 more)
+            };
+            bool write = fetch(&n, nullptr) && n && n != pcache_saved_size;
+            if (!had) return put_off_now();
             if (write && !force && play_grown && play_cache_in_use() && n < pcache_saved_size + play_grown) {
                 write = false;
                 static std::atomic<int> told{0};
@@ -9747,16 +10119,19 @@ void pipeline_cache_save(bool force) {
             }
             if (write) {
                 auto data = PipelineCacheFile::writable(pcache_path, n);
-                if (!data.empty() && vkGetPipelineCacheData(dev.device, pcache, &n, data.data()) == VK_SUCCESS && data.publish(n)) {
+                if (!data.empty() && fetch(&n, data.data()) && data.publish(n)) {
                     pcache_saved_size = n;
                     logf("vk: pipeline cache saved (%zu KB)", n >> 10);
+                } else if (!had) {
+                    return put_off_now();   // (the size had, the data not: put off as well, not lost)
                 }
             }
+            put_off = 0;
         } catch (const std::exception& e) {
             logf("vk: pipeline cache save failed: %s", e.what());
         }
         try {
-            play_cache_save();   // (what play made since the last save, alone)
+            play_cache_save(wait_ms, queue);   // (what play made since the last save, alone)
         } catch (const std::exception& e) {
             logf("vk: pipeline cache save failed: %s", e.what());
         }

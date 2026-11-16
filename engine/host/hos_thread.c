@@ -1019,10 +1019,17 @@ uint64_t hos_reserved_cpus(void) {
     SYSTEM_LOGICAL_PROCESSOR_INFORMATION info[256];
     DWORD len = sizeof info;
     if (!GetLogicalProcessorInformation(info, &len)) return mask;
+    /* (hookshot) of the processors this process may run on. A process kept to some of them (taskset, a launcher's
+       affinity) had the PC's last core kept all the same, outside its set, and a thread may leave the set: the replay ran
+       there, beside whatever else did. A timed session kept to one CCD of a 7900X (CPUs 0-5,12-17) replayed on CPUs 11 and
+       23 of the other, with the builds: frames of 2-8 s whenever one ran, and a 13th core when none did. A core counts
+       when all its logical processors are allowed; with every processor allowed, the last core as before */
+    DWORD_PTR proc = 0, sys = 0;
+    if (!GetProcessAffinityMask(GetCurrentProcess(), &proc, &sys) || !proc) proc = ~(DWORD_PTR)0;
     int logical = 0;
     uint64_t last = 0;
     for (DWORD i = 0; i < len / sizeof info[0]; i++)
-        if (info[i].Relationship == RelationProcessorCore) {
+        if (info[i].Relationship == RelationProcessorCore && !((uint64_t)info[i].ProcessorMask & ~(uint64_t)proc)) {
             logical += __builtin_popcountll((uint64_t)info[i].ProcessorMask);
             if ((uint64_t)info[i].ProcessorMask > last) last = (uint64_t)info[i].ProcessorMask;
         }
@@ -1222,6 +1229,10 @@ static void sleep_ns(int64_t ns, int guest) {
 
 /* ---- nn::os threads -------------------------------------------------------------------------------------- */
 static HosThread *thread_arg(Ctx *c, uint64_t tt) {
+    /* (the calling thread's own ThreadType, the usual case: GetThreadPriority(GetCurrentThread()) ~2,400 times a frame in
+       Hyrule from the navigation workers: its record, without the scan of every thread under threads_lock; the SDK reads
+       the priority from the ThreadType itself) */
+    if (cur && cur->guest_tt == tt) return cur;
     HosThread *t = hos_thread_of(tt);
     if (!t) hos_fatal(c, "unknown nn::os::ThreadType %#llx", (unsigned long long)tt);
     return t;

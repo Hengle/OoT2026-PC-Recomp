@@ -246,12 +246,20 @@ bool pick_device() {
 
 /// (hookshot) Whether the shaders' float adds to storage buffers are asked to be the GPU's own atomic (create_device):
 /// RX_VK_NATIVE_FADD by the switches' rule (ocarina_reborn_env.h env_value_off: 0, false, off, no or empty is off, any other
-/// value on); unset, only with NVIDIA's driver, the one the native add was tried on in the game (an RTX 4090 in Kakariko
-/// and on Death Mountain Trail). AMD's RDNA 3 and later and Intel's Arc report the feature too but were not tried: they
-/// keep the loop unless the switch asks, until runs on them say otherwise
-static bool native_fadd_wanted(const char* env, VkDriverId driver) {
+/// value on); unset, with NVIDIA's driver (an RTX 4090 in Kakariko and on Death Mountain Trail) and with Intel's Windows
+/// driver on the GPU families it was run on: the Xe-LPG iGPUs of Meteor Lake and Arrow Lake (PCI device 0x7Dxx; run on a
+/// 0x7D55 in Kokiri Forest, Kakariko and on Death Mountain Trail), from that driver, 101.9175, on (Intel's Windows
+/// driverVersion is 101 << 14 | 9175); and the Arc B-series cards, Battlemage (PCI device 0xE2xx; run on a B580, 0xE20B,
+/// in Kokiri Forest: the loop lost the device in the sky's light sums, 499dbfd0, on entering it in every run), from the
+/// driver that was run, 101.9154, on. Intel's other GPUs on Windows (Iris Xe and UHD, Arc A-series, Lunar Lake), older
+/// drivers, AMD's RDNA 3 and later and Mesa's Intel driver report the feature too but were not tried: they keep the loop
+/// unless the switch asks, until runs on them say otherwise
+static bool native_fadd_wanted(const char* env, VkDriverId driver, uint32_t device, uint32_t version) {
     if (env) return !env_value_off(env);
-    return driver == VK_DRIVER_ID_NVIDIA_PROPRIETARY;
+    if (driver == VK_DRIVER_ID_NVIDIA_PROPRIETARY) return true;
+    if (driver != VK_DRIVER_ID_INTEL_PROPRIETARY_WINDOWS) return false;
+    return ((device & 0xFF00u) == 0x7D00u && version >= (101u << 14 | 9175u)) ||
+           ((device & 0xFF00u) == 0xE200u && version >= (101u << 14 | 9154u));
 }
 
 bool create_device() {
@@ -338,8 +346,9 @@ bool create_device() {
     optional(VK_KHR_COOPERATIVE_MATRIX_EXTENSION_NAME, dev.coop_matrix);
     // (hookshot) the GPU's own float add on storage buffers: the game's RED/ATOM.ADD.F32 become one OpAtomicFAddEXT instead
     // of a compare-exchange loop, which gives up after CAS_LOOP_MAX_TRIES attempts and loses that add (eden
-    // spirv_emit_context.cpp DefineStorageBuffers). By default with NVIDIA's driver only (native_fadd_wanted);
-    // RX_VK_NATIVE_FADD=1 asks for it on any GPU, =0 keeps the loop on every one, the extension not even enabled
+    // spirv_emit_context.cpp DefineStorageBuffers). By default with NVIDIA's driver, and Intel's Windows driver on the
+    // Meteor Lake and Arrow Lake iGPUs (native_fadd_wanted); RX_VK_NATIVE_FADD=1 asks for it on any GPU, =0 keeps the loop
+    // on every one, the extension not even enabled
     const char* const fadd_env = getenv("RX_VK_NATIVE_FADD");
     VkPhysicalDeviceDriverProperties fadd_driver{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DRIVER_PROPERTIES};
     {
@@ -347,7 +356,7 @@ bool create_device() {
         p2.pNext = &fadd_driver;
         vkGetPhysicalDeviceProperties2(dev.physical, &p2);
     }
-    const bool fadd_wanted = native_fadd_wanted(fadd_env, fadd_driver.driverID);
+    const bool fadd_wanted = native_fadd_wanted(fadd_env, fadd_driver.driverID, dev.props.deviceID, dev.props.driverVersion);
     bool atomic_float = false;
     if (fadd_wanted) optional(VK_EXT_SHADER_ATOMIC_FLOAT_EXTENSION_NAME, atomic_float);
     optional(VK_KHR_SWAPCHAIN_MUTABLE_FORMAT_EXTENSION_NAME, dev.swap_mutable);   // (hookshot: the overlays, vk_imgui.cpp)
@@ -501,7 +510,10 @@ bool create_device() {
                                                      : "compare-exchange loop (no VK_EXT_shader_atomic_float)";
         if (fadd_env) logf("vk: float atomic add on storage buffers: %s, RX_VK_NATIVE_FADD=%s", how, fadd_env);
         else logf("vk: float atomic add on storage buffers: %s, %s", how,
-                  fadd_wanted ? "NVIDIA's driver" : "by default only with NVIDIA's driver (RX_VK_NATIVE_FADD=1: native where the GPU has it)");
+                  !fadd_wanted ? "by default only with NVIDIA's driver and Intel's Windows driver on Meteor Lake, Arrow Lake and Battlemage "
+                                 "(RX_VK_NATIVE_FADD=1: native where the GPU has it)"
+                  : fadd_driver.driverID == VK_DRIVER_ID_NVIDIA_PROPRIETARY ? "NVIDIA's driver"
+                                                                            : "Intel's Windows driver, Meteor Lake, Arrow Lake or Battlemage");
     }
     // (bounds-checked buffer access: an out-of-range access dropped instead of faulting the device. On by default: the GPU
     // culling pass 53caac5f faulted the device while a save loaded, about one start in three, and the scene's lighting read garbage
@@ -533,6 +545,10 @@ bool create_device() {
     pv.transformFeedbackPreservesProvokingVertex = VK_FALSE;
     dev.provoking_vertex = dev.provoking_vertex && pv.provokingVertexLast;
     dev.conditional_rendering = dev.conditional_rendering && cond.conditionalRendering;
+    // (hookshot) the occlusion queries' real counts (vk_replay.cpp, RX_VK_OCC_QUERIES): a sample count, not only "any", and
+    // their reset from the CPU once read (both on when the device has them: the queried chain is what it is created with)
+    dev.occlusion_precise = f.features.occlusionQueryPrecise == VK_TRUE;
+    dev.host_query_reset = f12.hostQueryReset == VK_TRUE;
     dev.custom_border_color = dev.custom_border_color && border.customBorderColors && border.customBorderColorWithoutFormat;
     dev.depth_clip_control = dev.depth_clip_control && clip.depthClipControl;
     dev.graphics_pipeline_library = dev.graphics_pipeline_library && gpl.graphicsPipelineLibrary;
@@ -602,13 +618,9 @@ bool create_device() {
     if (dev.mesh_fallback) logf("vk: no mesh shaders: task and mesh programs run as compute shaders (issue 640 fallback)");
     bool task_mesh_fallback = false;
 #ifdef _WIN32
-    // Navi 22 can time out on task + mesh draws in the AMD Windows driver (issue 996), and so can Navi 21: on an RX 6800 XT
-    // (driver 0x800161) the native path lost the device within minutes at Hyrule Castle's entrance, while the fallback played
-    // 25 minutes there with none. Navi 21 is 0x73bf (RX 6800, 6800 XT, 6900 XT), 0x73af (RX 6900 XT, XTXH boards) and 0x73a5
-    // (RX 6950 XT): the same chip on the same driver, not tested on their own. Navi 22 is 0x73df (RX 6700 XT)
-    task_mesh_fallback = dev.props.vendorID == 0x1002 &&
-                         (dev.props.deviceID == 0x73bf || dev.props.deviceID == 0x73af || dev.props.deviceID == 0x73a5 ||
-                          dev.props.deviceID == 0x73df);
+    // (https://github.com/NotRexed/Hookshot/issues/996) AMD's RDNA 2 cards, Navi 21 to 23, can time out on task + mesh draws
+    // in the Windows driver: mesh_mode.h
+    task_mesh_fallback = mesh_rule::task_mesh_fallback_default(dev.props.vendorID, dev.props.deviceID);
 #endif
     if (mesh_mode == 1) task_mesh_fallback = false;   // (Native: the card's own mesh shaders for every draw)
     if (const char* e = getenv("RX_VK_TASK_MESH_FALLBACK")) task_mesh_fallback = atoi(e) != 0;

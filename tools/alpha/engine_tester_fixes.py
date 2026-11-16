@@ -310,7 +310,7 @@ change('gpu/vk/vk_programs.cpp', '''    if (ids_on.load(std::memory_order_acquir
     if (ids_on.load(std::memory_order_acquire))
         logf("vk: module identifiers (%s)''')
 
-def apply(root):
+def apply(root, perf=True):
     root = Path(root)
     pending = {}
     for rel, old, new in CHANGES:
@@ -324,3 +324,41 @@ def apply(root):
     shutil.copy2(here / 'ocr_intel_compute.h', root / 'gpu/vk/ocr_intel_compute.h')
     shutil.copy2(here / 'ocr_prepare_policy.h', root / 'gpu/vk/ocr_prepare_policy.h')
     shutil.copy2(here / 'ocr_fault_policy.h', root / 'gpu/vk/ocr_fault_policy.h')
+    if perf:
+        apply_perf(root)
+
+
+PERF = Path(__file__).parent / 'engine-perf.patch'
+
+
+def apply_perf(root):
+    """Renderer and host performance work on top of the fixes above (engine-perf.patch): threaded rendering (Auto from 12
+    logical processors, OCR_THREADED_RENDERING=0/1), the game's occlusion queries answered with the GPU's counts, sparse VRAM
+    mirrors, per-draw costs, quick pipelines while a full build runs, and native float adds on Intel Arc and Xe-LPG"""
+    import os
+    import subprocess
+    env = dict(os.environ, GIT_CEILING_DIRECTORIES=str(Path(root).resolve().parent))
+    r = subprocess.run(['git', 'apply', '-p1', '--whitespace=nowarn', str(PERF)], cwd=str(root), capture_output=True,
+                       text=True, env=env)
+    if r.returncode:
+        raise SystemExit('engine performance patch did not apply: ' + r.stderr[:400])
+    if not (Path(root) / 'gpu/vk/threaded_rendering.h').is_file():
+        raise SystemExit('engine performance patch: git apply said yes, but the engine is unchanged')
+
+
+def pre_perf_text(rel, engine=None):
+    """(the checks of the earlier patches) an engine file as it was before engine-perf.patch: that patch reversed on a copy"""
+    import os
+    import subprocess
+    import tempfile
+    engine = Path(engine) if engine else Path(__file__).resolve().parents[2] / 'engine'
+    with tempfile.TemporaryDirectory() as tmp:
+        dst = Path(tmp) / 'e' / rel
+        dst.parent.mkdir(parents=True)
+        dst.write_bytes((engine / rel).read_bytes())
+        env = dict(os.environ, GIT_CEILING_DIRECTORIES=str(Path(tmp)))
+        r = subprocess.run(['git', 'apply', '-R', '-p1', '--whitespace=nowarn', '--include=' + rel, str(PERF)],
+                           cwd=str(Path(tmp) / 'e'), capture_output=True, text=True, env=env)
+        if r.returncode:
+            raise RuntimeError('engine-perf.patch did not reverse on ' + rel + ': ' + r.stderr[:300])
+        return dst.read_text(encoding='utf-8')

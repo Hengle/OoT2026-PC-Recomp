@@ -31,6 +31,7 @@ import contextlib
 import ctypes
 import hashlib
 import json
+import re
 import math
 import os
 import shutil
@@ -1186,7 +1187,11 @@ def main():
         translator = [os.path.join(d, f) for top in ("eden", "sirit", "compat") for d, _, fs in os.walk(os.path.join(vk, top)) for f in fs]
         for f in sorted(translator) + [os.path.join(vk, n) for n in ("vk_shader.cpp", "vk_bank.cpp", "vk_state.h", "vk_api.h")]:
             with open(f, "rb") as src:
-                stamp.update(os.path.relpath(f, vk).replace("\\", "/").encode() + src.read().replace(bytes((13, 10)), bytes((10,))))
+                # (Ocarina Reborn) a block between "ocr-stamp-neutral: begin" and "end" lines is left out: declarations the
+                # translator does not read (the renderer's own state and option ids), so adding them keeps every player's caches
+                text = src.read().replace(bytes((13, 10)), bytes((10,)))
+                text = re.sub(rb"[^\n]*ocr-stamp-neutral: begin[^\n]*\n.*?[^\n]*ocr-stamp-neutral: end[^\n]*\n", b"", text, flags=re.S)
+                stamp.update(os.path.relpath(f, vk).replace("\\", "/").encode() + text)
         shader_stamp = "-DHOOKSHOT_SHADER_STAMP=0x%sull" % stamp.hexdigest()[:16]
         vflags = target() + CPU + (["-fPIC", "-I" + POSIX, "-D_GNU_SOURCE"] if LINUX else []) + [   # (hookshot: the replay is the frame's limit now)
             # (what the code takes for granted, which newer C++ libraries bring in by themselves and older ones do not: issue 48)

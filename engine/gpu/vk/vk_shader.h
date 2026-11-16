@@ -43,6 +43,10 @@ struct Program {
     uint64_t key = 0;
     bool compute = false, failed = false;
     std::atomic<bool> ready{false};   // translated (graphics programs are translated on a worker: vk_jobs.h)
+    // (Ocarina Reborn) how many buffer, image and texel view descriptors its stages have, packed (vk_draw.cpp desc_counts_pack);
+    // ~0: not counted yet. 32 bits in the room before stages, so a Program is as large as before: its size is part of the
+    // program cache's stamp (vk_shader.cpp translator_stamp), and every player's caches stay good
+    mutable std::atomic<uint32_t> desc_counts{~0u};
     std::vector<Stage> stages;
     std::array<uint32_t, 3> workgroup{1, 1, 1};
     uint32_t shared_memory = 0;

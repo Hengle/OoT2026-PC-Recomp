@@ -80,7 +80,7 @@ int main(){
                     p = root/rel
                     p.write_text(engine_prepare.replace_once(p.read_text(encoding='utf-8'),old,new),encoding='utf-8')
             for rel in names:
-                self.assertEqual((root/rel).read_text(encoding='utf-8'),(ROOT/'engine'/rel).read_text(encoding='utf-8'))
+                self.assertEqual((root/rel).read_text(encoding='utf-8'),engine_tester_fixes.pre_perf_text(rel))
             before={r:(root/r).read_bytes() for r in names}
             # The prepare step is repeatable on its own output; follow-up patches
             # run after it during staging, not backwards over the newer engine.

@@ -30,6 +30,7 @@ HEAD = r"""
 #include <cstring>
 #include <mutex>
 #include <string>
+#include <thread>
 #include <utility>
 #include <vector>
 #include "compat/ocarina_reborn_env.h"
@@ -80,6 +81,7 @@ struct {
 } dev;
 void logf(const char*, ...) {}
 void pin_subgroup(VkPipelineShaderStageCreateInfo&) {}
+bool stage_modules_ready(const Program&) { return true; }   // (modules let go after their pipelines: vk_progcache.cpp)
 VkFormat vertex_format(int fmt) { return fmt == 1 ? VK_FORMAT_R32_SFLOAT : VK_FORMAT_UNDEFINED; }
 VkFormat supported_vertex_format(VkFormat fmt) { return fmt; }
 bool no_a2c() { return false; }
@@ -101,7 +103,8 @@ driver_faults::Quarantine& fault_quarantine() { static driver_faults::Quarantine
 std::string driver_faults_path() { return {}; }
 void driver_fault_note(uint64_t) {}
 constexpr VkResult kDriverFault = static_cast<VkResult>(-77);
-bool driver_cache_only = false;
+bool driver_cache_only = false, quick_build = false, gate_busy = false, slow_full_build = false;
+int test_slow_ms() { return 0; }
 VkPipelineCache pcache = VK_NULL_HANDLE, driver_ask_cache = VK_NULL_HANDLE;
 uint64_t pcache_built_since_save = 0, st_pipelines = 0, st_pipeline_us = 0;
 
@@ -311,8 +314,9 @@ def main():
         cache = cache.replace("/* " + token + " */", extracted)
     start = source.index("    uint64_t vaddr[16]{};")
     end = source.index("    if (g_fine) fine_ns[FT_VERTEX]", start)
-    cache = cache.replace("/* BIND_VERTICES */", source[start:end])
-    with tempfile.TemporaryDirectory(prefix="ocarina_reborn-fallback-pipeline-") as temp:
+    # (draw() reads vertex_complete after the block: whether the occlusion query may count the draw)
+    cache = cache.replace("/* BIND_VERTICES */", source[start:end] + "    (void)vertex_complete;\n")
+    with tempfile.TemporaryDirectory(prefix="hookshot-fallback-pipeline-") as temp:
         cpp, exe = Path(temp) / "pipeline.cpp", Path(temp) / "pipeline.exe"
         cpp.write_text(fixture + cache + MAIN, encoding="utf-8")
         subprocess.run([args.cxx, "-std=c++20", "-O1", "-Wall", "-Wextra", "-Werror",
