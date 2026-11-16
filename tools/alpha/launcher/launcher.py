@@ -1428,8 +1428,6 @@ class App(tk.Tk):
             STATE.unlink(missing_ok=True)
             log('prepare finished')
             self.route()
-            if game_exe(job['dest']).is_file():
-                self.play()
 
         def back():
             self.busy = False

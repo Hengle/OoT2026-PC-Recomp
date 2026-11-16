@@ -381,7 +381,7 @@ class BuildScreen:
         if self.phase == 'run':
             self.btn(W - 160, H - 30, self.T('Abbrechen', 'Cancel'), self.cancel, '#3a2030')
         elif self.phase == 'done':
-            self.btn(W - 170, H - 30, self.T('SPIEL STARTEN', 'START GAME'), lambda: self.close(done=True), BLUE, big=True)
+            self.btn(W - 170, H - 30, self.T('ZUM LAUNCHER', 'OPEN LAUNCHER'), lambda: self.close(done=True), BLUE, big=True)
         elif self.phase == 'failed':
             self.btn(W - 170, H - 30, self.T('Zurück', 'Back'), lambda: self.close(back=True), '#3a2030', big=True)
         self.btn(150, H - 30, self.T('Log ausblenden', 'Hide log') if self.show_log else self.T('Log anzeigen', 'Show log'),
