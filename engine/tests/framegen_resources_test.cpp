@@ -78,6 +78,13 @@ VkResult vkCreateImageView(VkDevice, const VkImageViewCreateInfo* info, const Vk
 void vkDestroyImageView(VkDevice, VkImageView h, const VkAllocationCallbacks*) { release(h, 'V'); }
 void device_wait_idle_locked() { idle = true; ++waits; }
 void to_general(VkCommandBuffer, VkImage image) { CHECK(image && live.count(image)); ++barriers; }
+struct IntelDriverGate { IntelDriverGate() {} };
+static VkResult extern_guarded_shader_module(const VkShaderModuleCreateInfo* info, VkShaderModule* out) {
+    return vkCreateShaderModule(dev.device, info, nullptr, out);
+}
+static VkResult extern_guarded_compute(VkPipelineCache cache, const VkComputePipelineCreateInfo* info, VkPipeline* out) {
+    return vkCreateComputePipelines(dev.device, cache, 1, info, nullptr, out);
+}
 /* ACTUAL_FUNCTIONS */
 
 void clear_model() {

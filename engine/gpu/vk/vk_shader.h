@@ -27,10 +27,15 @@ struct Stage {
     // program cache (vk_progcache.cpp), which every translated program passes. Not in vk_shader.cpp, whose bytes are part of
     // the translator's stamp: a change there translates every player's programs again
     mutable uint32_t phis = 0;
-    // (Ocarina Reborn) where this stage's SPIR-V is in ocarina_reborn_programs.bin (0 words: unknown). With no module, it was
-    // let go after the program's listed pipelines were made (program_modules_drop) and stage_modules_ready reads it again
+    // (hookshot) where its SPIR-V is in ocarina_reborn_programs.bin, and how many words (0: compressed or translated in this run, so
+    // its module stays): once precompile_run has built its pipelines, its module can be let go on Linux and made again from the
+    // file if play ever builds a new pipeline state variant for this program
     int64_t code_at = 0;
     uint64_t code_words = 0;
+    // (hookshot) the record it was read from (its payload's position and stored size): its head is checked before code_at is read
+    // again (program_cache_complete_graphics). Here and not in Program, whose size is part of the translator's stamp
+    int64_t record_at = 0;
+    uint64_t record_size = 0;
 };
 
 /// A texture handle the stage reads from a storage buffer: its handle program (Shader::Info::handle_programs, Eden's
@@ -57,6 +62,12 @@ struct Program {
     VkPipeline compute_pipeline = VK_NULL_HANDLE;
     // (the compute pipeline's build: 0 not started, 1 on a worker, 2 done (compute_pipeline made, or failed): vk_draw.cpp dispatch)
     std::atomic<int> compute_state{0};
+    // (hookshot) the optimizer's build of a compute_pipeline made without it first (Intel's one-at-a-time builds), bound in its
+    // place once made: vk_draw.cpp compute_optimize. compute_pipeline stays for the session (a recording may hold it)
+    std::atomic<VkPipeline> compute_optimized{VK_NULL_HANDLE};
+    // (hookshot) compute_pipeline was made without the optimizer before play (precompile_run, precompile_compute_quick): its first
+    // dispatch queues compute_optimize. Not before: a first start makes every kept compute program's, most never dispatched
+    std::atomic<bool> optimize_owed{false};
     mutable std::atomic<bool> dispatched{false};   // (hookshot) noted in ocarina_reborn_computes.bin (vk_draw.cpp compute_note)
     bool push = false;             // its set is pushed (VK_KHR_push_descriptor)
     VkShaderStageFlags push_stages = 0;
@@ -142,6 +153,21 @@ bool stage_modules_ready(const Program& p);
 /// (Ocarina Reborn) OCR_SHADER_MODULE_DROP: 1 on, 0 off; default on with 20 GiB of RAM or less
 bool program_modules_drop_on();
 extern std::atomic<int64_t> modules_dropped, modules_remade;
+/// (hookshot) The same without waiting for Intel's compiler gate on Windows (IntelDriverGate): while another thread holds it,
+/// *busy is set, false comes back and the program is left as it was, its code still to read (a worker completes it)
+bool program_cache_complete_ask(Program& p, bool* busy);
+/// (hookshot) The graphics stages of a program whose modules were let go after the precompile (program_cache_drop_modules):
+/// remade from ocarina_reborn_programs.bin before play builds a new pipeline variant for it
+bool program_cache_complete_graphics(const Program& p);
+/// (hookshot) Lets go of the VkShaderModules of ready programs whose pipelines are built and whose stages can be remade from
+/// ocarina_reborn_programs.bin (or are compute stages that need no another pipeline); returns how many modules were destroyed
+size_t program_cache_drop_modules();
+/// (hookshot) precompile_run built p's noted graphics pipelines before the title: program_cache_drop_modules may let its graphics
+/// modules go (an un-noted program or variant keeps them for its first draw in play)
+void program_cache_note_built(const Program& p);
+/// (hookshot) p's graphics modules were let go (program_cache_drop_modules) and not made again yet: no pipeline is built from it
+/// until program_cache_complete_graphics has made them
+bool program_modules_dropped(const Program& p);
 /// (hookshot) Every kept graphics and mesh program's key, in the file's order, no record read; *loaded: the variants in memory already
 std::vector<uint64_t> program_cache_keys(std::vector<Program*>* loaded);
 const Program* program_find(uint64_t key, uint64_t variant);

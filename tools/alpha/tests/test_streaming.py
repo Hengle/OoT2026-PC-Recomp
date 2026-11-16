@@ -5,6 +5,7 @@ ALPHA = Path(__file__).resolve().parents[1]
 ROOT = ALPHA.parents[1]
 sys.path.insert(0, str(ALPHA))
 import engine_resource_memory, engine_streaming, engine_target_cache
+from engine_tester_fixes import pre_perf_text
 
 def section(text, signature):
     a=text.index(signature); b=text.index('{',a)+1; depth=1
@@ -56,7 +57,7 @@ for i in range(20):
             subprocess.run([sys.executable,'-c',script,str(p/'worker.dll')],check=True,timeout=20,capture_output=True)
 
     def test_generator_on_baseline_and_already_patched(self):
-        current=(ROOT/'engine/gpu/vk/vk_texture.cpp').read_bytes()
+        current=pre_perf_text('gpu/vk/vk_texture.cpp').encode('utf-8')
         # Source ZIPs do not contain Git history; still verify repeat application and the header.
         baseline=current
         if shutil.which('git'):
@@ -65,7 +66,7 @@ for i in range(20):
         with tempfile.TemporaryDirectory() as tmp:
             root=Path(tmp);(root/'gpu/vk').mkdir(parents=True)
             target=root/'gpu/vk/vk_texture.cpp';target.write_bytes(baseline)
-            shutil.copy2(ROOT/'engine/gpu/vk/vk_vma.cpp',root/'gpu/vk/vk_vma.cpp')
+            (root/'gpu/vk/vk_vma.cpp').write_text(pre_perf_text('gpu/vk/vk_vma.cpp'), encoding='utf-8', newline='\n')
             engine_streaming.apply(root)
             engine_target_cache.apply(root)
             import engine_settings_reset

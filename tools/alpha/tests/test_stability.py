@@ -13,6 +13,7 @@ sys.path.insert(0, str(ALPHA / 'launcher'))
 import diagnostics
 sys.path.insert(0, str(ALPHA))
 import engine_stability
+from engine_tester_fixes import pre_perf_text
 
 
 def function_block(source, name):
@@ -36,7 +37,7 @@ class PatchingTests(unittest.TestCase):
             names = ('gpu/vk/vk_memory.cpp', 'gpu/vk/vk_texture.cpp', 'host/hos_thread.c', 'host/mkw_glue.c', 'nx2/make_game.py')
             for rel in names:
                 (root / rel).parent.mkdir(parents=True, exist_ok=True)
-                shutil.copy2(engine / rel, root / rel)
+                (root / rel).write_text(pre_perf_text(rel, engine), encoding='utf-8', newline='\n')
             engine_stability.apply(root)
             first = [(root / rel).read_bytes() for rel in names]
             engine_stability.apply(root)

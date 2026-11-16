@@ -48,7 +48,10 @@ struct State {
     VkPipeline pipe = VK_NULL_HANDLE;
     VkSampler point = VK_NULL_HANDLE;
     bool tried = false;
-    struct Dead { uint64_t frame; std::function<void()> free; };
+    // (value: vk_retirement_value when let go. The frames counted are the replay's: with no window (HOS_HEADLESS, as test runs
+    // use) nothing waits for the present ring, and only the 48-slot recording ring bounds how far behind the GPU is, many frames
+    // when a frame has few recordings, so 4 frames on did not prove the GPU done with it. Freed once both have passed; never at 0)
+    struct Dead { uint64_t frame; uint64_t value; std::function<void()> free; };
     std::vector<Dead> dead;   // (what work in flight may still use: freed a few frames on)
     const char* reason = nullptr;
     bool told = false;
@@ -72,12 +75,12 @@ float env_float(const char* name, float otherwise, float lo, float hi) {
     return v >= lo && v <= hi ? v : otherwise;   // (and a NaN is neither)
 }
 
-void later(std::function<void()> f) { st().dead.push_back({texture_frame_no(), std::move(f)}); }
+void later(std::function<void()> f) { st().dead.push_back({texture_frame_no(), vk_retirement_value(), std::move(f)}); }
 void free_dead() {
     State& s = st();
-    const uint64_t now = texture_frame_no();
+    const uint64_t now = texture_frame_no(), done = vk_timeline_completed();
     for (size_t i = 0; i < s.dead.size();) {
-        if (now - s.dead[i].frame > 4) {
+        if (now - s.dead[i].frame > 4 && s.dead[i].value && done >= s.dead[i].value) {
             s.dead[i].free();
             s.dead[i] = std::move(s.dead.back());
             s.dead.pop_back();
@@ -147,12 +150,16 @@ bool make_pipeline() {
     VkShaderModuleCreateInfo mi{VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO};
     mi.codeSize = sizeof REACTIVE_MASK_COMP_SPV, mi.pCode = REACTIVE_MASK_COMP_SPV;
     VkShaderModule m = VK_NULL_HANDLE;
-    if (vkCreateShaderModule(dev.device, &mi, nullptr, &m) != VK_SUCCESS) return false;
-    VkComputePipelineCreateInfo ci{VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO};
-    ci.stage = {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, nullptr, 0, VK_SHADER_STAGE_COMPUTE_BIT, m, "main",
-                nullptr};
-    ci.layout = s.layout;
-    const VkResult r = vkCreateComputePipelines(dev.device, VK_NULL_HANDLE, 1, &ci, nullptr, &s.pipe);
+    VkResult r;
+    {
+        IntelDriverGate gate;
+        if (extern_guarded_shader_module(&mi, &m) != VK_SUCCESS) return false;
+        VkComputePipelineCreateInfo ci{VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO};
+        ci.stage = {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, nullptr, 0, VK_SHADER_STAGE_COMPUTE_BIT, m, "main",
+                    nullptr};
+        ci.layout = s.layout;
+        r = extern_guarded_compute(VK_NULL_HANDLE, &ci, &s.pipe);
+    }
     vkDestroyShaderModule(dev.device, m, nullptr);
     if (r != VK_SUCCESS) {
         logf("vk: reactive mask: its pipeline was not made (%d)", (int)r);

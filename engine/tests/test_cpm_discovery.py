@@ -51,14 +51,14 @@ class CpmDiscoveryTests(unittest.TestCase):
         # so the real build module discovers packages in this owned layout instead.
         kit = types.SimpleNamespace(ROOT=str(self.tools), HERE=str(self.tools / "nx2"),
                                     WORK=str(self.tools / "work"))
-        toolchain = types.SimpleNamespace(windows=lambda: os.name == "nt")
+        toolchain = types.SimpleNamespace(windows=lambda: os.name == "nt", find=lambda name: "missing-fixture-compiler")
 
         def no_process(command, *args, **kwargs):
             if command[0] == "pkg-config":
                 raise OSError("This fixture has no system FFmpeg")
             raise AssertionError("Unexpected build process: " + repr(command))
 
-        env = {"RX_CPM": str(override), "HOOKSHOT_FFMPEG": "",
+        env = {"RX_MARCH": "x86-64-v3", "RX_CPM": str(override), "HOOKSHOT_FFMPEG": "",
                "HOOKSHOT_VULKAN_HEADERS": "", "HOOKSHOT_SPIRV_HEADERS": "", "HOOKSHOT_VMA_HEADERS": ""}
         if extra_env:
             env.update(extra_env)

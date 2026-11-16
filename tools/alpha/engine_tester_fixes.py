@@ -334,7 +334,8 @@ PERF = Path(__file__).parent / 'engine-perf.patch'
 def apply_perf(root):
     """Renderer and host performance work on top of the fixes above (engine-perf.patch): threaded rendering (explicit
     OCR_THREADED_RENDERING=1 only until capture ordering is validated), the game's occlusion queries, sparse VRAM
-    mirrors, per-draw costs, quick pipelines while a full build runs, and native float adds on Intel Arc and Xe-LPG"""
+    mirrors, late GPU copies that preserve newer CPU writes, CPU targeting and guarded native float regions,
+    renderer PGO, per-draw costs, quick pipelines, and Intel compiler guards"""
     import os
     import subprocess
     env = dict(os.environ, GIT_CEILING_DIRECTORIES=str(Path(root).resolve().parent))

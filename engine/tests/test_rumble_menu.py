@@ -62,10 +62,7 @@ int saves = 0, presets = 0;
 void save() { saves++; }
 void apply_pad_layout(int) {}
 void apply_preset(int) { presets++; }
-void sync_preset_budgets(int) {}
 void env_release(const int*) {}   // (the environment's hold on a row: none here)
-void vram_budget_sync() {}
-constexpr int kVramMinimumOnly = 1;
 /* (stand-ins for the rest of set_row, which the Rumble strength row never reaches: the Upscaler's rows, the restart offer) */
 bool row_fixed(const int*) { return false; }
 int upscaler() { return 0; }
@@ -95,6 +92,8 @@ void samplers_changed() {}
 int temporal_resets = 0;
 void temporal_reset_failure() { ++temporal_resets; }
 void prompts_at_once(const Row&) {}
+/* (the Debug tab's Descriptor reuse and Sampler cache rows, told to vk_draw.cpp in play: not what this checks) */
+void menu_debug_rows(bool, bool) {}
 // (set_row steps the Output row through vk_menu.cpp's step_output_choice (#1144): not what this checks)
 int step_output_choice(int id, int dir) { return id + dir; }
 // (the Aspect ratio row moves the Output resolution to one of its shape's sizes, output_for_aspect: not what this checks)

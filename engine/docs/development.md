@@ -427,3 +427,15 @@ through (inputs timed in frames, screenshots, waits for the game's state, the In
 
 License: GPL-3.0-or-later, as mkw-recomp: a64-kit's translator is suyu's (GPL-2.0-or-later) and Eden's code is
 GPL-3.0.
+
+Ocarina Reborn memory integration: `RX_VK_COMMIT_GROWTH=0` disables counting available page-file growth. The default counts confirmed drive capacity below the current commit reserve, queries at most once a second, and falls back to current headroom if the query fails.
+
+
+## Integrated performance diagnostics
+
+`RX_VK_PGO=gen` records renderer branch counts; `RX_VK_PGO_FILE=<file>` chooses the output.
+The shipped profile provenance is in assets/profiles/README.md. CPU instructions and
+assets from the game are not part of this renderer profile.
+`RX_VK_AVAIL_RESERVE_MB` controls the Linux available-memory reserve.
+`RX_VK_DROP_MODULES` requests shader-module reclamation; `RX_VK_KEEP_MODULES` keeps them.
+`RX_VK_SPLIT_BEFORE_DRAW=0` or `1` overrides automatic submission splits before draws.

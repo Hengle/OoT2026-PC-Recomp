@@ -345,6 +345,25 @@ def patch_zstd_stream(source):
     return (source[:at] + ZSTD_CALL + source[at:]).replace('#include "a64.h"\n', '#include "a64.h"\nint hos_zstd_stream(Ctx *c);\n', 1)
 
 
+ZSTD_FRAMES_HEAD = "void f_8010b380(Ctx *__restrict A64_NOESC c) {\n"
+ZSTD_FRAMES_CALL = ("    if (hos_zstd_frames(c)) return;   /* (nx2/oot_patches.py: HOS_NATIVE_ZSTD_FRAMES, the host's libzstd) */\n")
+
+
+def patch_zstd_frames(source):
+    """f_8010b380, zstd's decompressMultiFrame in the game (x0 the context, x1 and x2 the output and its room, x3 and x4 the
+    frames, x5 and x6 a raw dictionary, x7 the DDict or 0; the resource loaders' whole-buffer decode), returns at once when
+    hos_zstd_frames did the call: with HOS_NATIVE_ZSTD_FRAMES on, the host's libzstd decodes the frames (host/hos_zstd.c);
+    off, the function runs as lifted"""
+    start = source.find(ZSTD_FRAMES_HEAD)
+    if start < 0:
+        return None
+    if ZSTD_FRAMES_CALL in source:   # (made before: a lift patched again)
+        return source
+    at = start + len(ZSTD_FRAMES_HEAD)
+    return (source[:at] + ZSTD_FRAMES_CALL + source[at:]).replace('#include "a64.h"\n',
+                                                                  '#include "a64.h"\nextern int hos_zstd_frames(Ctx *c);\n', 1)
+
+
 TEXT_HEAD = "void f_80b1e140(Ctx *__restrict A64_NOESC c) {"
 # (the letters' block: past the early returns, the auto-advance timer and the hidden / no-text checks; reached once a call)
 TEXT_OLD = ("L_80b1e1b4:;\n"
@@ -456,6 +475,15 @@ def patch_movie_frames(s):
 # - f_803edf70, the time of day: each frame it adds (int)(2 * step) game seconds (+60) to the seconds of the day (+40, a day of
 #   86400, then the day count +44). Cut, it added 1 a frame below 120 fps (the day slower: 83% at 100) and 0 above 120, where
 #   the clock stood still and the sun swung back and forth over the frozen hour.
+# - f_832b32b0, Scarecrow's Song playback: elapsed frames (+0x265fc) advance the saved note delays. Cut to 0, the song
+#   waits on the same note until a slow frame lets the counter move (issue 2668).
+# - f_832b6840, the eight-note recording (mode 10): the same elapsed counter is reset between notes and gaps, then saved
+#   as their lengths. Cut to 0, their timing is lost even though the eight pitches are recorded. The mode-13 cut is separate.
+# - f_832b2690, recording completion: after the eighth note starts, it times that note and writes its final delay into
+#   the same recording. Its unsigned cut must carry too, or the saved eighth note has zero length and is not played.
+# - f_80652cb0, the floor web (the Great Deku Tree's): it runs (int)step simulation steps a frame, clamped to 0..3.
+#   Cut to 0, the web stayed rigid when Link landed on it above 60 fps, though it still held him
+#   (https://github.com/NotRexed/Hookshot/issues/2667). Its remainder is kept per web (+2296), before the clamp.
 # hos_frame_whole carries the fractions per counter while the frames' own time is the step, so each moves at the game's rate;
 # otherwise it cuts as the game does. A site is added here once it is seen to misbehave in game. (A site's function, its code to
 # replace, and the counter's address for its remainder.)
@@ -475,6 +503,21 @@ WHOLE_SITES = (
      "    c->x[8]=recomp_fp_to_int(c->vreg[0][0]&UINT64_C(0xffffffff),32,32,1,3,c->fpcr,&c->fpsr);@"
      "    recomp_store32(c,c->x[19] + 60,c->x[8]);@",
      "c->x[19] + 60"),
+    ("void f_832b32b0(Ctx *__restrict A64_NOESC c) {@",
+     "    c->x[8]=recomp_fp_to_int(c->vreg[0][0]&UINT64_C(0xffffffff),32,32,0,3,c->fpcr,&c->fpsr);@",
+     "c->x[19] + 0x265fc"),
+    # (the unsigned cut with the x10 addition: the other recording mode uses the same cut followed by an x12 addition)
+    ("void f_832b6840(Ctx *__restrict A64_NOESC c) {@",
+     "    c->x[8]=recomp_fp_to_int(c->vreg[0][0]&UINT64_C(0xffffffff),32,32,0,3,c->fpcr,&c->fpsr);@"
+     "    { uint64_t _a=c->x[10],_b=((uint64_t)(uint32_t)(((uint32_t)(c->x[8])) << 0)),_r=_a+_b; _r&=0xFFFFFFFFULL; c->x[8]=_r; }@",
+     "c->x[9]"),
+    ("void f_832b2690(Ctx *__restrict A64_NOESC c) {@",
+     "    c->x[8]=recomp_fp_to_int(c->vreg[0][0]&UINT64_C(0xffffffff),32,32,0,3,c->fpcr,&c->fpsr);@",
+     "c->x[19] + 0x265fc"),
+    # (the floor web's simulation steps: keep each object's fraction before the existing 0..3 clamp, issues 2667/2271)
+    ("void f_80652cb0(Ctx *__restrict A64_NOESC c) {@",
+     "    c->x[22]=recomp_fp_to_int(c->vreg[0][0]&UINT64_C(0xffffffff),32,32,1,3,c->fpcr,&c->fpsr);@",
+     "c->x[19] + 2296"),
 )
 WHOLE_SITES = tuple((h.replace("@", "\n"), o.replace("@", "\n"), k) for h, o, k in WHOLE_SITES)
 WHOLE_MARK = "/* (the step's whole frames: nx2/oot_patches.py) */"
@@ -720,7 +763,7 @@ def patch_heap_retry(s):
 # (the wait action's start and tick, code_033.c; the anchors carry call-return PC literals, so each is once in its function)
 OC_DECL = ("extern volatile int hos_oc_wait;\nextern volatile int hos_oc_last_kind;\n"
            "extern volatile unsigned hos_oc_beat;\n"
-           "#define HOS_OC_BUTTONS(k) ((k) == 1 || (k) == 2 || (k) == 3 || (k) == 10)\n")
+           "#define HOS_OC_BUTTONS(k) ((k) == 1 || (k) == 2 || (k) == 3 || (k) == 7 || (k) == 10 || (k) == 11)\n")
 OC_ENTRY_HEAD = "void f_828a9190(Ctx *__restrict A64_NOESC c) {"
 OC_ENTRY_OLD = ("    c->x[1]=recomp_load32(c,c->x[19] + 32);\n"
                 "    { uint64_t _r = ((uint64_t)0 | ((c->x[0]) << 0)); c->x[20] = _r; }\n"
@@ -728,7 +771,8 @@ OC_ENTRY_OLD = ("    c->x[1]=recomp_load32(c,c->x[19] + 32);\n"
 OC_ENTRY_NEW = ("    c->x[1]=recomp_load32(c,c->x[19] + 32);\n"
                 "    hos_oc_last_kind = (int)c->x[1], hos_oc_wait = HOS_OC_BUTTONS(c->x[1]) ? 1 : 2, hos_oc_beat++;"
                 "   /* (nx2/oot_patches.py: the note wait began; 1 and 3 are the field ocarina, 2 a song lesson, "
-                "10 the scarecrow's recording, 13 a dialogue's, which stays the game's) */\n"
+                "7 the Lost Woods skull kids' songs, 10 the scarecrow's recording, 11 the scarecrow's recall of it, "
+                "13 a dialogue's, which stays the game's) */\n"
                 "    { uint64_t _r = ((uint64_t)0 | ((c->x[0]) << 0)); c->x[20] = _r; }\n"
                 "c->x[30] = 0x828a91e4ULL; f_832b35d0(c);")
 OC_TICK_HEAD = "void f_828a9280(Ctx *__restrict A64_NOESC c) {"
@@ -837,6 +881,12 @@ def patch_file(s, name, protect_hearts=False):
             lines.append("oot_patches: the zstd stream decode's host hook in " + name)
         out = zs
         counts["zstd stream hook"] += 1
+    zf = patch_zstd_frames(out) if protect_hearts else None
+    if zf is not None:
+        if zf != out:
+            lines.append("oot_patches: the zstd whole-buffer decode's host hook in " + name)
+        out = zf
+        counts["zstd frames hook"] += 1
     layout = patch_text_layout(out) if protect_hearts else None
     if layout is not None:
         out = layout
@@ -961,6 +1011,7 @@ def report(paths, counts, protect_hearts=False):
         done["disable camera centering"] = 0
         done["scene format"] = 0
         done["zstd stream hook"] = 0
+        done["zstd frames hook"] = 0
     total = collections.Counter()
     for c in counts:
         total.update(c)
@@ -1000,7 +1051,7 @@ def report(paths, counts, protect_hearts=False):
               "keeps the game's own step)" % (step_sites, len(STEP_SITES)))
     elif whole_sites != len(WHOLE_SITES):   # (the frames' own time without them: the pick-up indicator stays above 60 fps)
         print("oot_patches: WARNING: %d of %d frame counters found for the step's whole frames (above 60 fps a counter can stop: "
-              "the pick-up indicator, the water ripples, the time of day)" % (whole_sites, len(WHOLE_SITES)))
+              "the pick-up indicator, the water ripples, the time of day, Scarecrow's Song, the floor web)" % (whole_sites, len(WHOLE_SITES)))
 
 
 def apply(gen, *, protect_hearts=False, required=False):

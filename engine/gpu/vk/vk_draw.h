@@ -91,6 +91,8 @@ int64_t draw_slotgen_saves();
 /// RX_VK_FLASH_RECORD=<key>,...: the last frames' draws of those programs, written to the log for frames around a flash
 void draw_records_log(uint64_t frame_lo, uint64_t frame_hi);
 void pass_traces_log(uint64_t frame_lo, uint64_t frame_hi);   // (RX_VK_PASS_TRACE=1)
+/// (hookshot) The latest Linux memory-pressure shortfall (bytes) and sample number from texture_frame() without holding pools_mu
+uint64_t linux_pressure_shortfall(uint64_t* seq = nullptr);
 /// Changes with every uniform update the stream makes (vk_replay.cpp): descriptors bound before may be stale
 uint64_t ub_generation();
 /// A background thread (shader translation, pipeline builds) reads guest memory from the captures only, never the stream's
@@ -98,6 +100,10 @@ uint64_t ub_generation();
 void ub_thread_off();
 /// The pipeline cache to disk (force: whatever was built since the last save; else only after a few new ones)
 void pipeline_cache_save(bool force);
+/// (hookshot) the serial builds' thread between two builds: a save put off for builds under way, run there (vk_jobs.cpp)
+void pipeline_cache_between_builds();
+/// (hookshot) the Debug tab's Descriptor reuse and Sampler cache rows as the menu has them: they apply in play
+void menu_debug_rows(int descriptor_reuse, int sampler_cache);
 void pipeline_cache_save_play();   // what play made since the last save, into a play file now
 // (the window closed: what play made since the last save, a few ms; the start's cache is not written there, as before)
 void pipeline_cache_close();
@@ -111,5 +117,16 @@ std::string state_list_snapshot(bool* present);
 uint64_t ub_overlay(uint64_t addr, uint64_t n, uint8_t* base, const std::function<uint64_t(uint64_t)>& alloc);
 /// Guest memory as the stream's place sees it: as submitted, the stream's uniform updates before it over it
 bool ub_read(uint64_t addr, void* dst, uint64_t n);
+
+/// (hookshot) vkCreate* that a driver's compiler can fault inside. A fault leaves that one out (result -77) instead of
+/// ending the process. On Windows, Intel's compiler is entered by one thread (IntelDriverGate). The calls themselves
+/// live in vk_draw.cpp's unnamed namespace; these are the ones the other files link to.
+VkResult extern_guarded_graphics(VkPipelineCache cache, const VkGraphicsPipelineCreateInfo* ci, VkPipeline* pl);
+VkResult extern_guarded_compute(VkPipelineCache cache, const VkComputePipelineCreateInfo* ci, VkPipeline* pl);
+VkResult extern_guarded_shader_module(const VkShaderModuleCreateInfo* ci, VkShaderModule* m);
+/// (hookshot) The programs the driver faulted on (driver_faults.h): asked before a program's modules are made, and noted
+/// when making one faulted (vk_shader.cpp make_module)
+bool driver_faulted_program(uint64_t key);
+void driver_faulted_module(uint64_t key);
 
 } // namespace mkwvk

@@ -6,6 +6,7 @@ ALPHA = Path(__file__).resolve().parents[1]
 ROOT = ALPHA.parents[1]
 sys.path.insert(0, str(ALPHA))
 import engine_capture_pacing
+from engine_tester_fixes import pre_perf_text
 
 class CapturePacingTests(unittest.TestCase):
     def test_gpu_dependencies(self):
@@ -28,7 +29,7 @@ class CapturePacingTests(unittest.TestCase):
             root = Path(tmp)
             for name in ('vk_memory.cpp', 'vk_internal.h', 'vk_replay.cpp'):
                 dest = root/'gpu/vk'/name; dest.parent.mkdir(parents=True, exist_ok=True)
-                shutil.copy2(ROOT/'engine/gpu/vk'/name, dest)
+                dest.write_text(pre_perf_text('gpu/vk/'+name), encoding='utf-8', newline='\n')
             engine_capture_pacing.apply(root)
             before = {p.name:p.read_bytes() for p in (root/'gpu/vk').iterdir()}
             engine_capture_pacing.apply(root)

@@ -59,6 +59,9 @@ enum { HOS_OPT_SKIP_OPENING = 52 };
    host/nvn_native.c answers the game's present poll at once with it. The existing option callback: no new member.) */
 enum { HOS_OPT_RENDER_THREAD = 58 };
 /* ocr-stamp-neutral: end */
+/* (HOS_OPT_FPS_CAP, 53: the Game frame rate cap row, host/nn_vi.c fps_refresh reads it at each present: 0 the console's 60, then
+   90, 120, 144, 165, 240, 6 Uncapped; a change applies in play) */
+enum { HOS_OPT_FPS_CAP = 53 };
 
 /* (hookshot) the controls' names (host/nn_hid.c, host/pad_sdl.c, the pad_ and key_ lines of ocarina_reborn_options.ini):
    the Switch's buttons in nn::hid's bit order, and a gamepad's inputs by position (the bottom face button first:

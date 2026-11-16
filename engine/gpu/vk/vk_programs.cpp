@@ -351,8 +351,8 @@ PipelineSource& pipeline_source() {
     return caches;
 }
 
-/// RX_VK_LOAD, or the default (load_default.h): create where the GPU has mesh shaders and no earlier session's first uses
-/// waited too long for loads, start otherwise. Decided once the device is up (vk_main.cpp); start until then
+/// RX_VK_LOAD, or the default (load_default.h): create where no earlier session's first uses waited too long for loads (with
+/// mesh shaders or through the compute fallback), start otherwise. Decided once the device is up (vk_main.cpp); start until then
 std::atomic<int> load_mode{-1};
 void programs_load_decide(bool native_mesh) {
     const bool marker = load_default::marker_there(load_fallback_path());

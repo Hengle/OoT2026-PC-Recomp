@@ -19,45 +19,54 @@
    The runtime commits what it hands out (image, system region, heap, address regions: hos_commit), because host
    APIs given guest buffers (ReadFile into a game buffer) fail on reserved pages without raising an exception. A
    guest or host access to a page nothing committed is committed on first touch, 64 KB at a time, by the handler. */
-/* (Ocarina Reborn) a commit Windows refuses with 1455 (commit limit) is tried again for up to ~4 s: a page file that may
-   grow (system managed, or Initial < Maximum) is grown by Windows after such a refusal, not before it. Without this the
-   first refusal crashed the game at once although the page file had room left to grow (Debug package 2026-11-12 02:50:
-   page file 12 of 32 GB allowed, commit 36 GB, crash in Resource Memory). */
-static void *ocr_commit(void *p, SIZE_T n) {
-    void *r = VirtualAlloc(p, n, MEM_COMMIT, PAGE_READWRITE);
-    for (int i = 0; !r && GetLastError() == ERROR_COMMITMENT_LIMIT && i < 40; i++) {
-        Sleep(i < 10 ? 20 : 120);
-        r = VirtualAlloc(p, n, MEM_COMMIT, PAGE_READWRITE);
-        if (r) {
-            static volatile LONG said;
-            if (InterlockedIncrement(&said) <= 8)
-                hos_log("mem: commit of %#llx bytes went through after %d retries (Windows grew the page file)",
-                        (unsigned long long)n, i + 1);
+/* (hookshot) a commit refused at Windows' commit limit (1455: RAM and page file full) is tried again for up to 5 s: the renderer's
+   textures give commit back below a reserve (vk_texture.cpp's commit rule: every VRAM block is charged to the process's commit).
+   Before, the commit failed and the game's next write to those pages crashed it: a 16 GB PC at 33.9 GB of commit, an area loading
+   (a 960 KB commit, then a write into it from "ARes Loading 1"). 1: committed after waiting; 0: not */
+static int commit_wait(void *p, SIZE_T size) {
+    static volatile LONG waits, recovered;
+    for (int i = 0; i < 100; i++) {   /* (100 x 50 ms) */
+        Sleep(50);
+        if (VirtualAlloc(p, size, MEM_COMMIT, PAGE_READWRITE)) {
+            const LONG n = InterlockedIncrement(&recovered);
+            if (n <= 8 || (n & 255) == 0)
+                hos_log("mem: commit of %#llx bytes at the commit limit made after %d ms (%ld so far)", (unsigned long long)size,
+                        (i + 1) * 50, (long)n);
+            return 1;
+        }
+        if (GetLastError() != ERROR_COMMITMENT_LIMIT) return 0;
+    }
+    if (InterlockedIncrement(&waits) <= 8) hos_log("mem: commit of %#llx bytes still refused after 5 s at the commit limit", (unsigned long long)size);
+    return 0;
+}
+/* (a commit that failed: the line, and at the commit limit Windows' out-of-memory notice, said once, on its own thread) */
+static void commit_refused(uint64_t lo, uint64_t size, DWORD err) {
+    hos_log("mem: commit of %#llx bytes at %#llx failed (error %lu)", (unsigned long long)size, (unsigned long long)lo, err);
+    if (err == ERROR_COMMITMENT_LIMIT) {   /* (1455: RAM and page file full; the game crashes soon after) */
+        static volatile LONG said;
+        if (InterlockedExchange(&said, 1) == 0) {
+            hos_log("mem: Windows is out of memory (RAM and page file): close other programs, or let Windows manage the page file size");
+            extern DWORD WINAPI hos_out_of_memory_box(LPVOID);
+            CloseHandle(CreateThread(NULL, 0, hos_out_of_memory_box, NULL, 0, NULL));
         }
     }
-    return r;   /* (when NULL, GetLastError() is still the last VirtualAlloc's: hos_commit logs it) */
 }
 
-void hos_commit(uint64_t addr, uint64_t size) {
-    if (!size) return;
+/* 1: the range is committed; 0: it is not (outside the guest window, or refused: logged) */
+int hos_commit(uint64_t addr, uint64_t size) {
+    if (!size) return 1;
     if (!hos_guest_range(addr, size)) {   /* (hookshot: guest pages only; the posix layer's commit changes any page's protection) */
         hos_log("mem: commit of %#llx bytes at %#llx: outside the guest window", (unsigned long long)size, (unsigned long long)addr);
-        return;
+        return 0;
     }
     const uint64_t lo = addr & ~0xFFFFULL, hi = (addr + size + 0xFFFF) & ~0xFFFFULL;
-    if (!ocr_commit(GP(lo), (SIZE_T)(hi - lo))) {
+    if (!VirtualAlloc(GP(lo), (SIZE_T)(hi - lo), MEM_COMMIT, PAGE_READWRITE)) {
         const DWORD err = GetLastError();
-        hos_log("mem: commit of %#llx bytes at %#llx failed (error %lu)", (unsigned long long)(hi - lo),
-                (unsigned long long)lo, err);
-        if (err == ERROR_COMMITMENT_LIMIT) {   /* (1455: RAM and page file full; the game crashes soon after. Said once, on its own thread) */
-            static volatile LONG said;
-            if (InterlockedExchange(&said, 1) == 0) {
-                hos_log("mem: Windows is out of memory (RAM and page file): close other programs, or let Windows manage the page file size");
-                extern DWORD WINAPI hos_out_of_memory_box(LPVOID);
-                CloseHandle(CreateThread(NULL, 0, hos_out_of_memory_box, NULL, 0, NULL));
-            }
-        }
+        if (err == ERROR_COMMITMENT_LIMIT && commit_wait(GP(lo), (SIZE_T)(hi - lo))) return 1;
+        commit_refused(lo, hi - lo, err);
+        return 0;
     }
+    return 1;
 }
 
 DWORD WINAPI hos_out_of_memory_box(LPVOID unused) {
@@ -79,12 +88,27 @@ static LONG CALLBACK commit_on_touch(EXCEPTION_POINTERS *info) {
     const uint64_t guest = (uint64_t)(p - A64_MEM);
     if (guest < 0x100000) return EXCEPTION_CONTINUE_SEARCH;   /* (a null pointer: the game's own fault) */
     MEMORY_BASIC_INFORMATION mbi;
-    if (!VirtualQuery(p, &mbi, sizeof mbi) || mbi.State != MEM_RESERVE) return EXCEPTION_CONTINUE_SEARCH;
+    if (!VirtualQuery(p, &mbi, sizeof mbi)) return EXCEPTION_CONTINUE_SEARCH;
+#ifdef _WIN32
+    /* (another thread committed this 64 KB between the fault and the look: the access is tried again. The heap is committed on
+       touch now (hos_mem.c), and two threads touching one new chunk at once crashed the second in the boot's module loads.
+       Not an execute fault (8, DEP): a jump into guest memory would fault again at once, forever; it goes on to the crash report.
+       Windows only: Linux commits nothing lazily, its VirtualQuery stand-in calls every guest page committed and read-write, and
+       its signal handler never sets 8, so there every SIGSEGV and SIGBUS in the window would be tried again forever, at 100% CPU,
+       rather than reach report_crash) */
+    if (mbi.State == MEM_COMMIT && mbi.Protect == PAGE_READWRITE && rec->ExceptionInformation[0] != 8)
+        return EXCEPTION_CONTINUE_EXECUTION;
+#endif
+    if (mbi.State != MEM_RESERVE) return EXCEPTION_CONTINUE_SEARCH;
     static volatile LONG touched;
     if (InterlockedIncrement(&touched) <= 16)
         hos_log("mem: %#llx committed on first touch (nothing handed it out)", (unsigned long long)guest);
-    return ocr_commit(GP(guest & ~0xFFFFULL), 0x10000) ? EXCEPTION_CONTINUE_EXECUTION
-                                                                                      : EXCEPTION_CONTINUE_SEARCH;
+    if (VirtualAlloc(GP(guest & ~0xFFFFULL), 0x10000, MEM_COMMIT, PAGE_READWRITE)) return EXCEPTION_CONTINUE_EXECUTION;
+    /* (hookshot: at the commit limit the touch waits for the renderer to give commit back, as hos_commit does) */
+    const DWORD err = GetLastError();
+    if (err == ERROR_COMMITMENT_LIMIT && commit_wait(GP(guest & ~0xFFFFULL), 0x10000)) return EXCEPTION_CONTINUE_EXECUTION;
+    commit_refused(guest & ~0xFFFFULL, 0x10000, err);
+    return EXCEPTION_CONTINUE_SEARCH;
 }
 
 /* A crash nothing handles: what, where (mkw.exe+offset: nx2/dllmap.py reads mkw.map the same way), and the guest

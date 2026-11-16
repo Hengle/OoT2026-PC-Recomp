@@ -163,6 +163,7 @@ VkComputePipelineCreateInfo compute_pipeline_info(Program&,bool){return {};}
 int cached_compute(const VkComputePipelineCreateInfo*,VkPipeline* out){
     std::this_thread::sleep_for(std::chrono::milliseconds(75));computed++;*out=99;return VK_SUCCESS;
 }
+bool precompile_compute_quick(VkComputePipelineCreateInfo&){return false;}
 void pipeline_cache_save(bool){assert(computed==2);saved++;}
 /* PRODUCTION */
 int main(){

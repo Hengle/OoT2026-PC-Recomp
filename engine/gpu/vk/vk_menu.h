@@ -19,7 +19,7 @@ struct Options {
     int hdr_contrast = 100;   // HDR contrast in percent around mid grey, as RenoDX grades it; 100 none (vk_framegen.cpp framegen_hdr)
     int hdr_tonemap = 0;  // (hookshot) the scene's tone mapper with Native HDR: 0 the game's (Vanilla), 1 PsychoV35, as RenoDX's zelda-oot-oz
                           // (ir_opt/scene_tonemap_pass.h; vk_shader.cpp scene_tonemap_for)
-    int fps_cap = 0;      // (hookshot) Frame rate cap: 0 60 (the console's), 90, 120, 144, 165, 240, 6 Uncapped (host/nn_vi.c reads frame_rate_cap= at the start)
+    int fps_cap = 0;      // (hookshot) Frame rate cap: 0 60 (the console's), 90, 120, 144, 165, 240, 6 Uncapped (host/nn_vi.c: frame_rate_cap= at the start, then HOS_OPT_FPS_CAP in play)
     int resolution = 0;   // the 3D's (Render resolution): 0 Auto (the game's dynamic resolution), else a share of the output,
                           // 1..6 = 100%, 75%, 67%, 50%, 58%, 33% (upscaler_rows.h; nx2/oot_patches.py)
     int output_res = 0;   // the game's whole frame, docked: 0 its 2048x1152, then the sizes the screen offers (vk_menu.cpp outputs,
@@ -80,14 +80,13 @@ struct Options {
     int sampler_cache = 0;     // sampler ids answer their parameters without the registrations' lock (gpu/vk/vk_draw.cpp; RX_VK_SAMPLER_CACHE)
     int astc_rgba8 = 0;   // (hookshot) big ASTC textures kept as decoded RGBA8, not re-encoded to BC3 (gpu/vk/vk_texture.cpp bc_ready;
                           // RX_VK_ASTC_RGBA8 over it): the AMD texture workaround. Read once, at the start
-    int preset = 0;       // quality preset: 0 Custom, 1 Minimum (4GB), 2 Low (6GB), 3 Balanced (8GB), 4 High (12GB), 5 Ultra (16GB+)
-    int vram_mb = 0;      // dynamic texture cache budget limit in MB
-    int mirror_mb = 0;    // staging mirror limit in MB
-    int budget = 0;       // the preset whose memory budgets (vram_mb, mirror_mb) hold: kept when another row turns the preset
-                          // to Custom, so tuning Resolution after Low (6GB) keeps its cap. Saved as memory_budget; 0: none
-    // (hookshot) the VRAM budget row: 0 Auto (the renderer's own rule), 1..7 a texture budget of 2.2, 3.6, 4.8, 6, 7.5, 9 or 11 GB
-    // and its mirrors (vram_mb, mirror_mb come from it). A preset sets it; set on the row it is the player's (budget 0)
-    int vram_budget = 0;
+    int intel_compiles = 0;   // (hookshot) Intel's shader compiler on Windows: 0 Auto (side by side where it was measured,
+                              // intel_compiles.h, else one thread at a time), 1 side by side, 2 one at a time (vk_internal.h
+                              // IntelDriverGate; RX_VK_NO_INTEL_SERIAL over it). Read once, at the start
+    int intel_quick = 1;   // (hookshot) Intel's one-at-a-time compute builds: a dispatch's pipeline first without the optimizer,
+                           // the optimized one bound once made (vk_draw.cpp compute_optimize; RX_VK_COMPUTE_QUICK_FIRST over it)
+    int preset = 0; // Custom, Minimum, Low, Balanced, High, Ultra
+    int budget = 0; // originating preset: keeps minimum mip trimming, not a fixed VRAM limit
     int audio_output = 0; // (hookshot) the speakers the game mixes for: 0 Auto (the default output's), 1 Stereo, 2 5.1; read once, at the start (host/nn_audio.c; HOS_AUDIO_CHANNELS)
     int discord = 1;   // (hookshot) the Discord status (host/discord_rpc.c): 1 on, shown while a Discord client runs on this PC
     int debug_tools = 0;   // (hookshot) the Debug tab's tools (#785: flight, free camera, teleport, inventory): 0 off; HOS_OOT_CHEATS=1 also turns them on
@@ -100,10 +99,6 @@ struct Options {
     int mic = 1;          // (hookshot) the ocarina's microphone: 0 Off, 1 the system's default, 2.. a device as host->mic_name lists it (host/nn_audio_in.c)
 };
 extern Options opts;
-/// (vk_memory.cpp) true when the quality preset's memory budgets (vram_mb, mirror_mb) are to be used: the card has no more
-/// video memory than the preset is for. A 4GB preset on an 8 GB card kept 256 MB of mirrors and 2.2 GB of textures: the
-/// game's memory was read over PCIe and the textures made again every frame, 5 fps with the CPU idle (Discord, 11-08)
-bool preset_caps_memory();
 
 void menu_init();             // (the options from the file, once)
 void menu_first_start_for_gpu(const VkPhysicalDeviceProperties& props, const VkPhysicalDeviceMemoryProperties& mem);   // (no options file: the preset for the card)

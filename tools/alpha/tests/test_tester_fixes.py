@@ -86,8 +86,8 @@ int main(){
   assert(startup_choice("create",native,true,false,16*1024*MiB,false).create);
   assert(!startup_choice(nullptr,native,false,false,16*1024*MiB,true).create);
   assert(!startup_choice(nullptr,native,true,true,32*1024*MiB,false).create);
-  assert(startup_choice(nullptr,native,false,false,64*1024*MiB,false).create==native);
-  assert(startup_choice(nullptr,native,false,false,0,false).create==native);
+  assert(startup_choice(nullptr,native,false,false,64*1024*MiB,false).create);
+  assert(startup_choice(nullptr,native,false,false,0,false).create);
  }
 }
 ''',cpp=True)
@@ -207,7 +207,8 @@ int main(){
         with tempfile.TemporaryDirectory() as tmp:
             root=Path(tmp)
             for rel in names|touched:
-                got=subprocess.run(['git','show','457c544:engine/'+rel],cwd=ROOT,capture_output=True)
+                base = '457c544' if rel in names else 'a2b618d'
+                got=subprocess.run(['git','show',base+':engine/'+rel],cwd=ROOT,capture_output=True)
                 if got.returncode:continue   # (a file the performance patch adds)
                 p=root/rel;p.parent.mkdir(parents=True,exist_ok=True)
                 p.write_bytes(got.stdout)
@@ -217,7 +218,13 @@ int main(){
             self.assertEqual(first,{r:(root/r).read_bytes() for r in names})
             engine_tester_fixes.apply_perf(root)
             names=names|{r for r in touched if (root/r).exists()}
-            for rel in names:self.assertEqual((root/rel).read_text(),(ROOT/'engine'/rel).read_text())
+            for rel in names:
+                actual, expected = (root/rel).read_bytes(), (ROOT/'engine'/rel).read_bytes()
+                try:
+                    actual, expected = actual.decode('utf-8').replace('\r\n','\n'), expected.decode('utf-8').replace('\r\n','\n')
+                except UnicodeDecodeError:
+                    pass  # Profile assets in the patch must match byte-for-byte.
+                self.assertEqual(actual, expected, rel)
             for rel in ('host/ocr_input_state.h','gpu/vk/ocr_intel_compute.h','gpu/vk/ocr_prepare_policy.h','gpu/vk/ocr_fault_policy.h'):
                 self.assertEqual((root/rel).read_bytes(),(ROOT/'engine'/rel).read_bytes())
 

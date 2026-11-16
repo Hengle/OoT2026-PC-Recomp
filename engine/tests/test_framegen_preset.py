@@ -51,10 +51,7 @@ Options opts;
 int saves = 0;
 void save() { ++saves; }
 void apply_pad_layout(int) {}
-void sync_preset_budgets(int) {}
 void env_release(const int*) {}   // (the environment's hold on a row: none here)
-void vram_budget_sync() {}
-constexpr int kVramMinimumOnly = 1;
 bool row_fixed(const int*) { return false; }
 namespace ur = mkwvk::upscaler_rows;
 int upscaler() { return opts.dlss; }
@@ -67,6 +64,7 @@ struct { void note(const int*) {} } restart_state;
 bool can_mic() { return false; }
 void mic_chosen() {}
 void samplers_changed() {}
+void menu_debug_rows(int, int) {}   // (the Debug rows that apply in play: vk_draw.cpp)
 int temporal_resets = 0;
 void temporal_reset_failure() { ++temporal_resets; }
 void prompts_at_once(const Row&) {}
