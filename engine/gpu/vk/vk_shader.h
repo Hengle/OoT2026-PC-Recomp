@@ -20,13 +20,17 @@ namespace mkwvk {
 struct Stage {
     int nvn_stage = 0;   // 0 vertex, 1 fragment, 5 compute (what its banks are read for)
     VkShaderStageFlagBits vk_stage = VK_SHADER_STAGE_VERTEX_BIT;
-    VkShaderModule module = VK_NULL_HANDLE;
+    mutable VkShaderModule module = VK_NULL_HANDLE;   // (Ocarina Reborn: made again on demand, stage_modules_ready)
     Shader::Info info;
     std::vector<uint8_t> c1;   // its c1 constants (the code area's tail)
     // (hookshot) its SPIR-V's OpPhi instructions (fallback_size_policy.h), noted where the SPIR-V is written to or read from the
     // program cache (vk_progcache.cpp), which every translated program passes. Not in vk_shader.cpp, whose bytes are part of
     // the translator's stamp: a change there translates every player's programs again
     mutable uint32_t phis = 0;
+    // (Ocarina Reborn) where this stage's SPIR-V is in ocarina_reborn_programs.bin (0 words: unknown). With no module, it was
+    // let go after the program's listed pipelines were made (program_modules_drop) and stage_modules_ready reads it again
+    int64_t code_at = 0;
+    uint64_t code_words = 0;
 };
 
 /// A texture handle the stage reads from a storage buffer: its handle program (Shader::Info::handle_programs, Eden's
@@ -127,6 +131,13 @@ void program_cache_borrow(uint64_t key, const std::function<void(Program&)>& fn)
 /// program_cache_load): its SPIR-V is read and its module made here, before the first use of the module (vk_draw.cpp dispatch).
 /// True: it is whole (or was). False: its code did not read or made no module; it is marked failed
 bool program_cache_complete(Program& p);
+/// (Ocarina Reborn) a graphics program's modules let go (its pipelines are made); false: kept (no place in the file to read them from)
+bool program_modules_drop(Program& p);
+/// (Ocarina Reborn) every stage has its module again (read from the program cache); false: one could not be made
+bool stage_modules_ready(const Program& p);
+/// (Ocarina Reborn) OCR_SHADER_MODULE_DROP: 1 on, 0 off; default on with 20 GiB of RAM or less
+bool program_modules_drop_on();
+extern std::atomic<int64_t> modules_dropped, modules_remade;
 /// (hookshot) Every kept graphics and mesh program's key, in the file's order, no record read; *loaded: the variants in memory already
 std::vector<uint64_t> program_cache_keys(std::vector<Program*>* loaded);
 const Program* program_find(uint64_t key, uint64_t variant);

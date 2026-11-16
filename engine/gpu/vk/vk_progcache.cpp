@@ -496,6 +496,7 @@ void program_cache_read(FILE* in, std::mutex* mu, uint64_t key, const std::vecto
             st.nvn_stage = r.get<int>();
             st.vk_stage = r.get<VkShaderStageFlagBits>();
             std::vector<uint32_t> spirv;
+            const size_t code_pos = (size_t)(r.p - payload) + 8;   // (after the list's count: the words themselves)
             r.list(spirv);
             r.list(st.c1);
             get_info(r, st.info);
@@ -503,6 +504,8 @@ void program_cache_read(FILE* in, std::mutex* mu, uint64_t key, const std::vecto
                 ok = false;
                 break;
             }
+            // (an uncompressed record: its code can be read again by position, program_modules_drop)
+            if (payload == data.data() + head_size) st.code_at = d.at + (int64_t)code_pos, st.code_words = spirv.size();
             st.module = make_module(spirv);
             st.phis = fallback_size::spirv_phis(spirv.data(), spirv.size());
             ok = ok && st.module;
@@ -629,6 +632,55 @@ bool complete_from(Program& p, FILE* in, std::mutex* mu) {
 bool program_cache_complete(Program& p) {
     std::lock_guard lk(light_mu);
     return complete_from(p, disk_in, &disk_mu);
+}
+std::atomic<int64_t> modules_dropped{0}, modules_remade{0};
+bool program_modules_drop_on() {
+    static const bool on = [] {
+        if (const char* v = getenv("OCR_SHADER_MODULE_DROP")) return atoi(v) != 0;
+        MEMORYSTATUSEX m{};
+        m.dwLength = sizeof m;
+        return GlobalMemoryStatusEx(&m) && m.ullTotalPhys <= (20ull << 30);
+    }();
+    return on;
+}
+bool program_modules_drop(Program& p) {
+    // (graphics programs only: a compute program has its own light path, and the mesh fallback's dispatches use its modules)
+    if (p.compute || p.fallback || p.stages.empty()) return false;
+    for (const Stage& st : p.stages)
+        if (!st.module || !st.code_words) return false;
+    for (Stage& st : p.stages) vkDestroyShaderModule(dev.device, st.module, nullptr), st.module = VK_NULL_HANDLE;
+    modules_dropped.fetch_add((int64_t)p.stages.size(), std::memory_order_relaxed);
+    return true;
+}
+bool stage_modules_ready(const Program& p) {
+    // (code_at and code_words never change once the program is published; a module is only ever set again, under light_mu)
+    bool missing = false;
+    for (const Stage& st : p.stages)
+        missing = missing || (st.code_words && !std::atomic_ref<VkShaderModule>(st.module).load(std::memory_order_acquire));
+    if (!missing) return true;
+    std::lock_guard lk(light_mu);   // (one thread makes them; a module once made again stays)
+    for (const Stage& st : p.stages) {
+        if (st.module || !st.code_words) continue;
+        std::vector<uint32_t> spirv((size_t)st.code_words);
+        disk_init();
+        bool ok = disk_in != nullptr;
+        if (ok) {
+            std::lock_guard dk(disk_mu);
+            _fseeki64(disk_in, st.code_at, SEEK_SET);
+            ok = fread(spirv.data(), 4, spirv.size(), disk_in) == spirv.size();
+        }
+        const VkShaderModule made = ok ? make_module(spirv) : VK_NULL_HANDLE;
+        if (made) std::atomic_ref<VkShaderModule>(st.module).store(made, std::memory_order_release);
+        if (!made) {
+            static std::atomic<int> logged{0};
+            if (logged++ < 20)
+                logf("vk: program cache: the code of program %016llx at %lld did not read again: that pipeline is left out",
+                     (unsigned long long)p.key, (long long)st.code_at);
+            return false;
+        }
+        modules_remade.fetch_add(1, std::memory_order_relaxed);
+    }
+    return true;
 }
 /// (the load at a program's create call, vk_programs.cpp) the same for a program no other thread has yet, with the worker's
 /// own handle on the file: neither light_mu nor disk_mu is held through its read, which a dispatch on the replay's thread

@@ -178,6 +178,27 @@ int main(){
         self.assertIn('cur > floor_scale',source)
         self.assertNotIn('cur > 0.5f',source)
 
+    def test_shader_modules_dropped_only_after_every_listed_pipeline(self):
+        vk=ROOT/'engine/gpu/vk'
+        programs=(vk/'vk_programs.cpp').read_text(encoding='utf-8')
+        block=programs[programs.index('bool listed = false, all_made = true;'):]
+        block=block[:block.index('program_modules_drop(*p);')]
+        self.assertIn('all_made = false',block)
+        self.assertIn('listed && (all_made || always) && program_modules_drop_on()',block)
+        self.assertIn('>= 2;',block)
+        # The drop happens before the job publishes the program to other threads.
+        self.assertLess(programs.index('program_modules_drop(*p);'),programs.index('census.load_unlisted +='))
+        draw=(vk/'vk_draw.cpp').read_text(encoding='utf-8')
+        build=function(draw,'VkPipeline build_graphics(const Program& p, const NvnState& s, const Targets& at, VkPrimitiveTopology topo, int part, bool* cold) {')
+        self.assertLess(build.index('stage_modules_ready(p)'),build.index('si.module = st.module'))
+        cache=(vk/'vk_progcache.cpp').read_text(encoding='utf-8')
+        drop=function(cache,'bool program_modules_drop(Program& p)')
+        self.assertIn('p.compute || p.fallback',drop)
+        self.assertIn('!st.code_words',drop)
+        self.assertIn('payload == data.data() + head_size',cache)
+        ready=function(cache,'bool stage_modules_ready(const Program& p)')
+        self.assertIn('std::lock_guard lk(light_mu)',ready)
+
     def test_fresh_and_repeat_staging_match_checked_source(self):
         names={rel for rel,_,_ in engine_tester_fixes.CHANGES}
         with tempfile.TemporaryDirectory() as tmp:

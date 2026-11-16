@@ -176,6 +176,140 @@ change('host/nn_vi.c', '''            if (gpu_us > budget * 1.05f && cur > 0.5f)
             }
             if (gpu_us > budget * 1.05f && cur > floor_scale) cur = cur - 0.1f < floor_scale ? floor_scale : cur - 0.1f;''')
 
+# ---- Shader modules let go after their programs' listed pipelines are made (low-RAM PCs) ----
+# A graphics program loaded at its create call keeps one VkShaderModule a stage; the driver keeps the SPIR-V
+# with it. On an 8 GB tester PC (package 20261115-160915) 8,400 programs and 1.4 GB of code were read in play
+# and never let go. Once every pipeline the lists name for the program is made, its modules are destroyed and
+# where their code is in the program cache is kept; a later new pipeline reads the code and makes them again.
+change('gpu/vk/vk_shader.h', '    VkShaderModule module = VK_NULL_HANDLE;\n    Shader::Info info;',
+       '''    mutable VkShaderModule module = VK_NULL_HANDLE;   // (Ocarina Reborn: made again on demand, stage_modules_ready)
+    Shader::Info info;''')
+change('gpu/vk/vk_shader.h', '    mutable uint32_t phis = 0;\n};', '''    mutable uint32_t phis = 0;
+    // (Ocarina Reborn) where this stage's SPIR-V is in ocarina_reborn_programs.bin (0 words: unknown). With no module, it was
+    // let go after the program's listed pipelines were made (program_modules_drop) and stage_modules_ready reads it again
+    int64_t code_at = 0;
+    uint64_t code_words = 0;
+};''')
+change('gpu/vk/vk_shader.h', 'bool program_cache_complete(Program& p);', '''bool program_cache_complete(Program& p);
+/// (Ocarina Reborn) a graphics program's modules let go (its pipelines are made); false: kept (no place in the file to read them from)
+bool program_modules_drop(Program& p);
+/// (Ocarina Reborn) every stage has its module again (read from the program cache); false: one could not be made
+bool stage_modules_ready(const Program& p);
+/// (Ocarina Reborn) OCR_SHADER_MODULE_DROP: 1 on, 0 off; default on with 20 GiB of RAM or less
+bool program_modules_drop_on();
+extern std::atomic<int64_t> modules_dropped, modules_remade;''')
+change('gpu/vk/vk_progcache.cpp', '''            std::vector<uint32_t> spirv;
+            r.list(spirv);
+            r.list(st.c1);
+            get_info(r, st.info);
+            if (r.bad || spirv.empty()) {
+                ok = false;
+                break;
+            }
+            st.module = make_module(spirv);''', '''            std::vector<uint32_t> spirv;
+            const size_t code_pos = (size_t)(r.p - payload) + 8;   // (after the list's count: the words themselves)
+            r.list(spirv);
+            r.list(st.c1);
+            get_info(r, st.info);
+            if (r.bad || spirv.empty()) {
+                ok = false;
+                break;
+            }
+            // (an uncompressed record: its code can be read again by position, program_modules_drop)
+            if (payload == data.data() + head_size) st.code_at = d.at + (int64_t)code_pos, st.code_words = spirv.size();
+            st.module = make_module(spirv);''')
+change('gpu/vk/vk_progcache.cpp', '''bool program_cache_complete(Program& p) {
+    std::lock_guard lk(light_mu);
+    return complete_from(p, disk_in, &disk_mu);
+}''', '''bool program_cache_complete(Program& p) {
+    std::lock_guard lk(light_mu);
+    return complete_from(p, disk_in, &disk_mu);
+}
+std::atomic<int64_t> modules_dropped{0}, modules_remade{0};
+bool program_modules_drop_on() {
+    static const bool on = [] {
+        if (const char* v = getenv("OCR_SHADER_MODULE_DROP")) return atoi(v) != 0;
+        MEMORYSTATUSEX m{};
+        m.dwLength = sizeof m;
+        return GlobalMemoryStatusEx(&m) && m.ullTotalPhys <= (20ull << 30);
+    }();
+    return on;
+}
+bool program_modules_drop(Program& p) {
+    // (graphics programs only: a compute program has its own light path, and the mesh fallback's dispatches use its modules)
+    if (p.compute || p.fallback || p.stages.empty()) return false;
+    for (const Stage& st : p.stages)
+        if (!st.module || !st.code_words) return false;
+    for (Stage& st : p.stages) vkDestroyShaderModule(dev.device, st.module, nullptr), st.module = VK_NULL_HANDLE;
+    modules_dropped.fetch_add((int64_t)p.stages.size(), std::memory_order_relaxed);
+    return true;
+}
+bool stage_modules_ready(const Program& p) {
+    // (code_at and code_words never change once the program is published; a module is only ever set again, under light_mu)
+    bool missing = false;
+    for (const Stage& st : p.stages)
+        missing = missing || (st.code_words && !std::atomic_ref<VkShaderModule>(st.module).load(std::memory_order_acquire));
+    if (!missing) return true;
+    std::lock_guard lk(light_mu);   // (one thread makes them; a module once made again stays)
+    for (const Stage& st : p.stages) {
+        if (st.module || !st.code_words) continue;
+        std::vector<uint32_t> spirv((size_t)st.code_words);
+        disk_init();
+        bool ok = disk_in != nullptr;
+        if (ok) {
+            std::lock_guard dk(disk_mu);
+            _fseeki64(disk_in, st.code_at, SEEK_SET);
+            ok = fread(spirv.data(), 4, spirv.size(), disk_in) == spirv.size();
+        }
+        const VkShaderModule made = ok ? make_module(spirv) : VK_NULL_HANDLE;
+        if (made) std::atomic_ref<VkShaderModule>(st.module).store(made, std::memory_order_release);
+        if (!made) {
+            static std::atomic<int> logged{0};
+            if (logged++ < 20)
+                logf("vk: program cache: the code of program %016llx at %lld did not read again: that pipeline is left out",
+                     (unsigned long long)p.key, (long long)st.code_at);
+            return false;
+        }
+        modules_remade.fetch_add(1, std::memory_order_relaxed);
+    }
+    return true;
+}''')
+change('gpu/vk/vk_draw.cpp', '''    if (at.n < 0 || at.n > 8) return VK_NULL_HANDLE;   // (hookshot: at most 8 colour targets)
+    const Shader::Info& vs = *vertex_info(p);''', '''    if (at.n < 0 || at.n > 8) return VK_NULL_HANDLE;   // (hookshot: at most 8 colour targets)
+    if (!stage_modules_ready(p)) return VK_NULL_HANDLE;   // (Ocarina Reborn: modules let go after the listed pipelines)
+    const Shader::Info& vs = *vertex_info(p);''')
+change('gpu/vk/vk_programs.cpp', '''            } else if (notes != index_notes.end()) {
+                for (const NoteAt& n : notes->second) {
+                    if (n.variant != p->variant || !pipe_note_at(notes_in, n.at, note.get())) continue;
+                    bytes += (int64_t)sizeof(PipeNote);
+                    if (const VkPipeline pl = source.graphics(*p, *note)) census.load_pipes += pipeline_keep_ready(n.key, pl);
+                    else census.load_pipes_cold++;   // (its first draw makes it, as before)
+                }
+            }''', '''            } else if (notes != index_notes.end()) {
+                bool listed = false, all_made = true;
+                for (const NoteAt& n : notes->second) {
+                    if (n.variant != p->variant || !pipe_note_at(notes_in, n.at, note.get())) continue;
+                    bytes += (int64_t)sizeof(PipeNote);
+                    listed = true;
+                    // (OCR_SHADER_MODULE_DROP=3, a test: the made pipeline is not kept, so its first draw makes it again from
+                    // modules read back from the program cache)
+                    static const bool rebuild = getenv("OCR_SHADER_MODULE_DROP") && atoi(getenv("OCR_SHADER_MODULE_DROP")) == 3;
+                    if (const VkPipeline pl = rebuild ? VK_NULL_HANDLE : source.graphics(*p, *note)) census.load_pipes += pipeline_keep_ready(n.key, pl);
+                    else census.load_pipes_cold++, all_made = false;   // (its first draw makes it, as before)
+                }
+                // (Ocarina Reborn) every listed pipeline made, and no other thread has the program yet: its modules go, and
+                // a new pipeline of it later reads its code again (stage_modules_ready)
+                // (OCR_SHADER_MODULE_DROP=2, a test: let them go even with a pipeline still to make, so its draw reads them again)
+                static const bool always = getenv("OCR_SHADER_MODULE_DROP") && atoi(getenv("OCR_SHADER_MODULE_DROP")) >= 2;
+                if (listed && (all_made || always) && program_modules_drop_on()) program_modules_drop(*p);
+            }''')
+change('gpu/vk/vk_programs.cpp', '''    if (ids_on.load(std::memory_order_acquire))
+        logf("vk: module identifiers (%s)''', '''    if (program_modules_drop_on())
+        logf("vk: shader modules let go after their listed pipelines (%s): %lld, made again for a new pipeline %lld "
+             "(OCR_SHADER_MODULE_DROP=0: kept)", when, n(modules_dropped.load()), n(modules_remade.load()));
+    if (ids_on.load(std::memory_order_acquire))
+        logf("vk: module identifiers (%s)''')
+
 def apply(root):
     root = Path(root)
     pending = {}

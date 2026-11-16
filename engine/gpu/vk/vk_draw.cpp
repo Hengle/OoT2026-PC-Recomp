@@ -2278,6 +2278,7 @@ PipeEntry* graphics_pipeline(const Program& p, const NvnState& s, const Targets&
 /// cold: made only if the driver has it compiled already; set, and nothing made, when it would have had to compile
 VkPipeline build_graphics(const Program& p, const NvnState& s, const Targets& at, VkPrimitiveTopology topo, int part, bool* cold) {
     if (at.n < 0 || at.n > 8) return VK_NULL_HANDLE;   // (hookshot: at most 8 colour targets)
+    if (!stage_modules_ready(p)) return VK_NULL_HANDLE;   // (Ocarina Reborn: modules let go after the listed pipelines)
     const Shader::Info& vs = *vertex_info(p);
     const auto t0 = std::chrono::steady_clock::now();
     std::vector<VkPipelineShaderStageCreateInfo> stages;

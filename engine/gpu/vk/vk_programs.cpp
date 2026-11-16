@@ -244,12 +244,22 @@ void load_work(LoadJob& job) {
                     census.load_computes_cold++;   // (its first dispatch asks again, and compiles on a worker: as before)
                 }
             } else if (notes != index_notes.end()) {
+                bool listed = false, all_made = true;
                 for (const NoteAt& n : notes->second) {
                     if (n.variant != p->variant || !pipe_note_at(notes_in, n.at, note.get())) continue;
                     bytes += (int64_t)sizeof(PipeNote);
-                    if (const VkPipeline pl = source.graphics(*p, *note)) census.load_pipes += pipeline_keep_ready(n.key, pl);
-                    else census.load_pipes_cold++;   // (its first draw makes it, as before)
+                    listed = true;
+                    // (OCR_SHADER_MODULE_DROP=3, a test: the made pipeline is not kept, so its first draw makes it again from
+                    // modules read back from the program cache)
+                    static const bool rebuild = getenv("OCR_SHADER_MODULE_DROP") && atoi(getenv("OCR_SHADER_MODULE_DROP")) == 3;
+                    if (const VkPipeline pl = rebuild ? VK_NULL_HANDLE : source.graphics(*p, *note)) census.load_pipes += pipeline_keep_ready(n.key, pl);
+                    else census.load_pipes_cold++, all_made = false;   // (its first draw makes it, as before)
                 }
+                // (Ocarina Reborn) every listed pipeline made, and no other thread has the program yet: its modules go, and
+                // a new pipeline of it later reads its code again (stage_modules_ready)
+                // (OCR_SHADER_MODULE_DROP=2, a test: let them go even with a pipeline still to make, so its draw reads them again)
+                static const bool always = getenv("OCR_SHADER_MODULE_DROP") && atoi(getenv("OCR_SHADER_MODULE_DROP")) >= 2;
+                if (listed && (all_made || always) && program_modules_drop_on()) program_modules_drop(*p);
             }
             census.load_programs++;
             census.load_unlisted += !p->compute && notes == index_notes.end();
@@ -715,6 +725,9 @@ void programs_census_log(const char* when) {
          n(c.load_programs), n(c.load_light), n(c.load_unlisted), n(c.load_pipes), n(c.load_pipes_cold), n(c.load_computes), n(c.load_computes_cold),
          n(c.units_run_by_draw), n(c.units_waited), c.unit_wait_ns.load() / 1e6, n(c.pipes_taken), n(c.units_nothing),
          n(c.units_early), units, ready, loading, alive);
+    if (program_modules_drop_on())
+        logf("vk: shader modules let go after their listed pipelines (%s): %lld, made again for a new pipeline %lld "
+             "(OCR_SHADER_MODULE_DROP=0: kept)", when, n(modules_dropped.load()), n(modules_remade.load()));
     if (ids_on.load(std::memory_order_acquire))
         logf("vk: module identifiers (%s): %zu known, %lld learned in this run; %lld compute pipelines made by them at a create "
              "call, %lld asked that way were in no cache (their code read, as before)",
