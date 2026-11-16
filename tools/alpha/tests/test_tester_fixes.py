@@ -226,6 +226,8 @@ int main(){
                     pass  # Profile assets in the patch must match byte-for-byte.
                 self.assertEqual(actual, expected, rel)
             for rel in ('host/ocr_input_state.h','gpu/vk/ocr_intel_compute.h','gpu/vk/ocr_prepare_policy.h','gpu/vk/ocr_fault_policy.h'):
-                self.assertEqual((root/rel).read_bytes(),(ROOT/'engine'/rel).read_bytes())
+                # Source headers can be checked out with CRLF on Windows.
+                self.assertEqual((root/rel).read_text(encoding='utf-8'),
+                                 (ROOT/'engine'/rel).read_text(encoding='utf-8'), rel)
 
 if __name__=='__main__':unittest.main()

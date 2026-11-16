@@ -4,15 +4,15 @@ This repository contains the **Ocarina Reborn launcher, patched engine and build
 
 A native Windows x64 version of **The Legend of Zelda: Ocarina of Time (Switch 2)**, built on your PC from your own `.nup` game file.
 
-**Current release: v1.1.2 · November 15, 2026**
+**Current release: v1.1.3 · November 16, 2026**
 
 [Download the latest release](https://github.com/ocarina-pc-native-build/ocarina-pc-native-build.github.io/releases/latest) · [Website](https://ocarina-pc-native-build.github.io/) · [Discord](https://discord.gg/vDPAcc6JnY)
 
 ## Source code
 
-The actual **v1.1.2 source** is here: [engine and renderer](engine/), [game-build pipeline](engine/nx2/), [Ocarina Reborn launcher](tools/alpha/launcher/), [installer/build scripts](scripts/), [custom hooks and graphics](tools/alpha/hud/), [tests](tools/alpha/tests/) and [build instructions](BUILDING.md). The original [engine builder source](engine/builder/) is retained alongside the Ocarina Reborn launcher.
+The actual **v1.1.3 source** is here: [engine and renderer](engine/), [game-build pipeline](engine/nx2/), [Ocarina Reborn launcher](tools/alpha/launcher/), [installer/build scripts](scripts/), [custom hooks and graphics](tools/alpha/hud/), [tests](tools/alpha/tests/) and [build instructions](BUILDING.md). The original [engine builder source](engine/builder/) is retained alongside the Ocarina Reborn launcher.
 
-`engine/` contains the already-patched sources used by the released installer, including custom tunic colors and the classic counters fix. Classic-voice preparation imports a user-selected ZIP; recordings are not bundled. `SOURCE-MANIFEST.json` records the engine file hashes and the matching installer SHA-256. GitHub's v1.1.2 source archives contain this project source; the website lives in its separate repository.
+`engine/` contains the already-patched sources used by the released installer, including custom tunic colors and the classic counters fix. Classic-voice preparation imports a user-selected ZIP; recordings are not bundled. `SOURCE-MANIFEST.json` records the engine file hashes and the matching installer SHA-256. GitHub's v1.1.3 source archives contain this project source; the website lives in its separate repository.
 
 ## Get started
 
@@ -34,17 +34,19 @@ You need Windows x64, a Vulkan-capable graphics card and your own supported game
 
 NVIDIA's DLSS files are downloaded separately through the launcher after accepting NVIDIA's license.
 
-## What's new in v1.1.2
+## What's new in v1.1.3
 
-- Smaller animated rainbow rupee icon and a fast rolling rupee counter.
-- 9:16 portrait resolutions in the launcher and F1, requested by a Buy Me a Coffee supporter.
-- Better cleanup of overwritten rendering targets to reduce unnecessary RAM and VRAM usage.
-- Audio-command ordering fix under memory pressure and clearer audio diagnostics.
-- Paginated offline patch notes, more reliable settings saves and a corrected F1 ocarina image.
+- Reduced memory retention and shared RAM/VRAM budgets.
+- More efficient CPU calculations and renderer builds.
+- Shader-module cleanup after recorded pipeline preparation.
+- Low-end 60 FPS preset; frame rate depends on hardware and scene.
+- Camera-input expiry, shader arithmetic and graphics-data ordering fixes.
 
-Update over your current installation. No full reinstall or game-file reimport is required. Saves, settings and private voice files remain. Compatible caches are retained. Performance depends on hardware and scene; newly encountered effects can still cause compilation stutters.
+This release packages the tested Performance Preview. In a short matched Market comparison, memory use fell from about 10.6 GB to 8.4 GB, while FPS changed only slightly from about 69 to 71. This does not establish performance on all PCs or resolve every hitch. Asynchronous threaded rendering stays disabled by default.
 
-[Full release notes and SHA-256](https://github.com/ocarina-pc-native-build/ocarina-pc-native-build.github.io/releases/tag/v1.1.2) · [All releases](https://github.com/ocarina-pc-native-build/ocarina-pc-native-build.github.io/releases)
+Update over your current installation. No complete reinstall or game-file reimport is required. Saves and settings stay. Changed shader calculations can require first-start preparation; compatible cache entries are retained.
+
+[Full release notes and SHA-256](https://github.com/ocarina-pc-native-build/ocarina-pc-native-build.github.io/releases/tag/v1.1.3) · [All releases](https://github.com/ocarina-pc-native-build/ocarina-pc-native-build.github.io/releases)
 
 ## Feedback and troubleshooting
 

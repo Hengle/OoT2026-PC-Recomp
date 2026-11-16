@@ -1,37 +1,29 @@
-**Ocarina Reborn v1.1.2 — Memory, Portrait & HUD Update**
+**Ocarina Reborn v1.1.3 — Performance Preview**
 
-**💎 Animated rupee counter**
-- **Classic counters (N64)** now uses a small animated rainbow crystal.
-- The rupee number rolls quickly through the values when you gain or spend rupees, instead of jumping straight to the new total.
-- Loading a save shows the correct amount immediately.
+**⚡ Memory and performance**
+- Reduced unnecessary memory retention and improved shared RAM/VRAM budgets.
+- More efficient CPU calculations, graphics processing and renderer builds.
+- Shader modules can be released after their recorded pipelines have been prepared.
+- New **Low-end 60 FPS** preset to make settings easier on weaker PCs. 60 FPS is a target, not a guarantee.
 
-**📱 9:16 portrait support**
-- Added portrait resolutions in the **launcher and F1 menu**: 720×1280, 1080×1920, 1440×2560 and 2160×3840.
-- The camera supports the portrait view. The HUD keeps its proportions in a centered area; this is not a fully rearranged portrait HUD.
-- **Requested by a supporter on Buy Me a Coffee.** Thank you for the suggestion!
+**🛠️ Fixes**
+- Fixed one cause of continuously spinning cameras after input stops.
+- Corrected shader calculations and the ordering of graphics-data updates.
+- Improved recovery of missing effects after graphics-driver errors. Intel-specific changes still need more tester feedback.
+- Asynchronous threaded rendering remains disabled by default while visual compatibility is being tested.
 
-**⚡ Memory improvements**
-- Fixed cleanup of old, overwritten rendering targets that could remain allocated even after their contents were no longer needed.
-- This reduces unnecessary RAM and VRAM usage without lowering texture quality. The improvement depends on the scene and hardware.
-
-**🔊 Audio and diagnostics**
-- Fixed audio commands being processed out of order when the audio queue cannot allocate more memory.
-- Debug Packages now include clearer audio status information to help investigate silent audio and music that keeps playing. No audio recordings are collected.
-- This addresses one possible failure path; the remaining reports of stuck battle music still need testing.
-
-**🛠️ Launcher and F1 menu**
-- Patch notes now open in a proper launcher page with sections, page buttons, mouse-wheel and controller navigation.
-- After an update, the notes appear once automatically and remain available offline.
-- Improved how launcher settings are saved and fixed an update-news timing issue.
-- Fixed the distorted ocarina image in the F1 menu header.
+**📊 What to expect**
+- In a short matched Market test, memory use fell from about **10.6 GB to 8.4 GB**. FPS rose only slightly, from about **69 to 71**.
+- This is a performance preview. Results depend on your PC, settings and location; stutters and visual issues are not all resolved.
 
 **ℹ️ Updating**
-- Restart the launcher, select **Update**, and install over your existing version. Then let the launcher update the game components.
-- **No complete reinstall or game-file reimport is needed.** Saves, settings and compatible shader caches are kept.
+- Restart the launcher, select **Update**, and install over your existing version. Let the launcher update the game components afterwards.
+- **No complete reinstall or game-file reimport is needed.** Saves, settings and private voice imports stay.
+- Changed shader calculations can require shader preparation on the first start. Compatible cache entries are kept.
 
-**📊 Help us improve**
-- If you notice stutters or crashes, press **Ctrl+F8** when the problem happens, then close the game and create a fresh **Debug Package**.
-- Send it in **#post-your-logs-here** on Discord with the area and what happened. Reports from lower-end PCs are especially helpful.
+**💬 Help us improve**
+- When you notice stutters, press **Ctrl+F8**, then close the game and create a fresh **Debug Package**. After a crash, reopen the launcher to create the package.
+- Send it in **#post-your-logs-here** with the area and what happened. Reports from lower-end PCs are especially helpful.
 
 Thanks for testing! 💙
 
