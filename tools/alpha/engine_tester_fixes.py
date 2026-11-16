@@ -156,6 +156,17 @@ change('gpu/vk/vk_draw.cpp', '''        VkComputePipelineCreateInfo ci{VK_STRUCT
        '''        // Use the same Intel trial policy during warming and actual play.
         const VkComputePipelineCreateInfo ci = compute_pipeline_info(p, true);''')
 
+change('gpu/vk/vk_draw.cpp', '#include "ocr_intel_compute.h"',
+       '#include "ocr_intel_compute.h"\n#include "ocr_fault_policy.h"')
+change('gpu/vk/vk_draw.cpp', '''        const auto keys = driver_faults::parse(text, dev.props.vendorID, dev.props.driverVersion);
+        q.load(keys);''', '''        auto keys = driver_faults::parse(text, dev.props.vendorID, dev.props.driverVersion);
+        if (!keys.empty() && !ocr_faults::keep_earlier_faults(dev.props.vendorID, driver_faults_mode())) {
+            logf("vk: %zu programs the driver faulted on in earlier runs are tried again (only AMD keeps them out; RX_VK_DRIVER_FAULTS=2: every driver)",
+                 keys.size());
+            keys.clear();
+        }
+        q.load(keys);''')
+
 def apply(root):
     root = Path(root)
     pending = {}
@@ -169,3 +180,4 @@ def apply(root):
     shutil.copy2(here / 'ocr_input_state.h', root / 'host/ocr_input_state.h')
     shutil.copy2(here / 'ocr_intel_compute.h', root / 'gpu/vk/ocr_intel_compute.h')
     shutil.copy2(here / 'ocr_prepare_policy.h', root / 'gpu/vk/ocr_prepare_policy.h')
+    shutil.copy2(here / 'ocr_fault_policy.h', root / 'gpu/vk/ocr_fault_policy.h')

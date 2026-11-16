@@ -72,6 +72,7 @@
 #include "vk_pipelines.h"
 #include "warm_bounded.h"
 #include "ocr_intel_compute.h"
+#include "ocr_fault_policy.h"
 #include "vk_work.h"   // (after the others: counts the commands that do GPU work, for full_barrier)
 
 namespace mkwvk {
@@ -1105,7 +1106,12 @@ driver_faults::Quarantine& fault_quarantine() {
             while ((n = fread(b, 1, sizeof b, f)) > 0) text.append(b, n);
             fclose(f);
         }
-        const auto keys = driver_faults::parse(text, dev.props.vendorID, dev.props.driverVersion);
+        auto keys = driver_faults::parse(text, dev.props.vendorID, dev.props.driverVersion);
+        if (!keys.empty() && !ocr_faults::keep_earlier_faults(dev.props.vendorID, driver_faults_mode())) {
+            logf("vk: %zu programs the driver faulted on in earlier runs are tried again (only AMD keeps them out; RX_VK_DRIVER_FAULTS=2: every driver)",
+                 keys.size());
+            keys.clear();
+        }
         q.load(keys);
         q.set_serial(driver_faults_mode() == 2 || dev.props.vendorID == 0x1002);
         if (!keys.empty())

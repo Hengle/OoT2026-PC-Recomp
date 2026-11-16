@@ -117,10 +117,10 @@ int main(){
  const char* setting=getenv("OCR_INTEL_FOREST_COMPAT");
  const bool enabled=!setting||!env_value_off(setting);
  for(uint32_t vendor:{0x8086u,0x1002u,0x10deu})for(unsigned driver:{5u,6u})
- for(uint64_t key:{0x685adb41edc19de7ull,0x6637ac1d052d22d4ull,0x123ull})for(bool noopt:{false,true}){
+ for(uint64_t key:{0x685adb41edc19de7ull,0x6637ac1d052d22d4ull,0x592079442d7129daull,0x499dbfd0721d2858ull,0xabccf81b45c5eb50ull,0x123ull,0x435a0138b9013040ull})for(bool noopt:{false,true}){
   dev.props.vendorID=vendor;dev.driver_id=driver;Program p;p.key=key;p.stages[0].module=81;
   const auto ci=compute_pipeline_info(p,noopt);
-  const bool expected=(noopt&&env_on("RX_VK_NOOPT"))||(enabled&&vendor==0x8086&&driver==5&&key!=0x123);
+  const bool expected=(noopt&&env_on("RX_VK_NOOPT"))||(enabled&&vendor==0x8086&&driver==5&&key!=0x123&&key!=0x435a0138b9013040ull);
   assert(bool(ci.flags&VK_PIPELINE_CREATE_DISABLE_OPTIMIZATION_BIT)==expected);
   assert(ci.stage.module==81&&ci.layout==99&&ci.stage.stage==VK_SHADER_STAGE_COMPUTE_BIT);
  }
@@ -128,6 +128,24 @@ int main(){
 '''.replace('/* ACTUAL */',actual),cpp=True,envs=[
             {'OCR_INTEL_FOREST_COMPAT':v,'RX_VK_NOOPT':n}
             for v in (None,'0','OFF','','1') for n in (None,'1')])
+
+    def test_lasting_driver_fault_list_only_on_amd(self):
+        self.compile_run(r'''
+#include <cassert>
+#include <initializer_list>
+#include "ocr_fault_policy.h"
+int main(){
+ for(int mode:{0,1,2}){
+  assert(ocr_faults::keep_earlier_faults(0x1002,mode));
+  assert(ocr_faults::keep_earlier_faults(0x10de,mode)==(mode==2));
+  assert(ocr_faults::keep_earlier_faults(0x8086,mode)==(mode==2));
+ }
+}
+''',cpp=True)
+        source=(ROOT/'engine/gpu/vk/vk_draw.cpp').read_text()
+        load=source.index('auto keys = driver_faults::parse(')
+        self.assertLess(source.index('ocr_faults::keep_earlier_faults(dev.props.vendorID, driver_faults_mode())',load),
+                        source.index('q.load(keys);',load))
 
     def test_fresh_and_repeat_staging_match_checked_source(self):
         names={rel for rel,_,_ in engine_tester_fixes.CHANGES}
@@ -141,7 +159,7 @@ int main(){
             engine_tester_fixes.apply(root)
             self.assertEqual(first,{r:(root/r).read_bytes() for r in names})
             for rel in names:self.assertEqual((root/rel).read_text(),(ROOT/'engine'/rel).read_text())
-            for rel in ('host/ocr_input_state.h','gpu/vk/ocr_intel_compute.h','gpu/vk/ocr_prepare_policy.h'):
+            for rel in ('host/ocr_input_state.h','gpu/vk/ocr_intel_compute.h','gpu/vk/ocr_prepare_policy.h','gpu/vk/ocr_fault_policy.h'):
                 self.assertEqual((root/rel).read_bytes(),(ROOT/'engine'/rel).read_bytes())
 
 if __name__=='__main__':unittest.main()
