@@ -203,7 +203,7 @@ def session_from_game_log(game):
                     gpu = line.split('vk: ', 1)[1].split(', Vulkan ')[0]
                 if (any(k in line for k in SESSION_KEEP + performance.RENDERER_STARTUP_LOG) or performance.HOST_MEMORY_ERROR.search(line) or
                         performance.GPU_SUBMIT_ERROR.search(line) or performance.CACHE_PIPELINE.search(line) or
-                        performance.CACHE_PROGRAM.search(line)):
+                        performance.CACHE_PROGRAM.search(line) or performance.CACHE_IN_USE.search(line)):
                     line = line.split('] ', 1)[-1] if line.startswith('[hos') else line
                     kept += 1
                     if kept <= 300:
@@ -2688,6 +2688,8 @@ class App(tk.Tk):
                         log(f'prepare shaders: exit code {code}')
                         if code == 0:
                             return messagebox.showinfo('Ocarina Reborn', T('Shader vorbereitet.', 'Shaders prepared.'))
+                        if code in diagnostics.STARTUP_BLOCKED:
+                            return messagebox.showwarning('Ocarina Reborn', diagnostics.startup_block_message(code, UI_LANG[0] == 'de'))
                         return messagebox.showwarning('Ocarina Reborn', T(
                             'Die Vorbereitung wurde nicht fertig (Code {c}). Das Spiel baut fehlende Shader beim Spielen.',
                             'The preparation did not finish (code {c}). The game builds missing shaders while it plays.').format(c=code))
@@ -2750,7 +2752,13 @@ class App(tk.Tk):
                     diagnostics.finish(run, code, game)
                 except Exception as e:
                     log(f'run diagnostics could not finish: {e}')
-            session = session_from_game_log(game)
+            if code in diagnostics.STARTUP_BLOCKED:
+                # The game already explained why it could not start. Leave the
+                # existing run's report/settings and Reborn Auto comparison alone.
+                self.after(0, lambda: (self.deiconify(), None if getattr(self, 'muted', True) else self.music.play()))
+                return
+            runtime_updated = not run or run['record'].get('runtime_log_updated', False)
+            session = session_from_game_log(game) if runtime_updated else []
             for line in session:
                 log('  ' + line)
             auto_summary = None
@@ -2784,19 +2792,20 @@ class App(tk.Tk):
             except Exception as e:
                 log(f'diagnosis failed: {e}')
             if code not in (0, None):
-                self.crash_info(code)
+                self.crash_info(code, runtime_log_updated=runtime_updated)
             self.after(0, lambda: (self.sync_interface_theme(), self.deiconify(), None if getattr(self, 'muted', True) else self.music.play()))
             if (self.cfg.get('reborn_auto') or {}).get('step'):   # (Reborn Auto: its next step, on the window's thread)
                 self.after(700, lambda s=auto_summary: self.reborn_auto_after(s))
         threading.Thread(target=wait, daemon=True).start()
 
-    def crash_info(self, code):
+    def crash_info(self, code, runtime_log_updated=True):
         tail = ''
         try:
             game = Path(self.cfg['game_dir'])
             runtime_log = next((game / n for n in ('ocarina_reborn_log.txt', 'hookshot_log.txt')
                                 if (game / n).is_file()), game / 'ocarina_reborn_log.txt')
-            tail = ''.join(diagnostics.tail(runtime_log, limit=256 * 1024).splitlines(True)[-150:])
+            if runtime_log_updated:
+                tail = ''.join(diagnostics.tail(runtime_log, limit=256 * 1024).splitlines(True)[-150:])
         except OSError:
             pass
         (DIRS['CrashDumps'] / f'crash-info-{datetime.datetime.now():%Y%m%d-%H%M%S}.txt').write_text(

@@ -277,6 +277,9 @@ def diagnose(lines, settings=None, de=True):
     summary = performance.summarize(lines)
     if summary:
         return performance.describe(summary, de)
+    cache_advice = performance.cache_conflict_advice(performance.cache_status(lines), de)
+    if cache_advice:
+        return cache_advice + performance.gpu_failure_advice(performance.gpu_failures(lines), de)
     gpu_advice = performance.gpu_failure_advice(performance.gpu_failures(lines), de)
     if gpu_advice:
         if performance.memory_events(lines):

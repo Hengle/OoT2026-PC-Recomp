@@ -14,6 +14,7 @@
 #include "../gpu/vk/compat/ocarina_reborn_env.h"
 #endif
 #include "hos_paths.h"
+#include "ocr_instance.h"
 #include "hos_wide_size.h"   /* (the widescreen picture's size, shared with the Insert menu) */
 #include "../gpu/vk/vk_api.h"
 #include "../gpu/vk/oot_cheat_items.h"
@@ -1827,6 +1828,10 @@ static int game_main(int argc, char **argv) {
 #ifdef _WIN32
     if (!narrow_paths_ok(argc, argv)) return 1;
     {
+        const int startup = ocr_instance_enter(argc, argv);
+        if (startup) return startup;
+    }
+    {
         void hos_relaunch_keep_env(void);   /* (host/hos_relaunch.c: the environment before the file's lines, for a restart) */
         hos_relaunch_keep_env();
     }
@@ -1846,18 +1851,6 @@ static int game_main(int argc, char **argv) {
     }
 #endif
     {   // (started from its icon the game has nowhere to log to: ocarina_reborn_log.txt beside it, last run only, for players to send in)
-#ifdef _WIN32
-        {   /* (started again by the Insert menu's Restart now (host/hos_relaunch.c): the run before still has its log open until
-               it exits, so wait for it (up to 10 s) before the log moves to .1, or the move fails and its log is overwritten) */
-            const char *of = getenv("HOS_RESTART_OF");
-            if (of && *of) {
-                HANDLE before = OpenProcess(SYNCHRONIZE, FALSE, (DWORD)strtoul(of, NULL, 10));
-                if (before) WaitForSingleObject(before, 10000), CloseHandle(before);
-                SetEnvironmentVariableA("HOS_RESTART_OF", NULL);   /* (not passed on: a later restart sets its own) */
-                _putenv("HOS_RESTART_OF=");
-            }
-        }
-#endif
         HANDLE err = GetStdHandle(STD_ERROR_HANDLE);
         if (!err || err == INVALID_HANDLE_VALUE || GetFileType(err) == FILE_TYPE_UNKNOWN) {
             char path[MAX_PATH + 32];

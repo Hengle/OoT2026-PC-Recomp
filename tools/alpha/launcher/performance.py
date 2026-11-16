@@ -14,6 +14,7 @@ DRAW = re.compile(r'\| draws ([\d.]+)')
 PIPELINE = re.compile(r'new pipelines (\d+), waits [\d.]+ \(([\d.]+) ms\)')
 CACHE_PIPELINE = re.compile(r'vk: pipeline cache .+ \((\d+) KB\)')
 CACHE_PROGRAM = re.compile(r'vk: program cache .+: (\d+) program keys kept, (\d+) KB')
+CACHE_IN_USE = re.compile(r'vk: program cache .+: another Ocarina Reborn is using it: this one runs without it')
 DEFAULTS = dict(output_res='2048x1152', resolution=0, dlss=0, frame_generation=0, frame_rate_cap=0,
                 texture_memory=0, texture_saving=0, texture_detail=1, texture_filtering=0,
                 shader_threads=0, shader_cache=1, pipeline_precompile=1, soft_shadows=1,
@@ -172,8 +173,10 @@ def memory_advice(de=True):
 
 def cache_status(lines):
     """Presence reported at startup, not a promise that every driver pipeline is reusable."""
-    result = dict(pipeline_cache_kb=0, program_cache_keys=0, program_cache_kb=0)
+    result = dict(pipeline_cache_kb=0, program_cache_keys=0, program_cache_kb=0, program_cache_in_use=False)
     for line in lines:
+        if CACHE_IN_USE.search(line):
+            result['program_cache_in_use'] = True
         pipeline, program = CACHE_PIPELINE.search(line), CACHE_PROGRAM.search(line)
         if pipeline:
             result['pipeline_cache_kb'] = max(result['pipeline_cache_kb'], int(pipeline[1]))
@@ -181,6 +184,19 @@ def cache_status(lines):
             result['program_cache_keys'] = max(result['program_cache_keys'], int(program[1]))
             result['program_cache_kb'] = max(result['program_cache_kb'], int(program[2]))
     return result
+
+
+def cache_conflict_advice(status, de=True):
+    if not status.get('program_cache_in_use'):
+        return []
+    return [('warn',
+        'Der Shader-Programmcache war durch einen anderen Spiel- oder Vorbereitungsprozess belegt. '
+        'Dieser Lauf konnte ihn nicht nutzen und musste Shader neu berechnen. '
+        'Schließe weitere Spielinstanzen oder warte auf die Shader-Vorbereitung, dann starte einmal neu. '
+        'Den Cache nicht löschen.' if de else
+        'Another game or preparation process held the shader program cache. '
+        'This run could not use it and had to compile shaders again. '
+        'Close other game instances or let shader preparation finish, then restart once. Do not delete the cache.')]
 
 
 def summarize(lines):
@@ -268,6 +284,7 @@ def describe(summary, de=True):
     elif s.get('memory_pressure_events', 0):
         lines.insert(0, memory_pressure_advice(de))
     lines[0:0] = gpu_failure_advice(s, de)
+    lines[0:0] = cache_conflict_advice(s, de)
     if cpu_pressure(s):
         lines.insert(-1, ('warn', t(
             f"In {s['cpu_slow_seconds']:.0f} s unter 55 FPS brauchte der Renderer auf der CPU deutlich länger als die GPU. "
@@ -336,6 +353,8 @@ def suggest(summary, current, measured_settings, de=True):
         return {}, [t('Einstellungen seit der Messung geändert: erst eine neue Runde messen.',
                       'Settings changed since measurement: play another session first.')]
     values = signature(current)
+    if summary.get('program_cache_in_use'):
+        return {}, [text for _, text in cache_conflict_advice(summary, de)]
     changes, reasons = {}, []
     if summary['frame_generation']:
         changes['frame_generation'] = 0

@@ -21,6 +21,19 @@ def sample(*, frames=200, seconds=5, cpu=8, gpu=23, used=2, budget=4, known=True
 
 
 class Measurements(unittest.TestCase):
+    def test_busy_shader_cache_gets_specific_advice_without_lowering_quality(self):
+        busy = ('vk: program cache C:/game/ocarina_reborn_programs.bin: '
+                'another Ocarina Reborn is using it: this one runs without it')
+        summary = performance.summarize([busy] + [sample(fg=2)] * 6)
+        self.assertTrue(summary['program_cache_in_use'])
+        self.assertFalse(performance.cache_status(['vk: program cache: 20 program keys kept, 100 KB'])['program_cache_in_use'])
+        for de in (True, False):
+            changes, reasons = performance.suggest(summary, {}, performance.signature({}), de)
+            self.assertEqual(changes, {})
+            self.assertEqual(reasons, [performance.describe(summary, de)[0][1]])
+            self.assertEqual(advisor.diagnose([busy], de=de), performance.cache_conflict_advice(summary, de))
+        self.assertIn('Do not delete the cache', reasons[0])
+
     def test_auto_texture_memory_offers_relief_for_sustained_pressure(self):
         lines = [sample(cpu=14, gpu=14, used=6.6, budget=6.7)] * 6
         settings = {'texture_memory': 0, 'resolution': 1, 'quality_preset': 3,
@@ -59,7 +72,8 @@ class Measurements(unittest.TestCase):
         namespace = {'Path': Path, 'performance': performance}
         exec(compile(ast.Module(body=nodes, type_ignores=[]), str(source), 'exec'), namespace)
         cache = ['[hos host] vk: pipeline cache C:/game/mkw_vk_pipelines.bin (1229749 KB)',
-                 '[hos host] vk: program cache C:/game/ocarina_reborn_programs.bin: 47866 program keys kept, 7582059 KB']
+                 '[hos host] vk: program cache C:/game/ocarina_reborn_programs.bin: 47866 program keys kept, 7582059 KB',
+                 '[hos host] vk: program cache C:/game/ocarina_reborn_programs.bin: another Ocarina Reborn is using it: this one runs without it']
         with tempfile.TemporaryDirectory() as d:
             Path(d, 'ocarina_reborn_log.txt').write_text('\n'.join(cache + [sample()] * 6 +
                 ['[hos Presentation Thread] vk: batched submit 42 failed (-2)']), encoding='utf-8')
@@ -67,6 +81,7 @@ class Measurements(unittest.TestCase):
         summary = performance.summarize(session)
         self.assertEqual(summary['pipeline_cache_kb'], 1229749)
         self.assertEqual(summary['program_cache_keys'], 47866)
+        self.assertTrue(summary['program_cache_in_use'])
         self.assertEqual(summary['device_memory_errors'], 1)
         self.assertTrue(any('existing shader/pipeline caches' in text
                             for _, text in advisor.diagnose(session, de=False)))

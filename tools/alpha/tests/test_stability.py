@@ -66,6 +66,18 @@ class PatchingTests(unittest.TestCase):
 
 
 class DiagnosticsTests(unittest.TestCase):
+    def test_blocked_start_ignores_log_written_by_running_game(self):
+        for code, expected in diagnostics.STARTUP_BLOCKED.items():
+            with self.subTest(code=code), tempfile.TemporaryDirectory() as tmp:
+                folder = Path(tmp)
+                run = diagnostics.start(folder / 'reports', folder, {}, {}, {}, {})
+                (folder / 'ocarina_reborn_log.txt').write_text('FATAL: other run\nvk: submit 42 failed (-4)\n')
+                diagnostics.finish(run, code, folder)
+                self.assertEqual(run['record']['result'], expected)
+                self.assertFalse(run['record']['runtime_log_updated'])
+                self.assertEqual(run['record']['last_runtime_lines'], [])
+                self.assertFalse(any(run['record']['gpu_errors'].values()))
+
     def test_gpu_memory_failure_is_recorded_even_after_clean_exit(self):
         with tempfile.TemporaryDirectory() as tmp:
             folder = Path(tmp)
