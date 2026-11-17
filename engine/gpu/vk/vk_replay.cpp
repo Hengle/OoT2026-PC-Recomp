@@ -356,7 +356,7 @@ void wait_value(uint64_t v) {
     vkWaitSemaphores(dev.device, &wi, UINT64_MAX);
 }
 bool wait_recorded(uint64_t f, uint64_t timeout_ns, int* ok);
-bool capture_wait_part(uint64_t value, uint64_t part, uint64_t whole);
+bool capture_wait_part(uint64_t value, uint64_t part, uint64_t whole, uint64_t timeout_ns);
 /// (hookshot) What the calling thread's last wait on the recordings' timeline came back with (wait_rec_seq): one that came back
 /// VK_ERROR_DEVICE_LOST is said there, and not again by vk_timeline_wait as a capture's wait that timed out
 thread_local VkResult wait_rec_result = VK_SUCCESS;
@@ -371,14 +371,29 @@ void wait_lost(const char* what, uint64_t v) {
     logf("vk: %s %llu came back VK_ERROR_DEVICE_LOST: the GPU device is lost", what, (unsigned long long)v);
 }
 } // namespace
+/// (Ocarina Reborn) How long a capture waits for the write-back of its late pages: RX_VK_CAPTURE_WAIT_MAX_MS (or
+/// OCR_CAPTURE_WAIT_MAX_MS), default 20; 0: 250 ms, as before. The long waits are stalls, not data: at an area change (a teleport,
+/// a save loaded) the GPU is busy with the area's uploads and the game's thread waited 140-250 ms here (2026-11-17: 250 ms "a
+/// capture's wait for write-back ... timed out" at each one). Cut at 20 ms the pages are copied as they are, as without the
+/// wait; measured on Hyrule Castle's arrival the longest frame went from 250-319 ms to 138-158 ms, the exposure unchanged
+uint64_t capture_wait_ns() {
+    static const uint64_t ns = [] {
+        const char* e = getenv("RX_VK_CAPTURE_WAIT_MAX_MS");
+        if (!e) e = getenv("OCR_CAPTURE_WAIT_MAX_MS");
+        const int ms = e ? std::max(0, atoi(e)) : 20;
+        logf("vk: a capture's wait for its late pages: at most %d ms (RX_VK_CAPTURE_WAIT_MAX_MS)", ms ? ms : 250);
+        return (uint64_t)(ms ? ms : 250) * 1000000ull;
+    }();
+    return ns;
+}
 uint64_t vk_timeline_completed() { return timeline ? completed() : 0; }
-void vk_timeline_wait(uint64_t v, uint64_t part, uint64_t whole) {   // (at most 250 ms: a submission held back behind the caller's thread goes on without it)
+void vk_timeline_wait(uint64_t v, uint64_t part, uint64_t whole, uint64_t timeout_ns) {   // (at most 250 ms: a submission held back behind the caller's thread goes on without it)
     if (!timeline || completed() >= v) return;
-    if (capture_wait_part(v, part, whole)) return;
+    if (capture_wait_part(v, part, whole, timeout_ns)) return;
     // (a burst recording whose write-back stamped wb_pages with burst_value does not advance `timeline` while an older queue
     // submission is stopped at an event wait; wait on `rec_timeline` where that recording actually signalled completion)
     int ok = 0;
-    if (wait_recorded(v, 250000000ull, &ok)) {
+    if (wait_recorded(v, timeout_ns, &ok)) {
         const bool lost = wait_rec_result == VK_ERROR_DEVICE_LOST;   // (said by wait_rec_seq)
         if (lost) return;
         if (!ok) {
@@ -394,7 +409,7 @@ void vk_timeline_wait(uint64_t v, uint64_t part, uint64_t whole) {   // (at most
     wi.semaphoreCount = 1;
     wi.pSemaphores = &timeline;
     wi.pValues = &v;
-    const VkResult res = vkWaitSemaphores(dev.device, &wi, 250000000ull);
+    const VkResult res = vkWaitSemaphores(dev.device, &wi, timeout_ns);
     if (res == VK_TIMEOUT) {
         static std::atomic<int> logged{0};
         if (logged++ < 8) logf("vk: a capture's wait for write-back %llu timed out (done %llu)", (unsigned long long)v, (unsigned long long)completed());
@@ -3239,7 +3254,7 @@ static void wait_rec_seq(uint64_t seq, uint64_t timeout_ns, int* ok) {
 // Ocarina Reborn: a capture only needs the recording that copied its mirrored pages.
 // Never wait for a missing mapping here: this can be the replay thread which must
 // submit that recording. Unknown mappings and direct-memory hazards use the old path.
-bool capture_wait_part(uint64_t value, uint64_t part, uint64_t whole) {
+bool capture_wait_part(uint64_t value, uint64_t part, uint64_t whole, uint64_t timeout_ns) {
     static const bool enabled = !getenv("OCR_CAPTURE_PART_WAIT") || atoi(getenv("OCR_CAPTURE_PART_WAIT")) != 0;
     if (!enabled || !rec_timeline || async_on() || !sync_waits_on() || per_queue_fences_off() ||
         !part || whole > completed() || memory_in_place_part() > part) return false;
@@ -3251,7 +3266,7 @@ bool capture_wait_part(uint64_t value, uint64_t part, uint64_t whole) {
         seq = it->second;
     }
     int ok = 0;
-    wait_rec_seq(seq, 250000000ull, &ok);
+    wait_rec_seq(seq, timeout_ns, &ok);
     static std::atomic<uint64_t> calls{0}, timeouts{0};
     const uint64_t count = ++calls;
     if (!ok) {

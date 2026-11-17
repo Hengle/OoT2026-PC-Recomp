@@ -2149,7 +2149,7 @@ std::unique_ptr<Capture> capture_make() {
                 }
         }
         if (v && cap_wait == 2) c->late_value = v;
-        else if (v) vk_timeline_wait(v, c->late_part, c->late_whole);
+        else if (v) vk_timeline_wait(v, c->late_part, c->late_whole, capture_wait_ns());
     }
     if (n > 0) shadow_written(pages, n);
     if (n > 0) {
@@ -2898,7 +2898,7 @@ bool take_capture(std::unique_ptr<Capture> c, uint64_t value, uint64_t completed
         // RX_VK_MIRROR_MB=1024 on an 8 GB card it was most of a capture's 2.4-3 ms, six submits a frame: Hyrule Field at
         // 35-45 fps instead of 55, issue 995)
         const auto tw = std::chrono::steady_clock::now();
-        vk_timeline_wait(c->late_value, c->late_part, c->late_whole);
+        vk_timeline_wait(c->late_value, c->late_part, c->late_whole, capture_wait_ns());   // (at most 20 ms: capture_wait_ns)
         st_tk_late += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - tw).count();
         st_late_wait_ns.fetch_add(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - tw).count(),
                                   std::memory_order_relaxed);   // (hookshot: the frame trace's late_wait_ms)
