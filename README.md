@@ -4,15 +4,15 @@ This repository contains the **Ocarina Reborn launcher, patched engine and build
 
 A native Windows x64 version of **The Legend of Zelda: Ocarina of Time (Switch 2)**, built on your PC from your own `.nup` game file.
 
-**Current release: v1.1.3 · November 16, 2026**
+**Current release: v1.1.4 · November 17, 2026**
 
 [Download the latest release](https://github.com/ocarina-pc-native-build/ocarina-pc-native-build.github.io/releases/latest) · [Website](https://ocarina-pc-native-build.github.io/) · [Discord](https://discord.gg/vDPAcc6JnY)
 
 ## Source code
 
-The actual **v1.1.3 source** is here: [engine and renderer](engine/), [game-build pipeline](engine/nx2/), [Ocarina Reborn launcher](tools/alpha/launcher/), [installer/build scripts](scripts/), [custom hooks and graphics](tools/alpha/hud/), [tests](tools/alpha/tests/) and [build instructions](BUILDING.md). The original [engine builder source](engine/builder/) is retained alongside the Ocarina Reborn launcher.
+The actual **v1.1.4 source** is here: [engine and renderer](engine/), [game-build pipeline](engine/nx2/), [Ocarina Reborn launcher](tools/alpha/launcher/), [installer/build scripts](scripts/), [custom hooks and graphics](tools/alpha/hud/), [tests](tools/alpha/tests/) and [build instructions](BUILDING.md). The original [engine builder source](engine/builder/) is retained alongside the Ocarina Reborn launcher.
 
-`engine/` contains the already-patched sources used by the released installer, including custom tunic colors and the classic counters fix. Classic-voice preparation imports a user-selected ZIP; recordings are not bundled. `SOURCE-MANIFEST.json` records the engine file hashes and the matching installer SHA-256. GitHub's v1.1.3 source archives contain this project source; the website lives in its separate repository.
+`engine/` contains the already-patched sources used by the released installer, including custom tunic colors and the classic counters fix. Classic-voice preparation imports a user-selected ZIP; recordings are not bundled. `SOURCE-MANIFEST.json` records the engine file hashes and the matching installer SHA-256. GitHub's v1.1.4 source archives contain this project source; the website lives in its separate repository.
 
 ## Get started
 
@@ -34,19 +34,21 @@ You need Windows x64, a Vulkan-capable graphics card and your own supported game
 
 NVIDIA's DLSS files are downloaded separately through the launcher after accepting NVIDIA's license.
 
-## What's new in v1.1.3
+## What's new in v1.1.4
 
-- Reduced memory retention and shared RAM/VRAM budgets.
-- More efficient CPU calculations and renderer builds.
-- Shader-module cleanup after recorded pipeline preparation.
-- Low-end 60 FPS preset; frame rate depends on hardware and scene.
-- Camera-input expiry, shader arithmetic and graphics-data ordering fixes.
+- Optional Classic UI with controller icons, four HUD styles and three title logos.
+- Direct download of the selected original mod variant from GameBanana; offline on/off afterwards.
+- Return to the launcher after a completed game build/update.
+- Prevent simultaneous game or shader-preparation processes in the same game folder.
+- Clearer cache-conflict diagnosis and correct session ownership for performance reports.
 
-This release packages the tested Performance Preview. In a short matched Market comparison, memory use fell from about 10.6 GB to 8.4 GB, while FPS changed only slightly from about 69 to 71. This does not establish performance on all PCs or resolve every hitch. Asynchronous threaded rendering stays disabled by default.
+Classic UI by [kuledawg](https://gamebanana.com/mods/737280) is optional. Mod assets are downloaded from GameBanana, not bundled in this distribution. Installation and switching have been tested; visual testing in game is ongoing. Other HUD mods may conflict.
 
-Update over your current installation. No complete reinstall or game-file reimport is required. Saves and settings stay. Changed shader calculations can require first-start preparation; compatible cache entries are retained.
+This update uses the released v1.1.3 graphics engine with the targeted startup guard; the separate v2.3.2 engine test branch is not included. It does not claim to resolve all stutters or visual issues.
 
-[Full release notes and SHA-256](https://github.com/ocarina-pc-native-build/ocarina-pc-native-build.github.io/releases/tag/v1.1.3) · [All releases](https://github.com/ocarina-pc-native-build/ocarina-pc-native-build.github.io/releases)
+Update over your current installation and let the launcher update game components if prompted. No complete reinstall or game-file reimport is needed. Saves and settings stay.
+
+[Full release notes and SHA-256](https://github.com/ocarina-pc-native-build/ocarina-pc-native-build.github.io/releases/tag/v1.1.4) · [All releases](https://github.com/ocarina-pc-native-build/ocarina-pc-native-build.github.io/releases)
 
 ## Feedback and troubleshooting
 

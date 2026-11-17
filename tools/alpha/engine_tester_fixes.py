@@ -345,6 +345,8 @@ def apply_perf(root):
         raise SystemExit('engine performance patch did not apply: ' + r.stderr[:400])
     if not (Path(root) / 'gpu/vk/threaded_rendering.h').is_file():
         raise SystemExit('engine performance patch: git apply said yes, but the engine is unchanged')
+    import engine_startup_guard
+    engine_startup_guard.apply(root)
 
 
 def pre_perf_text(rel, engine=None):

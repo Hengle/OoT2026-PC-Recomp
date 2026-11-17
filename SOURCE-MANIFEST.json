@@ -1,6 +1,6 @@
 {
-  "version": "1.1.3",
-  "installer_stamp": "20261116-113919",
+  "version": "1.1.4",
+  "installer_stamp": "20261117-012047",
   "engine_base": "v2.2.0-rc.1",
   "engine_source_sha256": {
     "engine/.gitattributes": "e5f3ddcef39226a920751f1f54d040b0a2fadecf2dfd423d4652c5840c23a7bc",
@@ -939,7 +939,7 @@
     "engine/host/hos.h": "418ba9a4d3cf6bc565e8d383c9cf5e96e22b468b5bd07827c8a5631a46cd24e2",
     "engine/host/hos_chain.c": "250f4231673a5076e996eea600cf6ee5e7d2ceff2010698f61f86a0c8d3d09b5",
     "engine/host/hos_hostcall.c": "2e669232ff083296989de32b9572d7ebc6d72c6d6485f8f8c924665a23d13ee8",
-    "engine/host/hos_main.c": "deae326fa9112c9c7135c6058fe5b60d46576aaae4fe82a878b4bf0941aac25e",
+    "engine/host/hos_main.c": "de64596e5cd5e3bc36ccc737f527fc84c7b22e1e800db6368b780fea1d3e12e3",
     "engine/host/hos_mem.c": "a7540d81232ee5368e81137c3cd5ec3128992489c7262bbc59efade417e14e92",
     "engine/host/hos_motion.h": "43bec7bee9c1b200c79d9d6e96a8f4a8a07c5d1f2de51adfacea6d63a559d243",
     "engine/host/hos_paths.h": "2b0cc84057732fd0961d25d754e78472356fe37452fc5996df7acc5c3d0347ea",
@@ -982,6 +982,7 @@
     "engine/host/ocr_diagnostics.c": "ed82d4f8d5fbe4c0d3cbbda1d3a727a38b8b6bb600a792a7e21bb9758ff8f671",
     "engine/host/ocr_diagnostics.h": "af9dff98113fd90a136b9ed62f3712c7bef395912ce45eb0d8b2738245a05905",
     "engine/host/ocr_input_state.h": "db1fc0e7d197cbc51c080d9cb1ec3643666e04abb80603b6c9a8ecf4b94c02a1",
+    "engine/host/ocr_instance.h": "feb3c3c6952394f0e1c8e7a83065aa67c119db43edd769003cda422b7ed02c45",
     "engine/host/ocr_tools.h": "32e513c49a675c6f701163f07bbf0f7a284dedee64545a78f32e0bac53ebc968",
     "engine/host/ocr_tunic.c": "9c42b938d62d479d11a81ccd4f992f216a26abed6d3a12140351f9ef7d7e220e",
     "engine/host/ocr_view.c": "b9b7f358010fa7b77e4ca1927f6b1a2de044f0506891067e03eefc712e76e8ca",
@@ -2265,8 +2266,8 @@
     "engine/wgpu-native/wgpu-native-meta/webgpu.yml": "f9e2ef6f1b5f91ad1c077c15c6fba5f55e6f52935af2adef40bc5597b06bb5ca",
     "engine/wgpu-native/wgpu-native-meta/wgpu-native-git-tag": "390263a8ff03ba3577a2d161b36b5bceb3efa9b668b9dd8aa225aa308aefd03a"
   },
-  "notes": "Corresponding source for v1.1.3: the selected performance preview, shared memory budgets, CPU/renderer optimization, camera input and shader arithmetic fixes. No game data, translated game code or bundled voice recordings.",
-  "distribution_status": "release 1.1.3; no bundled recordings",
+  "notes": "Corresponding source for v1.1.4: Classic UI integration, launcher completion navigation, per-folder startup exclusion and accurate session diagnostics. No game data, translated game code or bundled voice recordings.",
+  "distribution_status": "release 1.1.4; no bundled recordings",
   "git_normalized_source_sha256": {},
-  "installer_sha256": "353bf925c089f980b2209dd409bd3a4fa4114bb1ce16fb702cab3c98eeb67224"
+  "installer_sha256": "b387bb4254f371ba533bf17c0b053cb9cb02186171e1488be36244f8cc1942a7"
 }
