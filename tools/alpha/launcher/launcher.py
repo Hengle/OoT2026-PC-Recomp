@@ -34,6 +34,7 @@ import diagnostics  # noqa: E402
 import debug_package as debug_export  # noqa: E402
 import trace_capture  # noqa: E402
 import mods_manager  # noqa: E402
+import classic_ui  # noqa: E402
 import classic_voices  # noqa: E402
 import tunic_colors  # noqa: E402
 import interface_theme  # noqa: E402
@@ -598,6 +599,8 @@ class App(tk.Tk):
             self.stage.render()
 
     def quit_app(self):
+        if getattr(self, '_classic_ui_cancel', None):
+            self._classic_ui_cancel.set()
         self.music.close()
         if self.fairy:
             self.fairy.close()
@@ -1849,10 +1852,13 @@ class App(tk.Tk):
 
         def toggle(m):
             try:
-                mods_manager.set_enabled(m['path'], not m['enabled'])
+                if m['path'].name in (classic_ui.NAME, '_' + classic_ui.NAME):
+                    classic_ui.set_enabled(game, not m['enabled'])
+                else:
+                    mods_manager.set_enabled(m['path'], not m['enabled'])
                 log(f"mods: {m['name']} {'off' if m['enabled'] else 'on'}")
                 status(T('Gilt ab dem nächsten Spielstart.', 'Applies at the next start of the game.'), ui.GOLD)
-            except OSError as e:
+            except (OSError, ValueError) as e:
                 status(str(e), RED)
 
         def add(source):
@@ -1873,13 +1879,18 @@ class App(tk.Tk):
         def body(ctx, top):
             s = ctx.s
             x, w = self.content(ctx)
-            (hy, _), (ty, th), (ay, _), (sy, _), (fy, fh) = layout(
-                ctx, top, [(76, 34, 0), (300, 22, 1), (48, 18, 0), (24, 12, 0), (60, 18, 0)])
+            (hy, _), (uy, uh), (ty, th), (ay, _), (sy, _), (fy, fh) = layout(
+                ctx, top, [(76, 34, 0), (64, 16, 0), (220, 18, 1), (48, 18, 0), (24, 12, 0), (60, 18, 0)])
             self.heading(ctx, x, hy, 'Mods',
                          T('RomFS-Mods im Emulator-Format (Ordner mit „romfs“). Aus- und Einschalten, Hinzufügen aus Ordner oder '
                            'ZIP. Gilt ab dem nächsten Spielstart. exefs-Patches werden nicht angewendet.',
                            'RomFS mods in the emulator layout (a folder with "romfs"). Turn them on and off, add from a folder or '
                            'a ZIP. Applies at the next start. exefs patches are not applied.'), icon='layers', w=w)
+            ctx.panel(x, uy, w, uh, r=12, fill=ui.PANEL, border=ui.LINE)
+            ctx.text(x + 24*s, uy + uh/2, T('Classic UI · Klassisches HUD und Controller-Symbole',
+                     'Classic UI · Classic HUD and controller icons'), 19, 'semibold', ui.TEXT, anchor='w', width=w-350*s)
+            ctx.button(x + w - 270*s, uy + 9*s, 246*s, uh - 18*s, T('Classic UI auswählen', 'Choose Classic UI'),
+                       self.classic_ui_page, icon='layers', size=17)
             ctx.panel(x, ty, w, th, r=16, fill=ui.PANEL, fill2=ui.CELL, alpha=0.85, border=ui.LINE)
             cols = (('', 0.0), ('Mod', 0.05), (T('Dateien', 'Files'), 0.62), (T('Größe', 'Size'), 0.74), ('', 0.86))
             iw = w - 48 * s
@@ -1924,6 +1935,131 @@ class App(tk.Tk):
             ctx.text(x + 4 * s, sy + 12 * s, text, 18, 'regular', col, anchor='w', key='status', width=w)
             ctx.hline(x, fy - 12 * s, w, ui.LINE, 0.5)
             ctx.button(x, fy + 6 * s, 170 * s, fh - 12 * s, T('Zurück', 'Back'), self.ready, icon='back', size=19)
+        self.show('play', body)
+
+    def classic_ui_page(self, keep=False):
+        game = Path(self.cfg['game_dir'])
+        try:
+            installed = classic_ui.state(game)
+        except (OSError, ValueError) as exc:
+            messagebox.showerror('Classic UI', str(exc), parent=self)
+            return
+        if not keep:
+            self.classic_ui_selection = dict(installed['selection'])
+            self.classic_ui_status = ('', ui.SUB)
+            self.classic_ui_progress = 0
+
+        def choose(key, choices, label):
+            if self.busy:
+                return
+            self.classic_ui_selection[key] = next(row[0] for row in choices if row[1] == label)
+            self.classic_ui_status = (T('Auswahl geändert. Mit „Installieren und aktivieren“ übernehmen.',
+                                       'Selection changed. Choose "Install and enable" to apply.'), ui.GOLD)
+            self.classic_ui_page(True)
+
+        def toggle():
+            if self.busy:
+                return
+            try:
+                classic_ui.set_enabled(game, not installed['enabled'])
+                self.classic_ui_status = (T('Gilt ab dem nächsten Spielstart.', 'Applies at the next game start.'), ui.GOLD)
+            except (OSError, ValueError) as exc:
+                self.classic_ui_status = (str(exc), RED)
+            self.classic_ui_page(True)
+
+        def install():
+            if self.busy:
+                return
+            if sm.game_running():
+                return messagebox.showinfo('Classic UI', T('Bitte zuerst das Spiel schließen.', 'Please close the game first.'), parent=self)
+            selection = dict(self.classic_ui_selection)
+            self.busy = True
+            self._classic_ui_cancel = threading.Event()
+            result = queue.Queue()
+            self.classic_ui_status = (T('Download wird vorbereitet …', 'Preparing download …'), ui.SUB)
+            self.classic_ui_progress = 0
+            self.classic_ui_page(True)
+
+            def progress(done, total):
+                result.put(('progress', done, total))
+
+            def work():
+                try:
+                    classic_ui.install(game, APP / 'Downloads' / 'ClassicUI', selection,
+                                       cancel=self._classic_ui_cancel, progress=progress)
+                    result.put(('done', None))
+                except Exception as exc:
+                    result.put(('done', str(exc)))
+
+            def poll():
+                last = None
+                try:
+                    while True:
+                        item = result.get_nowait()
+                        if item[0] == 'done':
+                            self.busy = False
+                            self._classic_ui_cancel = None
+                            if item[1]:
+                                log('classic UI: ' + item[1])
+                                self.classic_ui_status = (item[1], RED)
+                            else:
+                                log('classic UI: enabled ' + json.dumps(selection))
+                                self.classic_ui_status = (T('Classic UI aktiviert. Starte das Spiel, um die Änderung zu sehen.',
+                                                           'Classic UI enabled. Start the game to see the change.'), ui.GREEN)
+                                self.classic_ui_progress = 1
+                            self.classic_ui_page(True)
+                            return
+                        last = item
+                except queue.Empty:
+                    pass
+                if last:
+                    _, done, total = last
+                    self.classic_ui_progress = done / max(total, 1)
+                    self.classic_ui_status = (f'{done / 1048576:.1f} / {total / 1048576:.1f} MB · GameBanana', ui.SUB)
+                    self.classic_ui_page(True)
+                self.after(250, poll)
+            threading.Thread(target=work, daemon=False).start()
+            self.after(250, poll)
+
+        def body(ctx, top):
+            s = ctx.s
+            x, w = self.content(ctx)
+            (hy, _), (cy, ch), (sy, sh), (fy, fh) = layout(
+                ctx, top, [(76, 34, 0), (280, 24, 1), (100, 18, 0), (60, 18, 0)])
+            self.heading(ctx, x, hy, 'Classic UI', T('Klassisches HUD von kuledawg · Version 2.0.0',
+                         'Classic HUD by kuledawg · Version 2.0.0'), icon='layers', w=w)
+            ctx.panel(x, cy, w, ch, r=16, fill=ui.PANEL, fill2=ui.CELL, border=ui.LINE)
+            state_text = T('Aktiv', 'Enabled') if installed['enabled'] else T('Aus', 'Off') if installed['installed'] else T('Nicht installiert', 'Not installed')
+            ctx.text(x+28*s, cy+24*s, 'Classic UI · ' + state_text, 22, 'semibold', ui.GREEN if installed['enabled'] else ui.TEXT)
+            if installed['installed']:
+                ctx.button(x+w-238*s, cy+16*s, 210*s, 42*s,
+                           T('Ausschalten', 'Turn off') if installed['enabled'] else T('Einschalten', 'Turn on'),
+                           None if self.busy else toggle, size=18)
+            rows = (('controller', T('Controller-Symbole', 'Controller icons'), classic_ui.CONTROLLERS),
+                    ('style', T('HUD-Stil', 'HUD style'), classic_ui.STYLES),
+                    ('logo', T('Titelbild-Logo', 'Title screen logo'), classic_ui.LOGOS))
+            dw = min(540*s, w*.52)
+            for i, (key, label, choices) in enumerate(rows):
+                ry = cy + (88 + i*62)*s
+                ctx.text(x+28*s, ry+23*s, label, 19, anchor='w')
+                current = next(r[1] for r in choices if r[0] == self.classic_ui_selection[key])
+                ctx.dropdown(x+w-dw-28*s, ry, dw, 46*s, [r[1] for r in choices], current,
+                             lambda value, key=key, choices=choices: choose(key, choices, value), size=18)
+            ctx.text(x+6*s, sy, T('Einmaliger Download der Auswahl: etwa 80 MB. Ein/Aus danach auch offline. Andere HUD-Mods können sich überschneiden.',
+                     'Downloads only your selection: about 80 MB. On/off works offline afterwards. Other HUD mods may conflict.'),
+                     17, color=ui.SUB, width=w-12*s)
+            ctx.text(x+6*s, sy+42*s, self.classic_ui_status[0], 17, color=self.classic_ui_status[1], width=w-12*s)
+            if self.busy:
+                ctx.progress('classic_ui_download', x+6*s, sy+sh-12*s, w-12*s, 7*s, self.classic_ui_progress)
+            ctx.button(x, fy, 170*s, fh, T('Zurück', 'Back'), None if self.busy else self.mods_page, icon='back', size=19)
+            import webbrowser
+            ctx.button(x+190*s, fy, 240*s, fh, 'kuledawg · GameBanana', lambda: webbrowser.open(classic_ui.PAGE), kind='quiet', size=16)
+            if self.busy:
+                ctx.button(x+w-300*s, fy, 300*s, fh, T('Abbrechen', 'Cancel'),
+                           lambda: self._classic_ui_cancel.set(), size=20)
+            else:
+                ctx.button(x+w-350*s, fy, 350*s, fh, T('Installieren und aktivieren', 'Install and enable'),
+                           install, kind='primary', icon='download', size=20)
         self.show('play', body)
 
     def prepare_classic_voice(self, age, tab):

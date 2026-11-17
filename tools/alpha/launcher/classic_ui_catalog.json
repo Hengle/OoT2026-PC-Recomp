@@ -1,0 +1,32 @@
+{
+  "switch": {
+    "id": 1891811,
+    "bytes": 944863371,
+    "tail_sha256": "31552f3b92c511e197706d8954bc9b97a00767ce6ea67438321c1fdec7502bac",
+    "md5": "2cac33afdaba1c4afabdb0655c5332ac"
+  },
+  "xbox": {
+    "id": 1891839,
+    "bytes": 959841099,
+    "tail_sha256": "203c825477218dcaf7b5722fde0f32123d615cd5fa4309503223a68dd6d6fd71",
+    "md5": "d35dd385a1d161cb54c1e87a10ebd023"
+  },
+  "xbox_swap": {
+    "id": 1891833,
+    "bytes": 959840811,
+    "tail_sha256": "f5d9acef7b2790b6545f12ad7783c664073afbcca4eba73dd801b21a138951e0",
+    "md5": "41541a800a7d3f78f3ecf32de0860882"
+  },
+  "playstation": {
+    "id": 1891874,
+    "bytes": 959769387,
+    "tail_sha256": "5b6b4c65db35cf5e2acf588e6d17daae1ce646446c9ffdf7c5a3a98c949d2c32",
+    "md5": "e4a455bee63af5e6ecb6bc66007154e3"
+  },
+  "playstation_swap": {
+    "id": 1891922,
+    "bytes": 959769879,
+    "tail_sha256": "6c829a29bdd84cd261af45f32bbc2ea07c319329a4d256ce0028a3bcb717f51d",
+    "md5": "85f20bbff258ace65329644b283c58c6"
+  }
+}
