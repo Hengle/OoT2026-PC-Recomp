@@ -1,9 +1,9 @@
 {
   "name": "Ocarina Reborn",
-  "version": "1.1.4",
+  "version": "1.1.4-1",
   "build_id": "ocarina-reborn-alpha-001",
-  "commit": "source-v1.1.4",
+  "commit": "source-v1.1.4-1",
   "platform": "windows-x64",
   "release_type": "public",
-  "stamp": "20261117-014757"
+  "stamp": "20261117-111342"
 }

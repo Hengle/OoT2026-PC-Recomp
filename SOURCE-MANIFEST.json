@@ -1,6 +1,6 @@
 {
-  "version": "1.1.4",
-  "installer_stamp": "20261117-014757",
+  "version": "1.1.4-1",
+  "installer_stamp": "20261117-111342",
   "engine_base": "v2.3.2",
   "engine_source_sha256": {
     "engine/.gitattributes": "e5f3ddcef39226a920751f1f54d040b0a2fadecf2dfd423d4652c5840c23a7bc",
@@ -10,7 +10,7 @@
     "engine/CONTRIBUTING.md": "538a00d91a111de108a50fc3bd6bba1fb8ff8566e62ac9ce46ce0038733dabf3",
     "engine/LICENSE": "3972dc9744f6499f0f9b2dbf76696f2ae7ad8af9b23dde66d6af86c9dfb36986",
     "engine/NOTICE-OCARINA-REBORN.txt": "8ccd3264dcf240e0da46bd63e2bec7e79e501f4bd675740b9341fd1627c5a86e",
-    "engine/assets/ocarina_reborn.png": "938a139e0dcb826927dc6335157bc64fd225e7080c5a18e82ecd044294b38bb5",
+    "engine/assets/ocarina_reborn.png": "05b0d902530008dc64149310f33768335c129a3d20f01171337189bacde53246",
     "engine/assets/pipeline_states/README.md": "0a9d598a39b41868488960fc6f32f9bc54d8ddd985ba5263878b9a9850703dd1",
     "engine/assets/pipeline_states/contrib/brett-d-rtx-5090-fork-fg-2x.bin.xz": "51eee444f189c2e8ce7b419af75f03cf4cf49150101003428abd0db644378208",
     "engine/assets/pipeline_states/contrib/brett-d-rtx-5090-fork-fg-2x.md": "dcc760d80fe4ee4360c5dff7919920172fce06ebdb8f732fd0811644356af8f1",
@@ -1109,7 +1109,7 @@
     "engine/gpu/vk/vk_loader.h": "39ab0d15d59867f2234f797e795f7268d0f21460e0bc58ea753ee8ca2970170d",
     "engine/gpu/vk/vk_main.cpp": "350fa83a8b0ff34b017e85f0101b2efbaa4d5e0d60d1551696c3625852dc4d8b",
     "engine/gpu/vk/vk_memory.cpp": "eb0ae897bad85637ebfb12f37c22801838eefb8f4884822d7ad841b26869de82",
-    "engine/gpu/vk/vk_menu.cpp": "d637870c78e0cf2af870c18a150ad68dc50886e0287059d8a6c5751b35fb69d0",
+    "engine/gpu/vk/vk_menu.cpp": "3c303580c29cf54f240d9506f63872f397265ec81b69f2b2e0873e131ecc6594",
     "engine/gpu/vk/vk_menu.h": "c4770fe784632a0fb75dfa33fded04ccda2445a3e50aef878fdd08306df4a073",
     "engine/gpu/vk/vk_menu_hit.h": "6fc2d36db7fb12b8ac894df2789952c3858b1b60cd552dd813e9149e193b1682",
     "engine/gpu/vk/vk_menu_i18n.cpp": "c46e2f4c14560f6470d297ab6959554c5ae58659ea5b3313f0f03d25661dca86",
@@ -1125,7 +1125,7 @@
     "engine/gpu/vk/vk_progcache.h": "1e94f6f5083d1f0c94833ea0083949ca2543092837cb7b452d98446d97884e26",
     "engine/gpu/vk/vk_programs.cpp": "f66ef76f9c595068d65ceec452be9dc4f32b9165a53d25b701e9e566b5816844",
     "engine/gpu/vk/vk_programs.h": "e5affab5a0c44640667d335516c4984ea4a3d036ed57cbfb0553377a7fbb53a5",
-    "engine/gpu/vk/vk_progress.h": "e57c383126bd4316974537ed05867d57dae5135a9cc01b9910cd5e5cd667932c",
+    "engine/gpu/vk/vk_progress.h": "f57f2c16207be866a0dfb864719f1f8b91d0a3813a379a9ee1a9e0910c23d5d2",
     "engine/gpu/vk/vk_reactive.cpp": "4a19d85dbeffbff70526c1857b9594ee23c24b46aa0e8406f9c48a4bf8548564",
     "engine/gpu/vk/vk_reactive.h": "da03dc602c2891b1dde0354f8f8475ba56457024b83eb264c4e0afea137cf359",
     "engine/gpu/vk/vk_recorder.h": "4f3ac5734e288d4dff688fe4058ce63c540143b68afdd6e504112ebb560664a9",
@@ -1229,7 +1229,7 @@
     "engine/host/oot_autoload.c": "fb831e26338f56e94e4af0e53042f9672b672e6a9808988d618eb1474ab120c0",
     "engine/host/oot_autoload.h": "e5edcdcc7d4e858895878f1d7367ced9332a8050bb98cc106459fb8435060d4a",
     "engine/host/oot_damage.c": "55cf37789c49cb3e2a71c983d932956b725283aac580bd349fb5806c05479b77",
-    "engine/host/oot_fov.c": "12bcc3a5be7ab8ff14194a4ffc7426e7ca3b1693decc97025a63e37c4186e45f",
+    "engine/host/oot_fov.c": "acefd40592185ef8d2651c6bf658e1421b9a06d6fad606160431ffc32278e0fd",
     "engine/host/oot_heap_retry.c": "645ca2e5e47110b88e33b4e5548ec36d646dc991d4d2f7c279eb46ae3713333a",
     "engine/host/oot_high_fps.c": "1251339e518a9e7ac8c1d9745be06a9aad33b2f4b0f19445c049f574688e97a2",
     "engine/host/oot_high_fps.h": "b4f37bb03834e87351a26e9a259db6f3ab0b6f734f57536c610dbaab32a87079",
@@ -2645,7 +2645,7 @@
     "engine/third_party/zstd/lib/zstd_errors.h": "66a8c3f71d12ea6e797e4f622f31f3f8f81c41b36f48cad4f5de7d8bfb6aac0a",
     "engine/tools/dump_check.py": "4f3d414532ecce0f4f2b316a1f19ff5a0313ba27767727a6c4582f6dacae0174",
     "engine/tools/dump_repair.py": "29eb2b49fd43d008320bac8d280a0e6b5ab47e3fe8a0979641bd03717f923571",
-    "engine/version.txt": "a8462fd05193c9cc1f180558c17e71640bfae0b81b1b0a9904ab24559c319272",
+    "engine/version.txt": "dd276e58469131a48454a1ebaa73379a55ab6c6d9b6693849df92a024b423c8f",
     "engine/wgpu-native/LICENSE.md": "d4d85b32b44228484001c789ad2e299a389f53c5f6c58b3c3eb845cf54cd9094",
     "engine/wgpu-native/include/webgpu/webgpu.h": "a483031c3fed05ea5dd1c74082a71676c46c5b2b820ccca10da515c033efc997",
     "engine/wgpu-native/include/webgpu/wgpu.h": "7bd23656d394f620a804b1f174444ea17082b6d330a2fca0c0e6b1121ec4b284",
@@ -2654,10 +2654,8 @@
     "engine/wgpu-native/wgpu-native-meta/webgpu.yml": "f9e2ef6f1b5f91ad1c077c15c6fba5f55e6f52935af2adef40bc5597b06bb5ca",
     "engine/wgpu-native/wgpu-native-meta/wgpu-native-git-tag": "390263a8ff03ba3577a2d161b36b5bceb3efa9b668b9dd8aa225aa308aefd03a"
   },
-  "notes": "Corresponding source for corrected full v1.1.4: engine v2.3.2, CPU/renderer/memory improvements, save backups, Classic UI integration, launcher completion navigation, per-folder startup exclusion and accurate session diagnostics. No game data, translated game code or bundled voice recordings.",
-  "distribution_status": "release 1.1.4; no bundled recordings",
-  "git_normalized_source_sha256": {
-    "engine/version.txt": "dd276e58469131a48454a1ebaa73379a55ab6c6d9b6693849df92a024b423c8f"
-  },
-  "installer_sha256": "234267c2bdf858bfcedfd57faf24f10b33c686cc05f072f847c43b3a00e4332d"
+  "notes": "Corresponding source for v1.1.4-1: v1.1.4 plus the new launcher design, build/update screen, in-game start screen and vert+ camera for pictures narrower than 16:9. No game data, translated game code or bundled voice recordings.",
+  "distribution_status": "release 1.1.4-1; no bundled recordings",
+  "git_normalized_source_sha256": {},
+  "installer_sha256": "30e2ab9359e419a86fe4f116770e5f3f67590dc8bbaaf087c9936c59c212166a"
 }
