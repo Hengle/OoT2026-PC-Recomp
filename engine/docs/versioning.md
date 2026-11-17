@@ -16,13 +16,14 @@ the Release workflow's record job, once a version is published. The release pull
 `MAJOR.MINOR.PATCH`, with an optional prerelease suffix: `2.0.7`, `2.1.0`, `2.1.0-rc.1`. A release is tagged `v2.0.7`:
 the `v` belongs to the tag, not to the version. Build metadata is not used in tags.
 
-One version covers the whole project: the game (`hookshot.exe` / `hookshot`), the Vulkan back end, the lift pipeline
+One version covers the whole project: the game (`ocarina_reborn.exe` / `hookshot`), the Vulkan back end, the lift pipeline
 and its scripts, Hookshot Builder and the Linux AppImage. They are built from the same commit and released together,
 so they never carry different versions.
 
 The "public" surface the rules protect is the command line of `make_game.py` and the builder, the `RX_` and `HOS_`
-switches, the files a build writes into a game folder (`hookshot_options.ini`, `hookshot_env.txt`, `language.txt`,
-`hookshot_version.txt`), saves, and the format of `hookshot_log.txt`. The C sources and internal headers are not an
+switches, the settings file (`ocarina_reborn_options.ini`, in the user folder `--user` names, else the game folder), the files a build
+writes into a game folder (`ocarina_reborn_env.txt`, `language.txt`,
+`hookshot_version.txt`), saves, and the format of `ocarina_reborn_log.txt`. The C sources and internal headers are not an
 API and may change in any release.
 
 ## Pull request titles decide the version
@@ -88,8 +89,8 @@ On every push to `main`:
    with the changelog entry as its notes.
 3. The same workflow calls the Linux AppImage and Windows builder workflows on the tag. The jobs that build the files
    sign their build provenance (below), and the release jobs attach them with `scripts/release_upload.sh`:
-   `Hookshot-v<version>-x86_64.AppImage`, its `.zsync` and `hookshot-linux.txt`; `HookshotBuilder.exe` (the setup),
-   `hookshot-setup.txt` and the RecompLauncher zip. New update parts go to the `linux-parts` and `builder-parts`
+   `Hookshot-v<version>-x86_64.AppImage`, its `.zsync` and `ocarina_reborn-linux.txt`; `HookshotBuilder.exe` (the setup),
+   `ocarina_reborn-setup.txt` and the RecompLauncher zip. New update parts go to the `linux-parts` and `builder-parts`
    releases.
 4. The publish job adds `SHA256SUMS` and the "Which file do I download?" table under the notes
    (`scripts/release_files.sh finish`), checks that all the files are there and that `SHA256SUMS` lists every file
@@ -184,7 +185,7 @@ moves forward: a run takes the nightly when its commit comes after the one the t
 still building, so it keeps up during a run of merges instead of waiting for `main` to be quiet. The tag is moved as a
 fast-forward, which GitHub refuses when the other platform's run has moved it past this commit meanwhile; a run of an
 older commit (or a re-run of an old one) leaves it alone. Each platform's files are one commit's and named by it (the
-AppImage and the RecompLauncher zip by their version, `hookshot-linux.txt` and `hookshot-setup.txt` by their tag, which
+AppImage and the RecompLauncher zip by their version, `ocarina_reborn-linux.txt` and `ocarina_reborn-setup.txt` by their tag, which
 is what each platform's updaters read), but the two builds finish at different times, so while `main` moves one
 platform's files can be a commit or two behind the other's; the tag is at the newest. Its new parts go to `linux-parts`
 and `builder-parts`, like a release's. Its AppImage's update information names the `nightly` release instead of
@@ -238,10 +239,10 @@ The names never change: the builder's update check, the setup and the Linux upda
 
 | File | For |
 |---|---|
-| `HookshotBuilder.exe` | Windows: the setup players download. It reads `hookshot-setup.txt` and downloads the rest |
+| `HookshotBuilder.exe` | Windows: the setup players download. It reads `ocarina_reborn-setup.txt` and downloads the rest |
 | `Hookshot-v<version>-x86_64.AppImage` | Linux and Steam Deck |
-| `hookshot-setup.txt` | the setup's and the Windows builder's update list (`builder/setup/setup.c`, `builder/HookshotBuilder/Updater.cs`) |
-| `hookshot-linux.txt` | the Linux updater's list (`builder/linux/linux_update.py`) |
+| `ocarina_reborn-setup.txt` | the setup's and the Windows builder's update list (`builder/setup/setup.c`, `builder/HookshotBuilder/Updater.cs`) |
+| `ocarina_reborn-linux.txt` | the Linux updater's list (`builder/linux/linux_update.py`) |
 | `Hookshot-v<version>-x86_64.AppImage.zsync` | AppImageUpdate and Gear Lever, which update the AppImage itself |
 | `Hookshot-v<version>-Windows-x64.zip` | RecompLauncher: `HookshotBuilder.exe` and its `recomplauncher.json` (`.github/workflows/windows-builder.yml`). Windows players download `HookshotBuilder.exe` |
 | `SHA256SUMS` | the SHA-256 of every other file, in `sha256sum`'s format |
@@ -287,7 +288,7 @@ and released the same way as a release candidate, but release-please only follow
 | git tag | release-please (a release candidate), Promote (its version), or a tag pushed by hand; the source of truth |
 | `.release-please-manifest.json` | the release pull request, and the Release workflow's record job once a version is published |
 | `CHANGELOG.md` | the release pull request, and the record job |
-| `hookshot_log.txt` and the Insert menu | `nx2/version.py`: `HOOKSHOT_VERSION`, then `VERSION`/`version.txt`, then `git describe --tags --match "v[0-9]*"` |
+| `ocarina_reborn_log.txt` and the Insert menu | `nx2/version.py`: `HOOKSHOT_VERSION`, then `VERSION`/`version.txt`, then `git describe --tags --match "v[0-9]*"` |
 | `hookshot_version.txt` in a build | the `VERSION` file written when the tools are packaged (`nx2/make_game.py`) |
 | AppImage file name | a release's tag (`HOOKSHOT_VERSION`), else `git describe --tags --match "v[0-9]*"` (`scripts/linux/appimage.sh`) |
 | `HookshotBuilder.exe` | the MSBuild `Version` passed at publish time (`dotnet publish -p:Version=<version>`, the Windows builder workflow); the `csproj`'s `0.1.0` is only the default for a local build |

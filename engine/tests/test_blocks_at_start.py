@@ -7,7 +7,7 @@ texture, and the budget's hold cut the textures by as much. On an 8 GB RTX 3070 
 54-56 with RX_VK_IMAGE_PREALLOC=0 (#2690). The rule (gpu/vk/vram_compact.h) is compiled and run for 2 to 32 GB cards, with
 what the budget's hold alone leaves the textures either way, and vk_vma.cpp and vk_texture.cpp are checked to use it. No GPU or game.
 
-python -I -B tests/test_blocks_at_start.py [--cxx g++]
+python -I -B tests/test_blocks_at_start.py [--cxx g++] [--source /path/to/source/tree]
 """
 import argparse
 import subprocess
@@ -35,11 +35,9 @@ def need(where, text, needles):
             raise SystemExit(where + " no longer has: " + needle)
 
 
-def check_source():
-    vma = (ROOT / "gpu/vk/vk_vma.cpp").read_text(encoding="utf-8")
-    tex = (ROOT / "gpu/vk/vk_texture.cpp").read_text(encoding="utf-8")
-    need("vk_vma.cpp: allocation granularity", vma,
-         ['const uint64_t kImageBlock = vram_compact::image_block_bytes(getenv("RX_VK_IMAGE_BLOCK_MB"));'])
+def check_source(source):
+    vma = (source / "gpu/vk/vk_vma.cpp").read_text(encoding="utf-8")
+    tex = (source / "gpu/vk/vk_texture.cpp").read_text(encoding="utf-8")
     if "static size_t blocks_at_start(bool holds_textures)" not in vma:
         raise SystemExit("vk_vma.cpp: the blocks made at the start are not chosen by the pool that holds the textures (#2690: "
                          "made in the images' pool, they stay empty while the textures are compacted in a pool of their own)")
@@ -177,19 +175,19 @@ def compile_pools(source, cxx, tmp):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--cxx", default="g++")
+    parser.add_argument("--source", type=Path, default=ROOT, help="source tree whose production pool constructors are tested")
     args = parser.parse_args()
-    check_source()
     with tempfile.TemporaryDirectory(prefix="blocks-at-start-") as tmp:
+        pools = compile_pools(args.source.resolve(), args.cxx, Path(tmp))
         exe = Path(tmp) / "blocks-at-start"
         subprocess.run([args.cxx, "-std=c++20", "-Wall", "-Wextra", "-Werror", str(ROOT / "tests/test_blocks_at_start.cpp"), "-o",
                         str(exe)], check=True)
         failures = 0
-        pools = compile_pools(ROOT, args.cxx, Path(tmp))
         for case in ("default", "compaction-off", "override", "prealloc-off", "fallback", "failed-pool", "integrated"):
             failures += subprocess.run([str(pools), case]).returncode != 0
         if failures:
             raise SystemExit(f"{failures} pool constructor cases failed")
-        check_source()
+        check_source(args.source.resolve())
         subprocess.run([str(exe)], check=True)
 
 

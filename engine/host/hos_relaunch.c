@@ -107,6 +107,8 @@ void hos_close_finish(void) {
     hos_log_flush();
     void ocr_diag_stop(void);
     ocr_diag_stop();
+    void hos_crash_clean_end(void);
+    hos_crash_clean_end();
 }
 
 /* The window was closed (host/display.c's WM_CLOSE, host/posix/display_sdl.c's quit): the game exits, and starts again

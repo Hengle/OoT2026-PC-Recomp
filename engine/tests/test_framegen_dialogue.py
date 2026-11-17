@@ -85,7 +85,10 @@ static int dlss_fg_frames(VkCommandBuffer,VkImage,VkImageView,uint32_t,uint32_t,
     return count;
 }
 namespace fsr3fi { static bool frames_wanted() { return provider==2; } }
-static int fsr3fi_frame(VkCommandBuffer,OutSet& set,int,uint32_t,uint32_t,uint64_t) {
+static float wide_margin() { return 0.0f; }
+std::atomic<bool> present_native_pq{false};   // (vk_replay.cpp: the game's own HDR10 picture)   // (no loading cover in these frames)
+static int fixed_frames(int m,int,int64_t) { return m; }   // (the display's frames: the multiplier, as before)
+static int fsr3fi_frame(VkCommandBuffer,OutSet& set,int,uint32_t,uint32_t,uint64_t,bool) {
     provider_calls++;pixels[set.frame[0].image]=-1;return 1;
 }
 '''
@@ -105,7 +108,7 @@ static void reset(int rate,int backend) {
 static void frame(bool event,bool real_only) {
     event_active=event;clock_ns+=33333333;scene=++counter;
     provider_calls=synthetic_passes=0;
-    CHECK(framegen_record(VK_NULL_HANDLE,1,1280,720,nullptr));
+    CHECK(framegen_record(VK_NULL_HANDLE,1,1280,720,nullptr,0.0f,false));
     auto& s=*fg.recorded;
     if(real_only) {
         CHECK(s.made==0 && maker==FgMaker::None && synthetic_passes==0);

@@ -1,6 +1,6 @@
 # Licenses and corresponding source
 
-Ocarina Reborn includes third-party software. The engine is based on the sources distributed as **Hookshot v2.2.0-rc.1**, under **GPL-3.0-or-later**, with project-specific modifications. Existing copyright notices and component license terms are retained in the corresponding source. This identifies the source version used; it does not attribute every component to a single author.
+Ocarina Reborn includes third-party software. The engine is based on the sources distributed as **Hookshot v2.3.2**, under **GPL-3.0-or-later**, with project-specific modifications. Existing copyright notices and component license terms are retained in the corresponding source. This identifies the source version used; it does not attribute every component to a single author.
 
 ## GPL and source access
 

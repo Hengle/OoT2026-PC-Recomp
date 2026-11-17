@@ -50,6 +50,7 @@ uint64_t rec_part_next = 0;
 std::map<uint64_t,uint64_t> part_rec;
 std::condition_variable rec_map_cv;
 std::atomic<bool> pend_held{false};
+void submit_failed(VkResult) { need(false, "unexpected submission failure"); }
 std::map<uint64_t,uint64_t> value_rec;
 std::vector<uint64_t> rec_open_values;
 struct { std::vector<VkCommandBufferSubmitInfo> cbs; uint64_t signal = 0, rec = 0; bool any_signal = false; uint64_t reflex = 0; } pend;
@@ -58,7 +59,8 @@ const void* reflex_submit_id(const void* next, uint64_t = ~0ull) { return next; 
 std::chrono::steady_clock::time_point pend_since;
 int st_flushes = 0, st_reason[2]{};
 int64_t st_batched_cbs = 0;
-enum { FR_OTHER, FR_CAP }; int flush_reason = FR_OTHER;
+enum { FR_OTHER, FR_CAP, FR_READBACK }; int flush_reason = FR_OTHER;
+bool readback_send_now() { return false; }   // (held submits sent for a readback's wait: none waits here)
 bool batched = false;
 bool batch_on() { return batched; }
 bool batch_gpu_idle() { return false; }   // (#1993's flush at an idle GPU: none here)

@@ -110,17 +110,17 @@ HLE(_ZN2nn2vi15GetNativeWindowEPPvPNS0_5LayerE) {
    interval's vsyncs (1: 60 fps, 2: 30) after the last present, so the game runs at the display's rate.
    HOS_NO_PACING=1: as fast as it can. */
 static volatile int present_interval = 1;
-/* (hookshot) The frame rate cap past the console's 60, the Insert menu's Game frame rate cap (frame_rate_cap=): the display pacing's
-   interval, the game's own limiter (+0xfc) and the vsync event go up to it, and the game's time step is the frames' own time
-   (realtime_step), so the game is not sped up. Uncapped is a cap of 1000 (FPS_UNCAPPED), the pacing's 1 ms: the frames
+/* (hookshot) The frame rate cap, the Insert menu's Game frame rate cap (frame_rate_cap=): the display pacing's
+   interval, the game's own limiter (+0xfc) and the vsync event follow it, and the game's time step is the frames' own time
+   (realtime_step), so the game keeps real time. Uncapped is a cap of 1000 (fps_max's FPS_UNCAPPED), the pacing's 1 ms: the frames
    come as fast as the PC makes them (a display that waits for its refresh, V-Sync On, still holds them to its rate).
    The row applies in play: fps_refresh reads it (HOS_OPT_FPS_CAP) at each present, and realtime_step gives the game back its
-   own limiter and step when the cap comes down. HOS_FPS_MAX=<61-1000> goes over the row for a run, with any number (a 75 or
-   100 Hz screen) where the row has steps. Unset or 60: 60, as on the console */
+   own limiter and step when the cap goes back to 60. HOS_FPS_MAX=30 or <61-1000> goes over the row for a run, with any
+   number above 60 (a 75 or 100 Hz screen). Unset or 60: 60, as on the console */
 int hos_ini_option(const char *key, int otherwise);   /* (nn_applet.c) */
 int rx_option(int id, int otherwise);
-enum { FPS_UNCAPPED = 1000, FPS_MOVIE = 240 };   /* (FPS_MOVIE: the pacing while a movie plays, issue #73, below) */
-/* (hookshot, issue #73: the wall time of the movie player's last update, ns, 0 before the first: stamped at the top of
+enum { FPS_UNCAPPED = 1000, FPS_MOVIE = 240 };   /* (FPS_MOVIE: the pacing while a movie plays, below) */
+/* (hookshot: the wall time of the movie player's last update, ns, 0 before the first: stamped at the top of
    hos_movie_frames (the lift calls it once per update of a movie player, f_83b7c710) and watched by fps_refresh at each
    present. Fresh means a movie is playing: the player takes at most one picture per update, and at the console's 60 the
    updates follow a 60 fps loop that lands short of the movie's 59.95 pictures a second, so pictures get skipped: on a
@@ -130,11 +130,11 @@ enum { FPS_UNCAPPED = 1000, FPS_MOVIE = 240 };   /* (FPS_MOVIE: the pacing while
 static volatile uint64_t movie_seen_at;
 static const int64_t MOVIE_STALE_NS = 250000000LL;   /* (a quarter second: three 60 fps frames of grace) */
 static volatile int fps_now;   /* (the cap this present runs at, 0 before the first: fps_refresh) */
-static int fps_of(int want) { return want > 60 ? (want > FPS_UNCAPPED ? FPS_UNCAPPED : want) : 60; }
+static int fps_of(int want) { return want == 30 ? 30 : want > 60 ? (want > FPS_UNCAPPED ? FPS_UNCAPPED : want) : 60; }
 static void fps_refresh(void) {
-    /* (the Insert menu's Frame rate cap, frame_rate_cap=: 0 the console's 60, then 90, 120, 144, 165, 240, 6 Uncapped; a value
-       this build does not know is 60. The options file's until the renderer answers, HOS_FPS_MAX over both) */
-    static const int caps[] = {60, 90, 120, 144, 165, 240, FPS_UNCAPPED};
+    /* (the Insert menu's Frame rate cap, frame_rate_cap=: 0 the console's 60, then 90, 120, 144, 165, 240, 6 Uncapped, 7 30; a
+       value this build does not know is 60. The options file's until the renderer answers, HOS_FPS_MAX over both) */
+    static const int caps[] = {60, 90, 120, 144, 165, 240, FPS_UNCAPPED, 30};
     enum { CAPS = sizeof caps / sizeof caps[0] };
     static int env = -1, start = -1, movie_pace = -1;
     if (start < 0) {
@@ -146,7 +146,7 @@ static void fps_refresh(void) {
     const int i = env ? 0 : rx_option(HOS_OPT_FPS_CAP, start);
     const int row = env ? env : fps_of(caps[i >= 0 && i < CAPS ? i : 0]);
     int v = row;
-    /* (issue #73: while a movie's player is updating, pace at FPS_MOVIE even at the console's cap: its pictures come one
+    /* (while a movie's player is updating, pace at FPS_MOVIE even at the console's cap (and Hookshot's 30): its pictures come one
        per update and the updates follow the frame loop, so a 60 fps loop undersupplies a 59.95-picture-second movie.
        Raised at each present and lowered a quarter second after the movie's last update: a game not playing a movie
        keeps exactly the cap it asked for, and one decision per present keeps the cap steady through the present (the
@@ -154,17 +154,17 @@ static void fps_refresh(void) {
        left alone - the player asked for its own pacing. Measured on a Deck OLED at cap 240: intro skips 1,055 -> 567
        of 5,947, the title's looped movies 4-86 of 1,800, game clock 0.998-1.005; middle caps measured worse than both
        ends (cap 73 skipped 1,216, later movies 465/275), so jump straight to 240 rather than nudge past 60) */
-    if (movie_pace && row == 60) {
+    if (movie_pace && row <= 60) {   /* (hookshot: the 30 row too, whose movies would lose half their pictures) */
         const uint64_t seen = __atomic_load_n(&movie_seen_at, __ATOMIC_RELAXED);
         if (seen && hos_now_ns() - (int64_t)seen < MOVIE_STALE_NS) v = FPS_MOVIE;
     }
     const int was = fps_now;
     if (v == was) return;
     fps_now = v;
-    if (v == FPS_MOVIE && row == 60) hos_log("vi: a movie is playing: the frame rate goes to %d for it (HOS_MOVIE_PACE=0 leaves it)", FPS_MOVIE);
-    else if (was == FPS_MOVIE && row == 60) hos_log("vi: the movie is over: back to the game's frame rate cap 60");
+    if (v == FPS_MOVIE && row <= 60) hos_log("vi: a movie is playing: the frame rate goes to %d for it (HOS_MOVIE_PACE=0 leaves it)", FPS_MOVIE);
+    else if (was == FPS_MOVIE && row <= 60) hos_log("vi: the movie is over: back to the game's frame rate cap %d", row);
     else if (v == FPS_UNCAPPED) hos_log("vi: frame rate uncapped: pacing, the game's limiter and its time step follow the frames");
-    else if (v > 60) hos_log("vi: frame rate cap %d: pacing, the game's limiter and its time step follow it", v);
+    else if (v != 60) hos_log("vi: frame rate cap %d: pacing, the game's limiter and its time step follow it", v);
     else if (was) hos_log("vi: frame rate cap 60: the game's own limiter and step");
 }
 static int fps_max(void) {
@@ -179,12 +179,12 @@ int hos_vi_native_interval(Ctx *c, int requested) {
        in Kokiri): paced to them, frames snapped to 33, 50 and 67 ms, the stutter, and the frame rate sat far under what the
        PC managed. With game time following the clock (the Insert menu's Real time, realtime_step), a frame is shown as soon
        as it is ready, 60 at most; the game still reads back its own interval. HOS_GAME_INTERVAL=1, or Game speed Per frame:
-       paced to the game's interval, as before */
+       paced to the game's interval, as before (the Per frame row is honored only at a cap of 60) */
     static int game_interval = -1;
     if (game_interval < 0) game_interval = getenv("HOS_GAME_INTERVAL") && atoi(getenv("HOS_GAME_INTERVAL")) != 0;
     int rx_option(int id, int otherwise);
     const int clamped = requested < 1 ? 1 : requested > 4 ? 4 : requested;
-    present_interval = game_interval || !rx_option(0, 1) ? clamped : 1;
+    present_interval = game_interval || (!rx_option(0, 1) && fps_max() == 60) ? clamped : 1;
     return requested;
 }
 /* (hookshot) The window's textures as the console's display queue has them: each present is shown at its display
@@ -286,7 +286,7 @@ volatile int hos_scene_rgba16f = 0;   /* (the scene buffer RGBA16F, not R11G11B1
 volatile uint64_t hos_step_probe = 0;   /* (f_80706be0's object, set by the lifted code when the frame-time hook is in this build; its
                                             +0xd58 is the game clock in 1/60 s: nx2/oot_patches.py) */
 volatile uint32_t hos_frame_seconds_bits = 0;   /* (the frame's seconds as a float's bits for that hook, 0: the game's own step) */
-/* A movie's frame count while the frames' time is given (a Frame rate cap above 60): how many 60ths of a second this update of
+/* A movie's frame count while the frames' time is given (a Frame rate cap other than 60): how many 60ths of a second this update of
    that movie player is worth, the rest carried to its next one, so the count the cutscene's cues are placed by keeps the clock
    as the movie's picture does (issue 1742: the narration ran ahead above 60 fps). 1, the game's own step, otherwise, and with
    HOS_FPS_MOVIE=0 (for comparisons). Called by the lifted f_83b7c710 (nx2/oot_patches.py).
@@ -297,7 +297,7 @@ volatile uint32_t hos_frame_seconds_bits = 0;   /* (the frame's seconds as a flo
    lose that time instead, and the cues would come late, as they do at a cap of 60 under 60 fps. */
 uint32_t hos_movie_frames(uint64_t player) {
     enum { PLACES = 16 };
-    /* (hookshot, issue #73: a movie player just updated - fps_refresh watches this and paces the movie, above. First
+    /* (hookshot: a movie player just updated - fps_refresh watches this and paces the movie, above. First
        thing, before the frame time is read: at the console's cap the bits are 0 and the return below is the movie's
        normal path - it still needs the pacing) */
     __atomic_store_n(&movie_seen_at, (uint64_t)hos_now_ns(), __ATOMIC_RELAXED);
@@ -366,6 +366,7 @@ static int realtime_rate(double ratio, int maximum, double *carry) {
 }
 static void realtime_step(int64_t now) {
     fps_refresh();   /* (the menu's Game frame rate cap, in play: this present and the pacing after it run at it) */
+    int rx_option(int id, int otherwise);
     /* (Resolution 100% from the start: the fixed path skipped the dynamic block from the first frame, its fields stayed
        unset and the 3D came out black. The dynamic path runs a few frames first, as when the menu turns it on in game) */
     static int ocr_fps_target = -1;   /* (Ocarina Reborn: the FPS target, engine_v21.py apply_dynres) */
@@ -459,23 +460,24 @@ static void realtime_step(int64_t now) {
             clock_before = game_clock, at_before = now;
         }
         if (target && *limit > 0 && *limit < target) *limit = target;
-        /* (the cap raises the limiter; it comes down in play: the game's own value back, the one it had when the cap raised it,
-           unless the game has written its own since) */
-        static int raised, game_limit;
-        if (fps_max() > 60 && *limit > 0 && *limit < fps_max()) {
-            if (*limit != raised) game_limit = *limit;
-            *limit = raised = fps_max();
-        } else if (raised && *limit == raised && fps_max() < raised) {
-            *limit = fps_max() > 60 ? fps_max() : game_limit;
-            raised = fps_max() > 60 ? fps_max() : 0;
+        /* (the cap moves the limiter, up past 60 or down to 30; it changes in play: back at 60 the game's own value returns,
+           the one it had when the cap moved it, unless the game has written its own since) */
+        static int moved, game_limit;
+        const int cap = fps_max();
+        if ((cap > 60 && *limit > 0 && *limit < cap) || (cap == 30 && *limit > 30)) {
+            if (*limit != moved) game_limit = *limit;
+            *limit = moved = cap;
+        } else if (moved && *limit == moved && cap != moved) {
+            *limit = cap > 60 ? cap : game_limit;
+            moved = cap > 60 ? cap : 0;
         }
     }
-    /* (the Insert menu's Game speed "per frame": a frame is a 60th of a second of game time. Not past 60 fps: the game would run
-       faster than real time, so a cap above 60 keeps the real-time step whatever that row says) */
+    /* (the Insert menu's Game speed "per frame": a frame is a 60th of a second of game time. Only at a cap of 60: other caps
+       keep the real-time step whatever that row says, so 30 fps does not run at half speed) */
     static int slot_set;   /* (the rate this function last wrote: one over the cap is ours from before it came down) */
-    if (!rx_option(0, 1) && fps_max() <= 60) {
+    if (!rx_option(0, 1) && fps_max() == 60) {
         int *slot = (int *)GP(mod + 0x2c8);
-        __atomic_store_n(&hos_frame_seconds_bits, 0, __ATOMIC_RELAXED);   /* (the cap came down from past 60: the game's own step) */
+        __atomic_store_n(&hos_frame_seconds_bits, 0, __ATOMIC_RELAXED);   /* (the cap came back to 60: the game's own step) */
         if ((*slot >= 15 && *slot <= 60) || (slot_set && *slot == slot_set)) *slot = slot_set = 60;
         return;
     }
@@ -496,15 +498,16 @@ static void realtime_step(int64_t now) {
     if (count < (unsigned)window) count++;
     double sum = 0;
     for (unsigned i = 0; i < count; i++) sum += samples[i];
-    /* (hookshot) A cap above 60: the engine's own rate is 60 / <whole display intervals>, and its controller puts 60 back over a
+    /* (hookshot) A cap other than 60: the engine's own rate is 60 / <whole display intervals>, and its controller puts 60 back over a
        higher +0x2c8 before the step is made from it, so every frame still stepped 1/60 s and the game ran fps / 60 times too fast.
        The step is then the frames' own time at the two places the engine makes it (nx2/oot_patches.py, hos_frame_seconds_bits):
        this same average, at most 1/15 s as below and at least 1/240 s (a 1000th uncapped: a shorter frame stepped a 240th ran the
        game fast), and the rate under it stays the engine's, 60 at most.
+       At 30 the same hook gives two 60ths per frame to the game, sound, movie cues and counters.
        HOS_FPS_STEP=0, or a lift without the hook (hos_step_probe unset): the rate up to the cap, as before */
     static int timed_step = -1;
     if (timed_step < 0) timed_step = !(getenv("HOS_FPS_STEP") && !atoi(getenv("HOS_FPS_STEP")));
-    const int timed = fps_max() > 60 && timed_step && hos_step_probe;
+    const int timed = fps_max() != 60 && timed_step && hos_step_probe;
     if (timed) {
         const double secs = sum / count, shortest = 1.0 / (fps_max() > 240 ? fps_max() : 240);
         const float f = (float)(secs > 4.0 / 60.0 ? 4.0 / 60.0 : secs < shortest ? shortest : secs);
@@ -517,7 +520,7 @@ static void realtime_step(int64_t now) {
     const int top = timed ? 60 : fps_max();
     const double ratio = sum / count * 60.0;
     int *slot = (int *)GP(mod + 0x2c8);
-    if (*slot < 15 || (*slot > fps_max() && *slot != slot_set)) {
+    if (*slot < 15 || (*slot > (fps_max() < 60 ? 60 : fps_max()) && *slot != slot_set)) {
         static int logged;
         if (!logged++) hos_log("vi: the graphics module's frame rate reads %d: no real-time step", *slot);
         return;

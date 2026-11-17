@@ -4,12 +4,12 @@ This checkout contains the actual launcher and patched engine source used by the
 
 ## Layout
 
-- `engine/`: the shipped engine source, based on Hookshot v2.2.0-rc.1, with Ocarina Reborn changes already applied. Do not apply the patch scripts to this directory again.
+- `engine/`: the shipped engine source, based on Hookshot v2.3.2, with Ocarina Reborn changes already applied. Do not apply the patch scripts to this directory again.
 - `tools/alpha/launcher/`: the Python launcher, native window procedure and interface assets.
 - `tools/alpha/exe/`: the native Windows launcher entry point and version resource.
 - `tools/alpha/hud/`: custom gameplay hooks, renderer additions and their injection scripts.
 - `tools/alpha/tests/`: Ocarina Reborn regression tests.
-- `tools/alpha/engine_v21.py`, `hud_v21.py`, `stage_alpha.py`: original patch-generation/packaging recipes. The historical filename `engine_v21.py` also covers the current v2.2 port.
+- `tools/alpha/engine_v21.py`, `hud_v21.py`, `stage_alpha.py`: original patch-generation/packaging recipes. These historical recipes target the earlier v2.2 tree. The authored v2.3.2 source is staged directly by scripts/build_from_source.ps1; do not replay old patch recipes over it.
 - `tools/alpha/licensing-server/server.py`: the earlier activation-server implementation, without production keys, licenses or its database. The released launcher uses the public-release path.
 - `data/`: public configuration only; voice recordings and tag files are not distributed.
 - `SOURCE-MANIFEST.json`: hashes tying the engine source to the released installer.
@@ -46,6 +46,6 @@ With Python 3.11 and the packages above installed, and llvm-mingw's `bin` on PAT
 python -m unittest discover -s tools/alpha/tests -v
 ```
 
-For upstream engine checks, see `engine/tests/run_all.py`. A game file is not needed for these tests. Renderer-only compilation and full game-build commands are documented in `engine/docs/development.md`.
+Historical patch-recipe tests use the pinned earlier release fixture; runtime tests read the current authored engine. For upstream engine checks, see `engine/tests/run_all.py`. A game file is not needed for these tests. Renderer-only compilation and full game-build commands are documented in `engine/docs/development.md`.
 
 The snapshot keeps existing dependency license and attribution files. The engine is GPL-3.0; see `engine/LICENSE` and `engine/NOTICE-OCARINA-REBORN.txt`. Publishing the source does not grant additional rights to third-party media or trademarks.

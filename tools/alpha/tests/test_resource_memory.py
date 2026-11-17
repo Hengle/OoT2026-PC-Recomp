@@ -30,7 +30,8 @@ class ResourceMemoryTests(unittest.TestCase):
             for n in ('vk_memory.cpp', 'vk_texture.cpp', 'vk_internal.h'):
                 p = root / 'gpu/vk' / n
                 p.parent.mkdir(parents=True, exist_ok=True)
-                shutil.copy2(ROOT / 'engine/gpu/vk' / n, p)
+                from engine_tester_fixes import historical_engine_bytes
+                p.write_bytes(historical_engine_bytes('gpu/vk/' + n))
             engine_resource_memory.apply(root)
             before = {p.relative_to(root):p.read_bytes() for p in (root/'gpu/vk').rglob('*') if p.is_file()}
             engine_resource_memory.apply(root)

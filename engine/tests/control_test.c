@@ -2,13 +2,13 @@
    Unix socket on Linux, a named pipe on Windows. A thread stands in for the game (a controller read, then a present,
    every 2 ms; draws a frame as a case sets them), and the test is the client. tests/test_control.py builds and runs it.
 
-   control_test <folder> [quit | level | mem]: the cases, quit (a child serving while the parent asks it to quit), the
-   HOS_CONTROL_MEM levels, or the memory cases at the level in the environment. (Windows: quitserve <pipe> and
-   servefail <pipe> are the children those start.) */
+   control_test <folder> [quit | level | mem | peersid]: the cases, quit (a child serving while the parent asks it to quit), the
+   HOS_CONTROL_MEM levels, or the memory cases at the level in the environment. (Windows: peersid, HOS_CONTROL_PEER_SID's
+   check; quitserve <pipe> and servefail <pipe> are the children those start.) */
 #ifndef _GNU_SOURCE
 #define _GNU_SOURCE
 #endif
-#include "../host/control.h"
+#include "control.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -189,6 +189,19 @@ static int fake_state(int *event, int *loading, int *child) {
     *event = 0, *loading = 1, *child = __atomic_load_n(&fake_child, __ATOMIC_RELAXED) ^ (stale_age != 0);
     return 1;
 }
+static uint64_t fake_sample_ask(void) { return 1; }
+static void fake_sample_cancel(uint64_t ticket) { (void)ticket; }
+static int fake_sample(uint64_t ticket, char *out, size_t cap) {
+    (void)ticket;   /* this fixture's snapshot is immediately available; the stepped sampler tests demand/cadence */
+    char map[80];
+    if (!fake_map(map, sizeof map)) return 0;
+    const int child = __atomic_load_n(&fake_child, __ATOMIC_RELAXED) ^ (stale_age != 0);
+    const int n = snprintf(out, cap,
+        "{\"t\":5.0,\"frame\":%lld,\"map\":\"%s\",\"pos\":[-20.1,0,6.8],\"facing\":108.6,\"camera\":45.0,"
+        "\"event\":false,\"loading\":true,\"age\":\"%s\",\"life\":12,\"max_life\":16,\"rupees\":7,"
+        "\"prompt\":\"Open\",\"music\":\"TestMusic\"}", (long long)fake_frame(), map, child ? "child" : "adult");
+    return n >= 0 && (size_t)n < cap;
+}
 static int fake_teleport(int i) {
     if (i < 0 || i >= 3) return 0;
     log_lock();
@@ -226,7 +239,8 @@ static HosControlGame game = {
     .mem_write = fake_mem_write, .save_root = fake_save_root, .log = fake_log, .quit = fake_quit,
     .renderer = fake_renderer, .version = "test", .map = fake_map, .destination = fake_destination,
     .teleport = fake_teleport, .teleport_result = fake_teleport_result, .teleport_cancel = fake_teleport_cancel,
-    .age = fake_age, .oot_state = fake_state};
+    .age = fake_age, .oot_state = fake_state, .oot_sample_ask = fake_sample_ask,
+    .oot_sample_cancel = fake_sample_cancel, .oot_sample = fake_sample};
 
 static void *game_thread(void *unused) {
     (void)unused;
@@ -563,7 +577,8 @@ static void mem_case(const char *folder) {
 }
 
 #ifdef _WIN32
-/* The pipe's DACL, read back through a client's handle: protected, one ACE, allowing this user alone */
+/* The pipe's DACL, read back through a client's handle: protected, one ACE, allowing this user alone (this run has no
+   HOS_CONTROL_PEER_SID and no AppContainer) */
 static void dacl_case(Client *c) {
     PACL dacl = NULL;
     PSECURITY_DESCRIPTOR sd = NULL;
@@ -584,6 +599,40 @@ static void dacl_case(Client *c) {
     LocalFree(sd);
     puts("PASS: the pipe's DACL: protected, one ACE, this user alone");
 }
+
+/* HOS_CONTROL_PEER_SID's check (host/control.c): a user's own SID, canonical, never a group or a well-known account */
+int hos_control_peer_sid_check(const char *s, char *why, size_t cap);   /* (host/control.c) */
+static void peer_sid_unit(void) {
+    static const char *const refused[] = {
+        NULL, "", "junk", "WD", "AU", "BU", "BA", "S-1-1-0", "S-1-5-11", "S-1-5-32-545", "S-1-5-32-544", "S-1-5-18",
+        "S-1-15-2-1", "S-1-5-21-1-2-3-500", "S-1-5-21-1-2-3-513", "S-1-5-21-1-2-1001", "S-1-5-21-1-2-3-4-1001",
+        " S-1-5-21-1-2-3-1001", "S-1-5-21-1-2-3-1001 ", "S-1-5-21-01-2-3-1001", "s-1-5-21-1-2-3-1001",
+        "S-1-5-21-1-2-3-1001;", "S-1-5-21-1-2-3-1001)(A;;GA;;;WD"};
+    char why[160];
+    for (unsigned i = 0; i < sizeof refused / sizeof *refused; i++) {
+        why[0] = 0;
+        CHECK(!hos_control_peer_sid_check(refused[i], why, sizeof why) && why[0]);
+    }
+    CHECK(!hos_control_peer_sid_check("S-1-1-0", why, sizeof why) && strstr(why, "Everyone"));
+    CHECK(!hos_control_peer_sid_check("S-1-5-32-544", why, sizeof why) && strstr(why, "Administrators"));
+    HANDLE token;
+    CHECK(OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &token));
+    DWORD64 info[64];
+    DWORD len = 0;
+    CHECK(GetTokenInformation(token, TokenUser, info, sizeof info, &len));
+    CloseHandle(token);
+    char *me = NULL;
+    CHECK(ConvertSidToStringSidA(((TOKEN_USER *)info)->User.Sid, &me));
+    PSID sid = ((TOKEN_USER *)info)->User.Sid;
+    if (!strncmp(me, "S-1-5-21-", 9) && *GetSidSubAuthorityCount(sid) == 5 && *GetSidSubAuthority(sid, 4) >= 1000) {
+        CHECK(hos_control_peer_sid_check(me, why, sizeof why));
+        puts("PASS: HOS_CONTROL_PEER_SID: this user's SID taken; groups, well-known and odd forms refused");
+    } else {
+        puts("PASS: HOS_CONTROL_PEER_SID: groups, well-known and odd forms refused (this user's SID is not a plain user's: "
+             "the accepting half skipped)");
+    }
+    LocalFree(me);
+}
 #endif
 
 int main(int argc, char **argv) {
@@ -599,6 +648,9 @@ int main(int argc, char **argv) {
         snprintf(sock_path, sizeof sock_path, "%s", argv[3]);
         return hos_control_serve(sock_path, &game) ? 0 : 3;
     }
+#endif
+#ifdef _WIN32
+    if (argc > 2 && !strcmp(argv[2], "peersid")) return peer_sid_unit(), 0;
 #endif
     if (argc > 2 && !strcmp(argv[2], "quit")) return quit_case(argv[1]), 0;
     if (argc > 2 && !strcmp(argv[2], "level")) return level_unit(), 0;
@@ -991,7 +1043,10 @@ int main(int argc, char **argv) {
         wait_frames(5);
         ask(c, "{\"id\":78,\"cmd\":\"status\"}\n", "78", line, sizeof line, 2000);
         CHECK(strstr(line, "\"map\":\"KokiriForest_Child\"") &&
-              strstr(line, "\"game\":{\"event\":false,\"loading\":true,\"age\":\"child\"}"));
+              strstr(line, "\"game\":{\"t\":5.0,\"frame\":") &&
+              strstr(line, "\"pos\":[-20.1,0,6.8],\"facing\":108.6,\"camera\":45.0") &&
+              strstr(line, "\"event\":false,\"loading\":true,\"age\":\"child\"") &&
+              strstr(line, "\"life\":12,\"max_life\":16,\"rupees\":7,\"prompt\":\"Open\",\"music\":\"TestMusic\"}"));
         /* the age switch: none is the other age, and the reply has it and the map it reloads; to the age Link has already:
            said, nothing done; anything but child or adult: a bad request */
         ask(c, "{\"id\":79,\"cmd\":\"age\",\"to\":\"teen\"}\n", "79", line, sizeof line, 2000);

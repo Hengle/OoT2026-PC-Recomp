@@ -4,7 +4,8 @@
 
    Off unless HOS_CONTROL is set. Linux: a Unix domain socket at that path, made 0600 (the umask around bind too), never
    over an existing file that is not a socket, and a client of another user is turned away (SO_PEERCRED). Windows: a named
-   pipe (\\.\pipe\<name>; a name without the prefix gets it), its DACL the current user's alone, remote clients refused.
+   pipe (\\.\pipe\<name>; a name without the prefix gets it), its DACL the current user's alone (and the game's
+   AppContainer's when it runs in one, and HOS_CONTROL_PEER_SID's user when that is set), remote clients refused.
    There is no TCP. The guest's memory is read or written only with a second opt-in, HOS_CONTROL_MEM (ro, rw).
 
    Newline-delimited JSON: one request object a line ({"id": ..., "cmd": "status", ...}), one reply a line with the id
@@ -51,7 +52,7 @@
 
 #define CTL_LINE_MAX 65536            /* a request longer than this is refused (too_long) */
 #define CTL_OUT_MAX (8u << 20)        /* a client that reads nothing while this much waits for it is let go */
-#define CTL_CONNS 8
+#define CTL_CONNS HOS_CONTROL_OOT_CLIENTS
 #define CTL_PENDING 64
 #define CTL_INPUTS 256
 #define CTL_LOG_RING 256
@@ -303,13 +304,13 @@ typedef struct Conn {
     int closing;
     int eof;   /* (the client shut its sending side: no more requests; the connection lasts until its replies are out) */
     /* subscribe */
-    int sub_on, sub_present, sub_state, sub_log, sub_map;
+    int sub_on, sub_present, sub_state, sub_log, sub_map, sub_oot;
     int64_t sub_every, sub_next;
     char sub_id[256], sub_filter[256];
     unsigned log_seen;   /* (the log ring's count it has seen) */
 } Conn;
 
-enum { P_INPUT = 1, P_WAIT, P_SHOT, P_MEM, P_TELEPORT };
+enum { P_INPUT = 1, P_WAIT, P_SHOT, P_MEM, P_TELEPORT, P_STATUS };
 enum { W_FRAME = 1, W_STATE, W_LOADING_START, W_LOADING_END, W_CHANGE, W_MAP };
 typedef struct {
     int used, conn, gen, kind;
@@ -321,6 +322,7 @@ typedef struct {
     int mem_slot;   /* P_MEM */
     int dest;       /* P_TELEPORT: the destination (token: the game's ticket); -1 the age switch's */
     int adult_to;   /* P_TELEPORT for the age switch: 1 to the adult, 0 to the child */
+    uint64_t sample_ticket;   /* P_STATUS: coalesced next-Link-update snapshot */
 } Pending;
 
 typedef struct {
@@ -364,7 +366,6 @@ static struct {
     int64_t replayed;   /* the renderer's presents (shots count in these) */
     char map[80];       /* the map the game is in, the last one known ("" before any); map_changes: how often it changed */
     int map_changes;
-    int have_oot, oot_event, oot_loading, oot_child;   /* (with the map: hos_oot_state) */
     /* log lines for subscribers (any thread writes; the bridge's thread reads) */
     ctl_mutex log_mu;
     char log_ring[CTL_LOG_RING][400];
@@ -493,7 +494,6 @@ static void stats_tick(int64_t now) {
         memcpy(G.map, map, sizeof G.map);
         G.map_changes++;
     }
-    G.have_oot = G.game->oot_state && G.game->oot_state(&G.oot_event, &G.oot_loading, &G.oot_child);
     const int at = G.sample_at;
     G.samples[at].t = now, G.samples[at].frame = frame, G.samples[at].replayed = replayed, G.samples[at].draws = draws;
     G.sample_at = (at + 1) % 16;
@@ -882,8 +882,37 @@ static int exclusive_now(int *active) {
     *active = n;
     return ex;
 }
-static void cmd_status(int ci, const char *id) {
-    const int64_t now = ctl_now_ns();
+/* Protocol 1's three original fields stay typed even when a sampled guest read failed. */
+static void status_game(Buf *b, const char *sample) {
+    int event = 0, loading = 0, child = 0;
+    const int have = G.game->oot_state && G.game->oot_state(&event, &loading, &child);
+    if (!sample) {
+        if (have) buf_printf(b, "{\"event\":%s,\"loading\":%s,\"age\":\"%s\"}",
+                             event ? "true" : "false", loading ? "true" : "false", child ? "child" : "adult");
+        else buf_puts(b, "null");
+        return;
+    }
+    static JDoc d;
+    static char strings[HOS_CONTROL_OOT_JSON];
+    const int root = j_parse(&d, sample, strlen(sample), strings);
+    if (root < 0) { buf_puts(b, "null"); return; }
+    const char *keys[] = {"event", "loading", "age"};
+    int changed = 0;
+    for (int i = 0; i < 3; i++) {
+        const JNode *n = j_get(&d, root, keys[i]);
+        if (!n || n->type != J_NULL) continue;
+        if (!have) { buf_puts(b, "null"); return; }
+        JNode *value = &d.n[j_index(&d, n)];
+        value->type = i == 2 ? J_STR : (i == 0 ? event : loading) ? J_TRUE : J_FALSE;
+        if (i == 2) value->s = child ? "child" : "adult";
+        changed = 1;
+    }
+    if (changed) j_write(b, &d, root);
+    else buf_puts(b, sample);
+}
+
+static void status_reply(int ci, const char *id, const char *sample, int64_t now) {
+    stats_tick(now);   /* the reply's frame must not precede the snapshot just copied */
     int active = 0, clients = 0;
     const int ex = exclusive_now(&active);
     for (int i = 0; i < CTL_CONNS; i++) clients += G.conns[i].used;
@@ -900,10 +929,8 @@ static void cmd_status(int ci, const char *id) {
     buf_puts(&b, ",\"map\":");
     if (G.map[0]) buf_str(&b, G.map);
     else buf_puts(&b, "null");
-    if (G.have_oot)
-        buf_printf(&b, ",\"game\":{\"event\":%s,\"loading\":%s,\"age\":\"%s\"}", G.oot_event ? "true" : "false",
-                   G.oot_loading ? "true" : "false", G.oot_child ? "child" : "adult");
-    else buf_puts(&b, ",\"game\":null");
+    buf_puts(&b, ",\"game\":");
+    status_game(&b, sample);
     buf_puts(&b, ",\"version\":");
     buf_str(&b, G.game->version ? G.game->version : "unknown");
     const char *r = G.game->renderer ? G.game->renderer() : NULL;
@@ -911,6 +938,23 @@ static void cmd_status(int ci, const char *id) {
     if (r) buf_str(&b, r);
     else buf_puts(&b, "null");
     reply_end(&G.conns[ci], &b);
+}
+static void cmd_status(int ci, const char *id) {
+    if (!G.game->oot_sample_ask || !G.game->oot_sample || !G.game->oot_sample_cancel)
+        return status_reply(ci, id, NULL, ctl_now_ns());
+    Pending *p = pending_new(ci, id, P_STATUS);
+    if (!p) return reply_error(&G.conns[ci], id, "busy", "too many requests waiting");
+    p->sample_ticket = G.game->oot_sample_ask();
+    p->deadline = ctl_now_ns() + 250000000;   /* no Link update (title/pause/load): keep the old sample's date */
+}
+static int status_done(Pending *p, int64_t now) {
+    static char sample[HOS_CONTROL_OOT_JSON];   /* this thread only; no large scratch stack on every pending tick */
+    int have = G.game->oot_sample(p->sample_ticket, sample, sizeof sample);
+    if (!have && now < p->deadline) return 0;
+    G.game->oot_sample_cancel(p->sample_ticket);
+    if (!have) have = G.game->oot_sample(0, sample, sizeof sample);
+    status_reply(p->conn, p->id, have ? sample : NULL, now);
+    return 1;
 }
 
 /* ---- wait ---- */
@@ -1175,9 +1219,31 @@ static void log_wanted_update(void) {   /* (log lines are copied only while some
         any_log |= G.conns[i].used && !G.conns[i].closing && G.conns[i].sub_on && G.conns[i].sub_log;
     G.log_wanted = any_log;
 }
+static int oot_watch_args(const JDoc *d, int req, HosControlOotWatch *watch) {
+    const JNode *flags = j_get(d, req, "flags"), *changes = j_get(d, req, "changes");
+    if (changes && changes->type != J_TRUE && changes->type != J_FALSE) return 0;
+    watch->changes = changes && changes->type == J_TRUE;
+    if (!flags) return 1;
+    if (flags->type != J_ARR) return 0;
+    for (int k = flags->first; k >= 0; k = d->n[k].next) {
+        const char *s = d->n[k].type == J_STR ? d->n[k].s : NULL;
+        const size_t n = s ? strlen(s) : 0;
+        if (!n || n >= sizeof watch->flags[0] || watch->nflags == HOS_CONTROL_OOT_FLAGS) return 0;
+        for (size_t j = 0; j < n; j++)
+            if (!((s[j] >= 'a' && s[j] <= 'z') || (s[j] >= 'A' && s[j] <= 'Z') ||
+                  (s[j] >= '0' && s[j] <= '9') || s[j] == '_' || s[j] == '.')) return 0;
+        if (s[0] == '0' && s[1] == 'x') {
+            if (n != 10) return 0;
+            for (size_t j = 2; j < n; j++)
+                if (!isxdigit((unsigned char)s[j])) return 0;
+        }
+        memcpy(watch->flags[watch->nflags++], s, n + 1);
+    }
+    return 1;
+}
 static void cmd_subscribe(int ci, const JDoc *d, int req, const char *id) {
     Conn *c = &G.conns[ci];
-    int present = 1, state = 1, log = 0, map = 0, bad = 0;
+    int present = 1, state = 1, log = 0, map = 0, oot = 0, bad = 0;
     const JNode *ev = j_get(d, req, "events");
     if (ev && ev->type == J_ARR) {
         present = state = 0;
@@ -1187,13 +1253,23 @@ static void cmd_subscribe(int ci, const JDoc *d, int req, const char *id) {
             else if (!strcmp(s, "state")) state = 1;
             else if (!strcmp(s, "log")) log = 1;
             else if (!strcmp(s, "map")) map = 1;
-            else return reply_error(c, id, "bad_request", "events: present, state, log, map");
+            else if (!strcmp(s, "oot")) oot = 1;
+            else return reply_error(c, id, "bad_request", "events: present, state, log, map, oot");
         }
-    } else if (ev) return reply_error(c, id, "bad_request", "events: a list (present, state, log, map)");
+    } else if (ev) return reply_error(c, id, "bad_request", "events: a list (present, state, log, map, oot)");
     const char *filter = str_arg(d, req, "log");
     if (filter) log = 1;
     const int64_t every = whole(num_arg(d, req, "every", 60, &bad));
     if (bad || every < 1 || every > 216000) return reply_error(c, id, "bad_request", "every: 1 to 216000 frames");
+    HosControlOotWatch watch = {.every = every};
+    if (!oot_watch_args(d, req, &watch))
+        return reply_error(c, id, "bad_request", "flags: up to 64 names (1 to 47 letters, digits, _ or .) or 0x and 8 hex digits; changes: boolean");
+    if (!oot && (j_get(d, req, "flags") || j_get(d, req, "changes")))
+        return reply_error(c, id, "bad_request", "flags and changes need events:[\"oot\"]");
+    if (oot && (!G.game->oot_watch || !G.game->oot_poll))
+        return reply_error(c, id, "unavailable", "OoT sampling is not available");
+    if (G.game->oot_watch) G.game->oot_watch(ci, oot ? &watch : NULL);
+    c->sub_oot = oot;
     c->sub_on = 1, c->sub_present = present, c->sub_state = state, c->sub_log = log, c->sub_map = map, c->sub_every = every;
     c->sub_next = G.frame + every;
     snprintf(c->sub_id, sizeof c->sub_id, "%s", id);
@@ -1205,9 +1281,9 @@ static void cmd_subscribe(int ci, const JDoc *d, int req, const char *id) {
     Buf b = {0};
     reply_start(&b, id, 1);
     buf_puts(&b, ",\"events\":[");
-    const char *names[4] = {"present", "state", "log", "map"};
-    const int on[4] = {present, state, log, map};
-    for (int k = 0, n = 0; k < 4; k++)
+    const char *names[5] = {"present", "state", "log", "map", "oot"};
+    const int on[5] = {present, state, log, map, oot};
+    for (int k = 0, n = 0; k < 5; k++)
         if (on[k]) buf_printf(&b, "%s\"%s\"", n++ ? "," : "", names[k]);
     buf_printf(&b, "],\"every\":%lld", (long long)every);
     reply_end(c, &b);
@@ -1223,6 +1299,14 @@ static void subs_tick(void) {
             if (G.have_draws) buf_printf(&c->out, ",\"draws\":%.1f", G.draws);
             if (G.map[0]) buf_puts(&c->out, ",\"map\":"), buf_str(&c->out, G.map);
             buf_puts(&c->out, "}\n");
+        }
+        if (c->sub_oot) {
+            char sample[HOS_CONTROL_OOT_JSON];
+            if (G.game->oot_poll(i, sample, sizeof sample)) {
+                buf_printf(&c->out, "{\"event\":\"oot\",\"sub\":%s,\"frame\":%lld,\"game\":", c->sub_id, (long long)G.frame);
+                buf_puts(&c->out, sample);
+                buf_puts(&c->out, "}\n");
+            }
         }
         if (c->sub_log) {
             ctl_lock(&G.log_mu);
@@ -1795,6 +1879,7 @@ static void request(int ci, const char *line, size_t len) {
     else if (!strcmp(cmd, "subscribe")) cmd_subscribe(ci, &d, req, id);
     else if (!strcmp(cmd, "unsubscribe")) {
         c->sub_on = 0;
+        if (G.game->oot_watch) G.game->oot_watch(ci, NULL);
         log_wanted_update();
         reply_ok(c, id);
     } else if (!strcmp(cmd, "quit")) cmd_quit(ci, id);
@@ -1830,6 +1915,7 @@ static void conn_feed(int ci, const char *data, size_t n) {
 }
 
 static void conn_reset(Conn *c) {
+    if (G.game->oot_watch) G.game->oot_watch((int)(c - G.conns), NULL);
     free(c->in);
     buf_free(&c->out);
     const int gen = c->gen;
@@ -1848,6 +1934,7 @@ static void pending_drop(Pending *p) {
         if (m->used && m->token == p->token) free(m->buf), m->used = 0;
         ctl_unlock(&G.mu);
     } else if (p->kind == P_TELEPORT && G.game->teleport_cancel) G.game->teleport_cancel(p->token);
+    else if (p->kind == P_STATUS) G.game->oot_sample_cancel(p->sample_ticket);
     p->used = 0;
 }
 /* a client gone: what it waited for is dropped, its inputs let go */
@@ -1858,6 +1945,7 @@ static void conn_gone(int ci) {
         if (p->used && p->conn == ci && p->gen == c->gen) pending_drop(p);
     }
     c->sub_on = 0;
+    if (G.game->oot_watch) G.game->oot_watch((int)(c - G.conns), NULL);
     log_wanted_update();
 }
 
@@ -1872,7 +1960,7 @@ static void pending_tick(int64_t now) {
         }
         const int done = p->kind == P_INPUT ? input_done(p, c, now) : p->kind == P_WAIT ? wait_done(p, c, now)
                        : p->kind == P_MEM ? mem_finished(p, c, now) : p->kind == P_TELEPORT ? teleport_done(p, c, now)
-                       : shot_finished(p, c, now);
+                       : p->kind == P_STATUS ? status_done(p, now) : shot_finished(p, c, now);
         if (done) p->used = 0;
     }
 }
@@ -1882,6 +1970,7 @@ static void pending_tick(int64_t now) {
    closed once what it waits for is answered and sent */
 static void conn_eof(Conn *c) {
     c->eof = 1, c->sub_on = 0;
+    if (G.game->oot_watch) G.game->oot_watch((int)(c - G.conns), NULL);
     log_wanted_update();
 }
 static int conn_waiting(int ci) {
@@ -2047,19 +2136,102 @@ static void linger(HANDLE h) {
     CloseHandle(h);
 }
 
-static int pipe_security(void) {   /* a DACL with the current user alone */
+/* HOS_CONTROL_PEER_SID: one more account the pipe lets in (read and write, as a client), for a game run as another
+   account than its driver's (the Beanstalk agent's runner account). Only a user's own SID: S-1-5-21-<3 numbers>-<RID>,
+   canonical (the string ConvertSidToStringSid gives back, nothing else), a RID of 1000 or more (the well-known
+   accounts and groups of a machine or a domain are below), and the account a user's (LookupAccountSid). Never a group:
+   the well-known ones below are named in the log line. 1 ok; 0 refused, why says so */
+static const char *const peer_sid_refused[][2] = {
+    {"S-1-1-0", "Everyone"}, {"S-1-5-11", "Authenticated Users"}, {"S-1-5-32-545", "Users"},
+    {"S-1-5-32-544", "Administrators"}, {"S-1-5-32-546", "Guests"}, {"S-1-5-4", "Interactive"},
+    {"S-1-5-7", "Anonymous Logon"}, {"S-1-5-18", "SYSTEM"}, {"S-1-2-0", "Local"}, {"S-1-15-2-1", "ALL APPLICATION PACKAGES"},
+};
+int hos_control_peer_sid_check(const char *s, char *why, size_t cap) {
+    if (!s || !*s || strlen(s) > 184) return snprintf(why, cap, "not a SID"), 0;
+    PSID sid = NULL;
+    if (!ConvertStringSidToSidA(s, &sid)) return snprintf(why, cap, "not a SID"), 0;
+    int ok = 0;
+    char *back = NULL;
+    if (!IsValidSid(sid)) {
+        snprintf(why, cap, "not a valid SID");
+        goto done;
+    }
+    for (size_t i = 0; i < sizeof peer_sid_refused / sizeof *peer_sid_refused; i++) {
+        PSID group = NULL;
+        const int same = ConvertStringSidToSidA(peer_sid_refused[i][0], &group) && EqualSid(sid, group);
+        if (group) LocalFree(group);
+        if (same) {
+            snprintf(why, cap, "%s (%s) is a group, not one user", peer_sid_refused[i][1], peer_sid_refused[i][0]);
+            goto done;
+        }
+    }
+    if (!ConvertSidToStringSidA(sid, &back) || strcmp(back, s)) {   /* (an SDDL alias, leading zeros, hex, spaces, ...) */
+        snprintf(why, cap, "not a SID written as Windows writes it");
+        goto done;
+    }
+    if (strncmp(s, "S-1-5-21-", 9) || *GetSidSubAuthorityCount(sid) != 5) {
+        snprintf(why, cap, "not a user's SID (S-1-5-21-...)");
+        goto done;
+    }
+    if (*GetSidSubAuthority(sid, 4) < 1000) {
+        snprintf(why, cap, "a well-known account or group (RID %lu), not a user of this PC", (unsigned long)*GetSidSubAuthority(sid, 4));
+        goto done;
+    }
+    char name[256], domain[256];
+    DWORD nn = sizeof name, dn = sizeof domain;
+    SID_NAME_USE use;
+    if (!LookupAccountSidA(NULL, sid, name, &nn, domain, &dn, &use)) {
+        snprintf(why, cap, "no such account here (%lu)", GetLastError());
+        goto done;
+    }
+    if (use != SidTypeUser) {
+        snprintf(why, cap, "a group or other non-user account (type %d)", (int)use);
+        goto done;
+    }
+    ok = 1;
+done:
+    if (back) LocalFree(back);
+    LocalFree(sid);
+    return ok;
+}
+
+/* The pipe's DACL: the current user (full); the game's AppContainer, when its token is one (full: a pipe's next instance
+   is checked against the pipe's DACL with the creator's token, and an AppContainer's access check needs its own SID
+   granted besides its user's); HOS_CONTROL_PEER_SID's account (GRGW: to connect as a client) */
+static int pipe_security(void) {
     HANDLE token;
     if (!OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &token)) return 0;
-    char info[256];
+    DWORD64 info[64];   /* (a SID is at most 68 bytes) */
     DWORD len = 0;
-    const BOOL got = GetTokenInformation(token, TokenUser, info, sizeof info, &len);
+    char *user = NULL, *ac = NULL;
+    if (!GetTokenInformation(token, TokenUser, info, sizeof info, &len) ||
+        !ConvertSidToStringSidA(((TOKEN_USER *)info)->User.Sid, &user))
+        return CloseHandle(token), 0;
+    DWORD is_ac = 0;
+    if (GetTokenInformation(token, TokenIsAppContainer, &is_ac, sizeof is_ac, &len) && is_ac) {
+        const TOKEN_APPCONTAINER_INFORMATION *t = (const TOKEN_APPCONTAINER_INFORMATION *)info;
+        if (!GetTokenInformation(token, TokenAppContainerSid, info, sizeof info, &len) || !t->TokenAppContainer ||
+            !ConvertSidToStringSidA(t->TokenAppContainer, &ac)) {
+            ctl_log("control: an AppContainer token whose SID could not be read (%lu)", GetLastError());
+            CloseHandle(token), LocalFree(user);
+            return 0;
+        }
+    }
     CloseHandle(token);
-    if (!got) return 0;
-    char *sid = NULL;
-    if (!ConvertSidToStringSidA(((TOKEN_USER *)info)->User.Sid, &sid)) return 0;
-    char sddl[300];
-    snprintf(sddl, sizeof sddl, "D:P(A;;GA;;;%s)", sid);
-    LocalFree(sid);
+    char sddl[700];
+    int n = snprintf(sddl, sizeof sddl, "D:P(A;;GA;;;%s)", user);
+    if (ac) n += snprintf(sddl + n, sizeof sddl - n, "(A;;GA;;;%s)", ac), LocalFree(ac);
+    const char *peer = getenv("HOS_CONTROL_PEER_SID");
+    if (peer && *peer) {
+        char why[160];
+        if (!hos_control_peer_sid_check(peer, why, sizeof why))
+            ctl_log("control: HOS_CONTROL_PEER_SID refused: %s; the pipe stays this user's alone", why);
+        else if (strcmp(peer, user)) {
+            snprintf(sddl + n, sizeof sddl - n, "(A;;GRGW;;;%s)", peer);
+            ctl_log("control: the pipe lets in HOS_CONTROL_PEER_SID's account too");
+        }
+    }
+    LocalFree(user);
     PSECURITY_DESCRIPTOR sd = NULL;
     if (!ConvertStringSecurityDescriptorToSecurityDescriptorA(sddl, SDDL_REVISION_1, &sd, NULL)) return 0;
     pipe_sa.nLength = sizeof pipe_sa, pipe_sa.lpSecurityDescriptor = sd, pipe_sa.bInheritHandle = FALSE;
@@ -2232,7 +2404,7 @@ int hos_control_serve(const char *path, const HosControlGame *game) {
         const char *name = !strncmp(path, "\\\\.\\pipe\\", 9) ? path + 9 : path;
         char tmp[MAX_PATH + 1];
         const DWORD n = GetTempPathA(sizeof tmp, tmp);
-        snprintf(G.base_dir, sizeof G.base_dir, "%.*shookshot-control-", (int)(n && n < sizeof tmp ? n : 0), tmp);
+        snprintf(G.base_dir, sizeof G.base_dir, "%.*socarina_reborn-control-", (int)(n && n < sizeof tmp ? n : 0), tmp);
         size_t k = strlen(G.base_dir);
         for (const char *q = name; *q && k + 2 < sizeof G.base_dir; q++)   /* (a pipe name may hold characters a folder cannot) */
             G.base_dir[k++] = isalnum((unsigned char)*q) || *q == '-' || *q == '_' || *q == '.' ? *q : '_';
@@ -2322,13 +2494,20 @@ int hos_oot_teleport_result(int ticket, char *why, size_t why_cap, char *map, si
 void hos_oot_teleport_cancel(int ticket);
 int hos_oot_age_ask(int adult);
 int hos_oot_state(int *event, int *loading, int *child);
+uint64_t hos_oot_sample_ask(void);
+void hos_oot_sample_cancel(uint64_t ticket);
+int hos_oot_sample(uint64_t ticket, char *out, size_t cap);
+void hos_oot_watch(int slot, const HosControlOotWatch *watch);
+int hos_oot_poll(int slot, char *out, size_t cap);
 static HosControlGame game = {
     .frame = game_frame, .frame_info = rx_control_frame_info, .shot = rx_control_shot, .setting = rx_control_setting,
     .setting_set = rx_control_setting_set, .mem_region = game_mem_region, .mem_read = game_mem_read,
     .mem_write = game_mem_write, .save_root = game_save_root, .log = game_log, .quit = game_quit,
     .renderer = game_renderer, .map = hos_oot_current_map, .destination = hos_oot_destination,
     .teleport = hos_oot_teleport_ask, .teleport_result = hos_oot_teleport_result,
-    .teleport_cancel = hos_oot_teleport_cancel, .age = hos_oot_age_ask, .oot_state = hos_oot_state};
+    .teleport_cancel = hos_oot_teleport_cancel, .age = hos_oot_age_ask, .oot_state = hos_oot_state,
+    .oot_sample_ask = hos_oot_sample_ask, .oot_sample_cancel = hos_oot_sample_cancel,
+    .oot_sample = hos_oot_sample, .oot_watch = hos_oot_watch, .oot_poll = hos_oot_poll};
 
 void hos_control_start(const char *version) {
     const char *path = getenv("HOS_CONTROL");

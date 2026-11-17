@@ -4,6 +4,7 @@
 #include "hos.h"
 #include "hos_paths.h"
 #include "hos_wide_size.h"
+#include "options_path.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -51,7 +52,7 @@ static const char *desired_language(void) {
                 if ((unsigned char)p[0] == 0xEF && (unsigned char)p[1] == 0xBB && (unsigned char)p[2] == 0xBF) p += 3;   /* (a BOM: Notepad's UTF-8) */
                 while (*p == ' ' || *p == '\t') p++;
                 if (*p == '#' || *p == '\r' || *p == '\n' || !*p) continue;
-                /* (only a code the game has: a stray line was taken before, and the game stayed in English, Hookshot issue 75) */
+                /* (only a code the game has: a stray line was taken before, and the game stayed in English) */
                 char code[32];
                 snprintf(code, sizeof code, "%s", p);
                 code[strcspn(code, " \t\r\n")] = 0;
@@ -88,15 +89,11 @@ HLE(_ZN2nn2oe18GetDesiredLanguageEv) {
    (MKW docked composes 3840 x 2160) */
 int hos_ini_option(const char *key, int otherwise);
 #define ini_option hos_ini_option
-/* (hookshot) An option's text in ocarina_reborn_options.ini, the game folder's (the Insert menu's choices, gpu/vk/vk_menu.cpp), the last
-   line that sets it, its line end cut: whether there was one */
+/* (hookshot) An option's text in ocarina_reborn_options.ini (the Insert menu's choices, gpu/vk/vk_menu.cpp; where it is:
+   host/options_path.c), the last line that sets it, its line end cut: whether there was one */
 static int ini_text(const char *key, char *out, size_t size) {
-    char path[MAX_PATH];
-    const DWORD n = hos_game_path_a(path, MAX_PATH);
-    char *slash = n ? (strrchr(path, 92) ? strrchr(path, 92) : strrchr(path, 47)) : NULL;   /* (linux: '/'; the game folder's, not bin\\'s) */
-    if (!slash || !size) return 0;
-    snprintf(slash + 1, (size_t)(path + MAX_PATH - slash - 1), "ocarina_reborn_options.ini");
-    FILE *f = fopen(path, "r");
+    if (!size) return 0;
+    FILE *f = fopen(hos_options_file(), "r");
     if (!f) return 0;
     char line[80];
     const size_t len = strlen(key);
@@ -126,8 +123,10 @@ static int handheld(void) {
    where they are not known 1920x1080, 2560x1440, 3840x2160, 5120x1440 and 5120x2880), and any other size as its own choice. The numbers it saved before are read as their sizes: 0 the game's
    2048 x 1152, 1 2560 x 1440, 2 3840 x 2160, 3 1920 x 1080, 4 5120 x 1440, 5 5120 x 2880. The game's frame is its display size
    (2560 x 1440 as shipped; nx2/oot_patches.py apply_output_size asks hos_output_size) times its graphics scale
-   (GetCurrentGraphicsScale: 0 x1, 1 x0.8, 2 x0.667). Here it saw scale 1 (x0 left at the call before's answer), so 2048 x 1152,
-   the game's own, which 2048x1152 asks for; each other size uses x1. */
+   (GetCurrentGraphicsScale's tier: 0 x1, 1 x0.8, 2 x0.667). The tier is not the operation mode: the console's library maps
+   the system's graphics scaling parameter (10, 20, 30) to it, and 0 is the full picture. 2048x1152 asks for tier 1, the game's
+   own reduced size (what every run drew before, from x0 left at the call before's answer); each other size, and none chosen
+   (hos_output_default), uses tier 0. */
 int hos_output_parse(const char *text, uint32_t *w, uint32_t *h) {   /* (an explicit size: 1, and *w x *h; the game's own: 0) */
     static const uint32_t old[][2] = {{0, 0}, {2560, 1440}, {3840, 2160}, {1920, 1080}, {5120, 1440}, {5120, 2880}};
     unsigned a = 0, b = 0;
@@ -158,9 +157,21 @@ static int output_mode(void) {   /* (an explicit size: 1; the game's own: 0) */
         read = 1;
         char text[80] = "";
         const char *e = getenv("HOS_OUTPUT_RES");
-        if (!handheld() && (e || ini_text("output_res", text, sizeof text))) hos_output_parse(e ? e : text, &output_w, &output_h);
-        if (output_w) hos_log("oe: output resolution %ux%u", output_w, output_h);
-        else hos_log("oe: output resolution 2048x1152 (the game's)");
+        const int chosen = e || ini_text("output_res", text, sizeof text);
+        if (!handheld() && chosen) hos_output_parse(e ? e : text, &output_w, &output_h);
+        /* (none chosen, a new install: the game's 2560 x 1440, or the screen's size where that has fewer pixels,
+           hos_output_default; the menu's first start saves the same. A 2048 x 1152 screen: the game's own reduced size, as
+           hos_output_parse reads what the menu saves for it. The window's thread made the window before the game's thread
+           starts: the screen is known) */
+        const int sw = GetSystemMetrics(SM_CXSCREEN), sh = GetSystemMetrics(SM_CYSCREEN);
+        const int fresh = !handheld() && !chosen;
+        if (fresh) hos_output_default(sw > 0 ? (uint32_t)sw : 0, sh > 0 ? (uint32_t)sh : 0, &output_w, &output_h);
+        if (output_w == 2048 && output_h == 1152) output_w = output_h = 0;
+        if (output_w)
+            hos_log("oe: output resolution %ux%u%s", output_w, output_h,
+                    !fresh ? "" : output_w == 2560 && output_h == 1440 ? " (none chosen: the game's)"
+                                                                       : " (none chosen: the screen's, smaller than the game's 2560x1440)");
+        else hos_log("oe: output resolution 2048x1152 (the game's at graphics scale 1)");
     }
     return output_w != 0;
 }
@@ -407,7 +418,7 @@ HLE(_ZN2nn7account26GetNetworkServiceAccountIdEPNS0_23NetworkServiceAccountIdERK
     G64(ARG(0)) = 0;
     RET(0x7C7C);
 }
-/* nn::oe::GetCurrentGraphicsScale() -> float (docked/handheld render scale): 1.0 */
+/* nn::oe::GetCurrentGraphicsScale() -> a tier in w0, which the game sizes its frame by (0 x1, 1 x0.8, 2 x0.667: hos_output_parse) */
 HLE(_ZN2nn2oe23GetCurrentGraphicsScaleEv) {
     /* (hookshot) HOS_GRAPHICS_SCALE=<f>: another scale, a test of whether the game sizes its picture by it (4K, issue 68) */
     static float scale = 0;
@@ -419,7 +430,7 @@ HLE(_ZN2nn2oe23GetCurrentGraphicsScaleEv) {
     uint32_t bits;
     memcpy(&bits, &one, 4);
     c->vreg[0][0] = bits, c->vreg[0][1] = 0;
-    c->x[0] = output_mode() ? 0 : 1;   /* (the scale enum the game reads, w0: x1 for a chosen output, x0.8 as before) */
+    c->x[0] = output_mode() ? 0 : 1;   /* (the tier, w0: 0 for a size chosen or the default, 1 for 2048x1152 and the handheld profile) */
 }
 HLE(_ZN2nn2oe42SetGraphicsScaleChangedNotificationEnabledEb) {}
 HLE(_ZN2nn2oe31EnterExitRequestHandlingSectionEv) {}

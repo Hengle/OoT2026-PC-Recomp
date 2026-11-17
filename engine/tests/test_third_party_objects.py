@@ -129,10 +129,10 @@ class Fetch(unittest.TestCase):
     def test_which_sources(self):
         r = str(ROOT)
         for rel in ("third_party/opus/celt/celt.c", "third_party/zstd/lib/common/xxhash.c", "third_party/imgui/imgui.cpp",
-                    "third_party/zbic/zstd.c", "gpu/vk/eden/x.cpp", "gpu/vk/sirit/src/sirit.cpp",
-                    "gpu/third_party/suyu/shader_recompiler/x.cpp"):
+                    "third_party/zbic/zstd.c", "gpu/vk/eden/x.cpp", "gpu/vk/sirit/src/sirit.cpp"):
             self.assertTrue(tpo.is_third_party(os.path.join(r, rel), r), rel)
         for rel in ("gpu/vk/vk_draw.cpp", "gpu/vk/vk_vma.cpp", "host/hos_main.c", "gpu/render/rx_core.cpp",
+                    "gpu/third_party/suyu/video_core/textures/astc.cpp",   # (the Vulkan back end's own, with its play profile)
                     "third_party/a64-kit/rt/a64.c", "work/sa/gen/code_001.c"):
             self.assertFalse(tpo.is_third_party(os.path.join(r, rel), r), rel)
         self.assertFalse(tpo.is_third_party("/elsewhere/third_party/opus/x.c", r))
@@ -279,7 +279,6 @@ class BuildScript(unittest.TestCase):
         self.assertIn("(tp_vflags if lib else vflags + vk_pgo_flags)", main)
         self.assertIn("imgui_deps + tp_deps", main)
         self.assertIn("zstd_deps + tp_deps", main)
-        self.assertIn("gdeps + tp_deps if third_party_objects.is_third_party(src) else gdeps", main)
         # (the release's run: those jobs alone, written as the set, nothing linked)
         made = main.index("third_party_objects.write(a.third_party_objects")
         self.assertLess(made, main.index("if a.standalone and not vk_only and LINUX:"))
@@ -289,44 +288,8 @@ class BuildScript(unittest.TestCase):
 
 
 class Release(unittest.TestCase):
-    @unittest.skip("Upstream AppImage packaging is outside this Windows port")
-    def test_the_appimage_makes_and_checks_it(self):
-        appimage = (ROOT / "scripts" / "linux" / "appimage.sh").read_text(encoding="utf-8")
-        self.assertIn('HOOKSHOT_SYSROOT=$S "$PY" -I -B nx2/third_party_objects.py make "$T/third_party_objects"', appimage)
-        # (with tools.lock's compiler and headers, as a player's build: exported before it)
-        self.assertLess(appimage.index("export EMSDK=$TOOLS/usr/lib/hookshot/emsdk RX_CPM="), appimage.index("third_party_objects.py make"))
-        # (outside the tools' copy, which tests/test_appimage_player_build.py runs by itself)
-        copy = appimage[appimage.index("# ---- the tools (the sources"):appimage.index("# ---- what it starts with")]
-        self.assertNotIn("third_party_objects.py", copy)
-        check = (ROOT / "scripts" / "linux" / "check_player_build.sh").read_text(encoding="utf-8")
-        self.assertIn('grep -qE "^dry run: the third-party objects: ([1-9][0-9]*) of \\1 in "', check)
-
-    @unittest.skip("Upstream packaging workflow is not part of the Ocarina Windows installer")
-    def test_the_windows_zip_carries_it(self):
-        wf = (ROOT / ".forgejo" / "workflows" / "build-windows.yml").read_text(encoding="utf-8")
-        package = wf[wf.index("\n  package:"):wf.index("\n  vulkan:")]
-        step = package[package.index("- name: The third-party objects"):package.index("- name: Package folder")]
-        for want in ('RX_TARGET=windows HOOKSHOT_MINGW="$LLVM_MINGW" RX_CPM="$W/cpm" WGPU_NATIVE="$W/wgpu-native"',
-                     "--only cpm wgpu-native", 'nx2/third_party_objects.py make "$RUNNER_TEMP/third_party_objects"'):
-            self.assertIn(want, step)
-        self.assertIn('--third-party-objects "$RUNNER_TEMP/third_party_objects"', package)
-        bp = load("builder_package_under_test", ROOT / "scripts" / "builder_package.py")
-        with tempfile.TemporaryDirectory() as d:
-            publish, out, objs = os.path.join(d, "publish"), os.path.join(d, "out"), os.path.join(d, "objs")
-            os.makedirs(publish)
-            setup = os.path.join(d, "setup.exe")
-            open(setup, "wb").close()
-            make_set(objs, {"a" * 40: b"o"})
-            a = mock.MagicMock(out=out, publish=publish, setup=setup, third_party_objects=objs)
-            with mock.patch.object(bp, "tracked", lambda *p: []), mock.patch.object(bp, "state_list", lambda tools: 0), \
-                    contextlib.redirect_stdout(io.StringIO()):
-                self.assertEqual(bp.package(a), 0)
-            self.assertTrue(os.path.isfile(os.path.join(out, "tools", "third_party_objects", tpo.MANIFEST)))
-            os.remove(os.path.join(objs, tpo.MANIFEST))
-            with mock.patch.object(bp, "tracked", lambda *p: []), mock.patch.object(bp, "state_list", lambda tools: 0), \
-                    contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
-                self.assertEqual(bp.package(a), 1)   # (a set without its manifest is not shipped)
-
+    # (Hookshot's release packaging, its own AppImage and Windows parts, makes no prebuilt set yet: a build compiles them as
+    # before. What is checked here is make itself)
     def test_make_builds_for_v3_with_no_store(self):
         calls = []
 

@@ -49,7 +49,8 @@ static void hos_log(const char *fmt, ...) {
     if (strstr(fmt, "display: window closed")) window_logs++;
 }
 static void hos_log_flush(void) { assert(order == 2); order = 3; }
-void ocr_diag_stop(void) { assert(order == 3); order = 4; clean_ends++; }
+void ocr_diag_stop(void) {}   /* (Ocarina Reborn: the diagnostics' end, host/ocr_diagnostics.c) */
+void hos_crash_clean_end(void) { assert(order == 3); order = 4; clean_ends++; }
 static void relaunch(void) { assert(order == 4); restarted++; }
 static void ExitProcess(unsigned code) { assert(order == 4 && code == 0); exited++; }
 /* ACTUAL_FINISH */

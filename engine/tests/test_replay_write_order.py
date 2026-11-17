@@ -60,7 +60,6 @@ PREFIX = r'''
 
 namespace mkwvk {
 enum { NOP_CLEAR_BUF = 1 };
-static void payload_short(void* out, const uint8_t* bytes, uint32_t size) { std::memcpy(out, bytes, size); }
 @@BUFFERREF@@;
 
 // ---- guest memory, imported in place: game pools 0 and 1 adjacent, a gap, pool 2, and pool 3 whose import fails ----
@@ -502,7 +501,9 @@ def main():
             code.append(block(replay, marker))
     source = (PREFIX.replace("@@NVN@@", clear[0]).replace("@@BUFFERREF@@", block(internal, "struct BufferRef {")) +
               "\n".join(code) +
-              SUFFIX.replace("@@PAYLOAD@@", "template <class T>\n" + block(replay, "T payload(const uint8_t* a, uint32_t bytes)"))
+              SUFFIX.replace("@@PAYLOAD@@", "static void payload_short(void* v, const uint8_t* a, uint32_t bytes) "
+                                            "{ std::memcpy(v, a, bytes); }   // (vk_replay.cpp: a short payload's copy)\n"
+                                            "template <class T>\n" + block(replay, "T payload(const uint8_t* a, uint32_t bytes)"))
                     .replace("@@CLEAR@@", block(replay, "case NOP_CLEAR_BUF: {")))
     with tempfile.TemporaryDirectory(prefix="replay-write-order-") as tmp:
         cpp, exe = Path(tmp) / "t.cpp", Path(tmp) / ("t.exe" if os.name == "nt" else "t")

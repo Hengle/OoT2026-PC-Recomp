@@ -12,6 +12,8 @@
 #include <mutex>
 #include <utility>
 #include "vk_present_rect.h"
+#include "crt_policy.h"
+namespace crt_policy = mkwvk::crt_policy;
 using mkwvk::PresentSourceRect;
 using mkwvk::present_source_rect;
 #define CHECK(x) do { if (!(x)) { std::fprintf(stderr, "FAIL:%d %s\n", __LINE__, #x); std::exit(1); } } while (0)
@@ -42,7 +44,7 @@ struct Layers { int aspect = 0, level = 0, first = 0, count = 0; };
 struct VkImageBlit { Layers srcSubresource, dstSubresource; Offset srcOffsets[2], dstOffsets[2]; };
 struct Extent { uint32_t width = 0, height = 0, depth = 0; };
 struct VkImageCopy { Layers srcSubresource; Offset srcOffset; Layers dstSubresource; Offset dstOffset; Extent extent; };
-struct { int upscale = 0, sharpness = 0, framegen = 0; } opts;
+struct { int upscale = 0, sharpness = 0, framegen = 0, crt_filter = 0; } opts;
 struct SpyMutex {
     bool held = false;
     void lock() { CHECK(!held); held = true; }
@@ -65,6 +67,7 @@ int made_usage = 0, made_format = 0, dispatched_mode = -1;
 uint64_t dispatched_pipe = 0;
 float dispatched_sharp = -1, dispatched_x0 = -1, dispatched_x1 = -1;
 int dispatched_side = -1;
+float dispatched_cover = -1.0f;
 VkImageView sampled_view = 0;
 VkImageBlit last_blit;
 VkImageCopy last_copy;
@@ -72,7 +75,7 @@ VkImageCopy last_copy;
 bool make_pipe(Pipe& p, const uint32_t* code, size_t bytes, std::initializer_list<int> types, uint32_t push) {
     const bool pq = code == FG_SCALE_PQ_COMP_SPV;
     CHECK((pq ? bytes == sizeof FG_SCALE_PQ_COMP_SPV : code == FG_SCALE_COMP_SPV && bytes == sizeof FG_SCALE_COMP_SPV));
-    CHECK(types.size() == 3 && push == 20);
+    CHECK(types.size() == 3 && push == 24);
     CHECK(*types.begin() == VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER && *(types.begin() + 1) == VK_DESCRIPTOR_TYPE_STORAGE_IMAGE);
     const bool fail = pq ? pq_pipe_fail : pipe_fail;
     ++pipe_calls; p.set = 1; p.layout = 2; p.pipe = fail ? 0 : pq ? 5 : 3; return !fail;
@@ -111,22 +114,34 @@ void vkCmdCopyImage(int, VkImage src, int, VkImage dst, int, int count, const Vk
 }
 void pass(int, const Pipe& p, std::initializer_list<std::pair<VkImageView, VkSampler>> b,
           uint32_t w, uint32_t h, const void* data, uint32_t bytes) {
-    CHECK((p.pipe == 3 || p.pipe == 5) && b.size() == 3 && b.begin()->first && b.begin()->second == 4 && bytes == 20);
+    CHECK((p.pipe == 3 || p.pipe == 5) && b.size() == 3 && b.begin()->first && b.begin()->second == 4 && bytes == 24);
     CHECK((b.begin() + 2)->first && (b.begin() + 2)->second == 4);
     CHECK((b.begin() + 1)->first && !(b.begin() + 1)->second);
-    struct PC { int mode; float sharp; float x0, x1; int side; } pc;
+    struct PC { int mode; float sharp; float x0, x1; int side; float cover; } pc;
     std::memcpy(&pc, data, sizeof pc);
     ++dispatches; dispatched_mode = pc.mode; dispatched_sharp = pc.sharp;
-    dispatched_side = pc.side; dispatched_x0 = pc.x0; dispatched_x1 = pc.x1;
+    dispatched_side = pc.side; dispatched_x0 = pc.x0; dispatched_x1 = pc.x1; dispatched_cover = pc.cover;
     dispatched_w = w; dispatched_h = h; sampled_view = b.begin()->first; dispatched_pipe = p.pipe;
 }
 void logf(const char*, ...) { CHECK(dispatches > 0); ++logs; }
+// This spy covers the production scaler's routing into CRT, not the shader's pixels/resources.
+int crt_calls = 0, crt_after_dispatches = 0;
+uint32_t crt_sw = 0, crt_sh = 0, crt_dw = 0, crt_dh = 0;
+bool crt_available = true;
+VkImageView crt_source = 0;
+VkImage record_crt(int, VkImageView src, uint32_t sw, uint32_t sh, uint32_t dw, uint32_t dh, VkImageView& view) {
+    ++crt_calls; crt_sw = sw; crt_sh = sh; crt_dw = dw; crt_dh = dh; crt_source = src;
+    crt_after_dispatches = dispatches;
+    if (!crt_available) return VK_NULL_HANDLE;
+    view = 99; return 98;
+}
 // PRODUCTION_FUNCTIONS
 void reset() {
     scale = {}; fg = {}; opts = {}; wide_now = WideSides{}; dev.push_descriptor = true; vkCmdPushDescriptorSetKHR = true;
     pipe_calls = sampler_calls = image_calls = dispatches = blits = copies = waits = flushes = 0;
     destroyed_pipes = destroyed_layouts = destroyed_sets = 0;
     pipe_fail = sampler_fail = image_fail = pq_pipe_fail = false;
+    crt_calls = crt_after_dispatches = 0; crt_available = true;
 }
 VkImage draw(const int* crop = nullptr, uint32_t dw = 2560, uint32_t dh = 1440, bool pq = false) {
     return framegen_scale(1, 12, 11, 2560, 1440, crop, dw, dh, pq);
@@ -158,6 +173,29 @@ int main() {
     CHECK(dispatches == 1 && dispatched_mode == 0 && dispatched_sharp == 0.0f);
     CHECK(dispatched_side == 2 && dispatched_x0 == 0.25f && dispatched_x1 == 0.75f);
     wide_now = WideSides{}; CHECK(!draw()); CHECK(dispatches == 1);
+    // (the loading cover in the middle 16:9 alone runs the pass too, the sides closed by as much as it is, with no menu sides;
+    // with the blurred sides of a loading screen it closes those)
+    reset(); wide_now = WideSides{0.25f, 0, 65535}; CHECK(draw());
+    CHECK(dispatches == 1 && dispatched_side == 0 && dispatched_cover == 1.0f && dispatched_x0 == 0.25f && dispatched_x1 == 0.75f);
+    reset(); wide_now = WideSides{0.25f, 0, 32768}; CHECK(draw());
+    CHECK(dispatched_cover > 0.4999f && dispatched_cover < 0.5001f);
+    reset(); wide_now = WideSides{0.25f, 2}; CHECK(draw()); CHECK(dispatched_cover == 0.0f);
+    reset(); wide_now = WideSides{0.25f, 1, 65535}; CHECK(draw());
+    CHECK(dispatches == 2 && dispatched_side == 1 && dispatched_cover == 1.0f);
+    // (a frame the display thread shows, frame generation's: the cover is in its sides already, framegen_record's copy; the
+    // menu sides are still this pass's)
+    wide_cover_in_frame = true;
+    reset(); wide_now = WideSides{0.25f, 0, 65535}; CHECK(!draw()); CHECK(dispatches == 0);
+    reset(); wide_now = WideSides{0.25f, 2, 65535}; CHECK(draw()); CHECK(dispatched_side == 2 && dispatched_cover == 0.0f);
+    wide_cover_in_frame = false;
+    reset(); wide_now = WideSides{0.25f, 0, 65535}; CHECK(draw()); CHECK(dispatched_cover == 1.0f);
+    // (the reading may be of the game's next frame: a frame's sides take the larger of its reading and the one before, so an
+    // opening cover's sides follow a present behind and a closing cover's at once)
+    {
+        const float read[] = {0.0f, 0.25f, 1.0f, 1.0f, 0.75f, 0.5f, 0.5f, 0.25f, 0.0f, 0.0f};
+        const float held[] = {0.0f, 0.25f, 1.0f, 1.0f, 1.0f, 0.75f, 0.5f, 0.5f, 0.25f, 0.0f};
+        for (int i = 0; i < 10; i++) CHECK(wide_cover_held(read[i]) == held[i]);
+    }
     // (the blurred sides: first the picture at 1/8, then the pass, which reads it)
     reset(); wide_now = WideSides{0.25f, 1}; CHECK(draw());
     CHECK(dispatches == 2 && dispatched_side == 1 && dispatched_x0 == 0.25f && dispatched_x1 == 0.75f);
@@ -208,6 +246,60 @@ int main() {
     CHECK(!draw(nullptr, 2560, 1440, true) && pipe_calls == 2 && logs == logged + 1 && dispatches == 1);
     CHECK(!draw(nullptr, 2560, 1440, true) && pipe_calls == 2 && logs == logged + 1);
     CHECK(draw() && dispatched_pipe == 3 && dispatches == 2);
+    // CRT is independent of interpolation and window effects when the picture does not need shrinking.
+    // Off keeps main's zero-work route at the same size.
+    for (int mode = 1; mode <= 4; ++mode) {
+        reset(); opts.crt_filter = mode;
+        CHECK(draw() == 98 && scale.output_view == 99);
+        CHECK(crt_calls == 1 && pipe_calls == 0 && image_calls == 0 && dispatches == 0);
+        CHECK(crt_sw == 2560 && crt_sh == 1440 && crt_dw == 2560 && crt_dh == 1440 && crt_source == 12);
+        CHECK(draw(nullptr, 3840, 2160) == 98 && crt_dw == 3840 && crt_dh == 2160);
+        CHECK(crt_calls == 2 && pipe_calls == 0 && image_calls == 0 && dispatches == 0);
+        CHECK(!fg.init && !fg.thread_started);
+        opts.crt_filter = 0; CHECK(!draw() && crt_calls == 2);
+    }
+    // Main's mandatory downscale precedes CRT even with Window scaling filter Off and Sharpness 0.
+    // Either source dimension can require it; CRT Off still retains that filtered downscale.
+    const uint32_t smaller[][2] = {{1920, 1080}, {1280, 1440}, {2560, 720}};
+    for (const auto& size : smaller) for (int mode = 0; mode <= 4; ++mode) {
+        reset(); opts.crt_filter = mode;
+        const VkImage shrunk = draw(nullptr, size[0], size[1]);
+        CHECK(shrunk == (mode ? 98 : scale.scaled.image));
+        CHECK(pipe_calls == 1 && image_calls == 1 && dispatches == 1 && made_format == VK_FORMAT_R8G8B8A8_UNORM);
+        CHECK(dispatched_mode == 0 && dispatched_sharp == 0 && dispatched_w == size[0] && dispatched_h == size[1]);
+        CHECK(sampled_view == 12 && !fg.init && !fg.thread_started);
+        CHECK(crt_calls == (mode ? 1 : 0));
+        if (mode) {
+            CHECK(crt_source == scale.scaled.view && crt_after_dispatches == 1 && scale.output_view == 99);
+            CHECK(crt_sw == size[0] && crt_sh == size[1] && crt_dw == size[0] && crt_dh == size[1]);
+            crt_available = false;
+            CHECK(draw(nullptr, size[0], size[1]) == scale.scaled.image && scale.output_view == scale.scaled.view);
+            CHECK(dispatches == 2 && image_calls == 1 && pipe_calls == 1);
+        }
+    }
+    // Shrink is based on the checked crop, not unused pixels in its containing image.
+    reset(); CHECK(!draw(resized_crop, 1280, 720));
+    CHECK(pipe_calls == 0 && image_calls == 0 && dispatches == 0 && crt_calls == 0);
+    opts.crt_filter = 1;
+    CHECK(draw(resized_crop, 1280, 720) == 98 && crt_source == scale.cropped.view);
+    CHECK(crt_sw == 1280 && crt_sh == 720 && blits == 1 && pipe_calls == 0 && dispatches == 0);
+    reset(); opts.crt_filter = 1;
+    CHECK(draw(crop, 1920, 1080) == 98 && crt_sw == 60 && crt_sh == 40 && crt_source == scale.cropped.view);
+    CHECK(blits == 1 && image_calls == 1 && pipe_calls == 0);
+    reset(); opts.crt_filter = 2; opts.sharpness = 50;
+    CHECK(draw(nullptr, 1920, 1080) == 98 && dispatches == 1 && crt_source == scale.scaled.view);
+    CHECK(crt_sw == 1920 && crt_sh == 1080);
+    crt_available = false;
+    CHECK(draw() == scale.scaled.image && scale.output_view == scale.scaled.view);
+    opts.sharpness = 0; CHECK(!draw());
+    reset(); opts.crt_filter = 1;
+    CHECK(!draw(nullptr, 2560, 1440, true) && crt_calls == 0 && image_calls == 0 && pipe_calls == 0);
+    // Native PQ still bypasses CRT, but shrinking keeps main's 10-bit scale pass.
+    const VkImage pq_shrunk = draw(nullptr, 1920, 1080, true);
+    CHECK(pq_shrunk == scale.scaled.image && crt_calls == 0);
+    CHECK(pipe_calls == 2 && dispatches == 1 && dispatched_pipe == 5 && made_format == VK_FORMAT_A2B10G10R10_UNORM_PACK32);
+    opts.sharpness = 50;
+    CHECK(draw(nullptr, 1920, 1080, true) && crt_calls == 0 && made_format == VK_FORMAT_A2B10G10R10_UNORM_PACK32);
     std::puts("PASS: production scaler works independently, caches/retries safely, scales Native HDR's picture in 10 bits, "
-              "and leaves interpolation uninitialized");
+              "keeps downscaling before CRT, and leaves interpolation uninitialized");
 }

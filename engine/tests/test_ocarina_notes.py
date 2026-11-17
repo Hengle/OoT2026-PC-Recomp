@@ -36,12 +36,14 @@ def between(text, first, last):
 
 
 PRELUDE = r"""
+#define _CRT_SECURE_NO_WARNINGS
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <stdint.h>
 #include "vk_api.h"
+#include "hold_toggle.h"
 typedef long LONG;
 typedef unsigned long DWORD;
 #define VK_LBUTTON 0x01
@@ -54,6 +56,7 @@ typedef unsigned long DWORD;
 #define VK_SHIFT 0x10
 #define VK_CONTROL 0x11
 #define VK_MENU 0x12
+#define VK_CAPITAL 0x14
 #define VK_SPACE 0x20
 #define VK_LEFT 0x25
 #define VK_UP 0x26
@@ -85,10 +88,19 @@ static const char *ini_dir;
 #endif
 static DWORD GetModuleFileNameA(void *m, char *b, DWORD n) { (void)m; return (DWORD)snprintf(b, n, "%s" EXE_SEP "ocarina_reborn.exe", ini_dir); }
 #define hos_game_path_a(b,n) GetModuleFileNameA(0,b,n)
+static const char *hos_options_file(void) {   /* (host/options_path.c: here, beside the exe) */
+    static char p[600];
+    DWORD n = GetModuleFileNameA(0, p, 560);
+    while (n && p[n - 1] != 92 && p[n - 1] != 47) n--;
+    snprintf(p + n, sizeof p - n, "ocarina_reborn_options.ini");
+    return p;
+}
 static int held[256];
 static int key(int vk) { return held[vk & 255]; }
-static int oc_menu, oc_front = 1;   /* (oc_pad_word shares read_input's gates: the Insert menu, the pads held after it, the window) */
-int rx_option(int id, int otherwise) { return id == 1 ? oc_menu : otherwise; }
+static int kpos(int us) { return key(us); }   /* (nn_hid.c: a key by its place; here the US key itself) */
+static int oc_menu, oc_front = 1, oc_background;   /* (oc_pad_word shares read_input's gates: the Insert menu, the pads held
+                                                      after it, the window, and the pads behind it: Controller in background) */
+int rx_option(int id, int otherwise) { return id == 1 ? oc_menu : id == 4 ? oc_background : otherwise; }
 static int game_in_front(void) { return oc_front; }
 """
 
@@ -196,8 +208,8 @@ int main(int argc, char **argv) {
     CHECK(hos_binding(HOS_BIND_KEY, HOS_KEY_OC_NOTE_A, 1) == 0);
     hos_bind(HOS_BIND_KEY, HOS_SW_Y, 0, VK_LBUTTON);   /* a normal row still takes the mouse button */
     CHECK(hos_binding(HOS_BIND_KEY, HOS_SW_Y, 0) == VK_LBUTTON);
-    /* (j) the note window shares read_input's own gates: Insert menu open, pads held after it closed, or the game
-       behind another window, and the word the game reads is the player's own */
+    /* (j) the note window shares read_input's own gates: Insert menu open, or the game behind another window, and
+       the word the game reads is the player's own; a pad input still held since the menu plays no note */
     release(), held[VK_NUMPAD2] = held['Q'] = held['E'] = 1;
     hos_oc_wait = 1;
     oc_notes();
@@ -207,9 +219,16 @@ int main(int argc, char **argv) {
     oc_menu = 1;
     CHECK(oc_pad_word(raw2) == raw2);
     oc_menu = 0;
-    pad_after_menu = 1;
-    CHECK(oc_pad_word(raw2) == raw2);
-    pad_after_menu = 0;
+    pad_raw_now = 1 << HOS_PAD_LSHOULDER;   /* (the (L) note's pad input, held since the menu) */
+    pad_after_menu = 1ULL << HOS_PAD_LSHOULDER;
+    oc_notes();
+    CHECK(!(hos_oc_note_bits & 1ULL) && !(oc_pad_word(raw2) & (1ULL << HOS_SW_L)));
+    CHECK(oc_pad_word(raw2) & (1ULL << HOS_SW_R));   /* (the keys' notes still play) */
+    pad_after_menu = 0;   /* (let go and pressed again) */
+    oc_notes();
+    CHECK((hos_oc_note_bits & 1ULL) && (oc_pad_word(raw2) & (1ULL << HOS_SW_L)));
+    pad_raw_now = 0;
+    oc_notes();
     oc_front = 0;
     CHECK(oc_pad_word(raw2) == raw2);
     oc_front = 1;
@@ -229,6 +248,24 @@ int main(int argc, char **argv) {
     hos_oc_wait = 1, hos_oc_beat++;       /* and a live action re-arms the guard */
     oc_notes();
     CHECK((oc_pad_word(raw2) & (1ULL << HOS_SW_R)) && !(oc_pad_word(raw2) & (1ULL << HOS_SW_L)));
+    /* (l) the controller in the background (the menu's row, or HOS_INPUT_BACKGROUND=1): read_input reads the pads there,
+       so a note on a pad button plays; the keys are not input there, so a note key does nothing */
+    oc_front = 0, oc_background = 1;
+    hos_oc_last_kind = 1;
+    release();
+    pad_raw_now = 1 << HOS_PAD_LSHOULDER;   /* the (L) note's pad input */
+    oc_notes();
+    CHECK((oc_pad_word(0) & (1ULL << HOS_SW_L)) != 0);
+    pad_raw_now = 0;
+    held[VK_NUMPAD2] = 1;   /* the (R) note's key, pressed in the window in front */
+    oc_notes();
+    CHECK((oc_pad_word(0) & (1ULL << HOS_SW_R)) == 0);
+    release();
+    oc_background = 0;   /* without the row: the word is the player's own, as before */
+    pad_raw_now = 1 << HOS_PAD_LSHOULDER;
+    oc_notes();
+    CHECK(oc_pad_word(0) == 0);
+    pad_raw_now = 0, oc_front = 1;
     if (!fails) printf("PASS\n");
     return fails != 0;
 }
@@ -244,6 +281,8 @@ class OcarinaNotesTests(unittest.TestCase):
         code = [block(hid, "static int kmap_down("),
                 between(hid, "static const char *const bind_names[HOS_KEY_N]", "uint32_t hos_pad_raw("),
                 between(hid, "static int mouse_vk_slot(", "static int bound_down("),
+                block(hid, "static int pads_in_background("),
+                block(hid, "static int pads_behind("),
                 block(hid, "static void oc_notes(void)"),
                 block(hid, "static uint64_t oc_pad_word(")]
         code = "\n".join(code)
@@ -262,7 +301,7 @@ class OcarinaNotesTests(unittest.TestCase):
             tmp = Path(tmp)
             (tmp / "t.c").write_text(PRELUDE + code + MAIN, encoding="utf-8")
             binary = tmp / ("t.exe" if sys.platform == "win32" else "t")
-            build = subprocess.run([compiler, "-std=gnu11", "-Wall", "-Wno-unused-function", "-I", str(ROOT / "gpu" / "vk"),
+            build = subprocess.run([compiler, "-std=gnu11", "-Wall", "-Wno-unused-function", "-I", str(ROOT / "gpu" / "vk"), "-I", str(ROOT / "host"),
                                     "-I", str(ROOT / "gpu"), str(tmp / "t.c"), "-o", str(binary)], text=True, capture_output=True)
             self.assertEqual(build.returncode, 0, build.stderr)
             run = subprocess.run([str(binary), str(tmp)], text=True, capture_output=True, timeout=30)

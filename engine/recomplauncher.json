@@ -2,7 +2,7 @@
   "$schema": "https://recomplauncher.com/schema/recomplauncher.json",
   "format": 1,
   "name": "Hookshot",
-  "repo": "NotRexed/Hookshot",
+  "repo": "Hookshot/Hookshot",
   "game": {
     "kind": "iso_or_folder",
     "label": "Your copy of The Legend of Zelda: Ocarina of Time for Nintendo Switch 2, version 131072 (build e0f3ccfa): the .nup file, or the folder that holds its romfs and exefs.",
@@ -32,7 +32,43 @@
       "{game}"
     ],
     "label": "Building the game from your copy (10 to 45 minutes)",
-    "timeout": 7200
+    "timeout": 7200,
+    "options": [
+      {
+        "id": "dlss",
+        "label": "NVIDIA DLSS and frame generation",
+        "note": "Downloads NVIDIA's DLSS SDK during the build so the in-game menu offers DLSS. Never share the game folder.",
+        "gpu": "nvidia",
+        "os": [
+          "windows",
+          "linux"
+        ],
+        "args": [
+          "--fetch-ngx-sdk",
+          "--accept-nvidia-license"
+        ],
+        "license": {
+          "name": "NVIDIA RTX SDKs license",
+          "url": "https://github.com/NVIDIA/DLSS/blob/main/LICENSE.txt"
+        }
+      },
+      {
+        "id": "xess",
+        "label": "Intel XeSS",
+        "note": "Downloads Intel's XeSS library during the build so the in-game menu offers XeSS, made for Intel Arc graphics. Never share the game folder.",
+        "os": [
+          "windows"
+        ],
+        "args": [
+          "--fetch-xess-runtime",
+          "--accept-intel-license"
+        ],
+        "license": {
+          "name": "Intel Simplified Software License",
+          "url": "https://github.com/intel/xess/blob/de0fb9c1c510661c571164e1418ceca8101dab69/LICENSE.txt"
+        }
+      }
+    ]
   },
   "config": [
     {
@@ -40,7 +76,7 @@
       "format": "ini",
       "file": [
         {
-          "path": "{home}/Games/Hookshot/hookshot_options.ini"
+          "path": "{home}/Games/Hookshot/ocarina_reborn_options.ini"
         }
       ]
     }
@@ -267,7 +303,7 @@
         }
       ],
       "defaults": {
-        "output_res": "2048x1152"
+        "output_res": "2560x1440"
       }
     },
     {

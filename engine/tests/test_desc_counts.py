@@ -1,4 +1,4 @@
-"""A program's descriptor counts are kept with it, packed in one 32-bit word (gpu/vk/vk_draw.cpp desc_counts_pack, build_descriptors).
+"""A program's descriptor counts are kept with it, packed in one word (gpu/vk/vk_draw.cpp desc_counts_pack, build_descriptors).
 
 The two packing functions are cut out of the source and compiled alone: every count comes back as it went in, the three
 do not overlap, and counts that do not fit give the "not counted" word, never another count's. The source is then read
@@ -26,19 +26,19 @@ FIXTURE = r"""
 @UNPACK@
 
 int main() {
-    const size_t most = (1u << 10) - 1;
-    const size_t values[] = {0, 1, 2, 7, 16, 255, 256, 511, most - 1, most};
+    const size_t most = (1u << 21) - 1;
+    const size_t values[] = {0, 1, 2, 7, 16, 255, 256, 4095, 65536, most - 1, most};
     for (size_t a : values)
         for (size_t b : values)
             for (size_t c : values) {
-                const uint32_t w = desc_counts_pack(a, b, c);
-                if (w == ~0u) { printf("%zu %zu %zu: not kept\n", a, b, c); return 1; }
+                const uint64_t w = desc_counts_pack(a, b, c);
+                if (w == ~0ull) { printf("%zu %zu %zu: not kept\n", a, b, c); return 1; }
                 size_t x = 99, y = 99, z = 99;
                 desc_counts_unpack(w, &x, &y, &z);
                 if (x != a || y != b || z != c) { printf("%zu %zu %zu came back %zu %zu %zu\n", a, b, c, x, y, z); return 1; }
             }
-    if (desc_counts_pack(most + 1, 0, 0) != ~0u || desc_counts_pack(0, most + 1, 0) != ~0u ||
-        desc_counts_pack(0, 0, most + 1) != ~0u || desc_counts_pack((size_t)1 << 40, 1, 1) != ~0u) {
+    if (desc_counts_pack(most + 1, 0, 0) != ~0ull || desc_counts_pack(0, most + 1, 0) != ~0ull ||
+        desc_counts_pack(0, 0, most + 1) != ~0ull || desc_counts_pack((size_t)1 << 40, 1, 1) != ~0ull) {
         printf("a count that does not fit was kept\n");
         return 1;
     }
@@ -64,9 +64,9 @@ def main():
     src = (ROOT / "gpu" / "vk" / "vk_draw.cpp").read_text(encoding="utf-8")
     build = block(src, "void build_descriptors(const NvnState& s, const Program& p) {")
     for needle, why in (
-        ("if (kept != ~0u) {", "the kept word is used only when the program has one"),
+        ("if (kept != ~0ull) {", "the kept word is used only when the program has one"),
         ("p.ready.load(std::memory_order_acquire)", "the counts are kept only for a program that is ready"),
-        ("if (packed != ~0u) p.desc_counts.store(", "counts that do not fit are not kept"),
+        ("if (packed != ~0ull) p.desc_counts.store(", "counts that do not fit are not kept"),
         ('getenv("RX_VK_DESC_COUNTS")', "the switch is read"),
         ("out.bufs.reserve(nbuf), out.imgs.reserve(nimg), out.views.reserve(nview);", "the reserve is made from the counts"),
     ):
@@ -75,9 +75,9 @@ def main():
     if "dw()." in build:
         raise SystemExit("build_descriptors asks for the thread's writer again (dw().): it has it in `out`")
     header = (ROOT / "gpu" / "vk" / "vk_shader.h").read_text(encoding="utf-8")
-    if "mutable std::atomic<uint32_t> desc_counts{~0u};" not in header:
+    if "mutable std::atomic<uint64_t> desc_counts{~0ull};" not in header:
         raise SystemExit("vk_shader.h: Program::desc_counts must start as ~0 (not counted)")
-    fixture = (FIXTURE.replace("@PACK@", block(src, "uint32_t desc_counts_pack("))
+    fixture = (FIXTURE.replace("@PACK@", block(src, "uint64_t desc_counts_pack("))
                .replace("@UNPACK@", block(src, "void desc_counts_unpack(")))
     with tempfile.TemporaryDirectory(prefix="desc-counts-") as tmp:
         c = Path(tmp) / "fixture.cpp"

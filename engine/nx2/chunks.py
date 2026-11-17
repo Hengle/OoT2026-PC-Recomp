@@ -76,6 +76,29 @@ def save(img_dir, starts):
         f.write("".join("%08x\n" % s for s in sorted(starts)))
 
 
+# (the dev-loop proposal) chunks of ~4 MB, not 24: a change to two functions compiled their two chunks again, 14 and 24 MB, ~4
+# minutes on one compiler (v2.0.12 to v2.0.13), the floor of a small update's compile. Besides the boundaries in chunks.txt a
+# chunk also starts at the first function at or after each SUB_STRIDE of guest address. The game's code does not move between
+# Hookshot versions, so these stay where they are however the C grows or shrinks; a function found where none was found before
+# moves one of them by one function, and only its two chunks change. ~14.8 bytes of C a guest byte: ~3.7 MB a chunk
+SUB_STRIDE = 0x40000
+
+
+def sub_starts(funcs, stride=SUB_STRIDE):
+    """The first function at or after each multiple of stride past the first function (none when stride is 0)"""
+    order = sorted(funcs)
+    out = set()
+    if not order or not stride:
+        return out
+    i, edge = 0, (order[0] // stride + 1) * stride
+    while True:
+        i = bisect.bisect_left(order, edge, i)
+        if i >= len(order):
+            return out
+        out.add(order[i])
+        edge = (order[i] // stride + 1) * stride
+
+
 def seed_from_gen(gen_dir):
     """The boundaries of an existing size-chunked lift: the first function defined in each code_NNN.c after the
     first"""
@@ -138,7 +161,8 @@ def _no_fork():
 def file_jobs():
     """Processes for the per-file passes (split_big, edit_c) and for the emit: HOOKSHOT_LIFT_JOBS, else the cores this process
     may use (at most 16; each holds its run's texts and the pages of the lift it touches), and at most one per 2 GB of available
-    memory (on Windows too: its available physical memory): a Steam Deck (16 GB) ran out with 8, and the system's out-of-memory
+    memory where they are forked (one per 0.75 GB where they are spawned: Windows, its available physical memory): a Steam
+    Deck (16 GB) ran out with 8, and the system's out-of-memory
     handling stopped the lift ("lift.py stopped (signal 15): BrokenPipeError") or one worker (the update then sat at "jump tables"
     for good). The per-file workers take a file's path and read the file themselves, so they start as new processes (spawn) where
     they cannot be forked: the three passes over the 1.5 GB of C took ~30 s in one process on Windows"""
@@ -151,7 +175,11 @@ def file_jobs():
     n = max(1, min(16, n))
     gb = _available_gb()
     if gb is not None:
-        n = max(1, min(n, int(gb // 2)))
+        # a new process (spawn: Windows) holds only the emit's tables and its run's bodies: 395 MB at most, measured
+        # over a whole lift with 4 (Ryzen 5 5600, 16 GB). The 2 GB a process is a forked one's, which touches the lift's shared pages.
+        # At 2 GB, a 16 GB Windows PC with 4-8 GB free got 2-4 processes or one (its build's lift took 254 s; 178 s with 4 forced)
+        per = 0.75 if _no_fork() else 2
+        n = max(1, min(n, int(gb // per)))
     return n
 
 
@@ -292,7 +320,7 @@ def write(L, gen_dir, img_dir, rechunk=False, counters=(), jobs=None, took=None)
     starts = [] if rechunk else load(img_dir)
     if not starts and not rechunk:
         starts = seed_from_gen(gen_dir)
-    b = Boundaries(a64_lift.CHUNK_BYTES, starts, L.funcs)
+    b = Boundaries(a64_lift.CHUNK_BYTES, sorted(set(starts) | sub_starts(L.funcs)), L.funcs)   # (not saved: sub_starts)
     plain = _plain(L)   # (before L.emit_function is set below)
     base_emit = L.emit_function
     jobs = emit_jobs() if jobs is None else jobs
@@ -329,6 +357,9 @@ def write(L, gen_dir, img_dir, rechunk=False, counters=(), jobs=None, took=None)
         if made is not None:
             made.close()   # (the processes go now, not when the generator is collected)
     took("emit and write (%d process%s)" % (procs, "" if procs == 1 else "es"))
+    # (code_NNN.c: three digits, which split_big, split_hot and build.py match. A thousandth chunk would be left out of all three)
+    if any(re.fullmatch(r"code_\d{4,}\.c", os.path.basename(f)) for f in files):
+        raise SystemExit("chunks: more than 1000 chunks (SUB_STRIDE %#x): make it larger" % SUB_STRIDE)
     # (the numbered chunks only: files has code_hot.c too, and counting it skipped the first stale chunk, linked twice)
     n = sum(1 for f in files if re.fullmatch(r"code_\d{3}\.c", os.path.basename(f)))
     while os.path.exists(os.path.join(gen_dir, "code_%03d.c" % n)):   # (fewer chunks than the last lift)
@@ -338,9 +369,12 @@ def write(L, gen_dir, img_dir, rechunk=False, counters=(), jobs=None, took=None)
     # code_*.c: split_hot.py makes this lift's after it. A lift with no code_hot.c (no hot list, A64_HOT_CHUNK unset, or none of the
     # listed functions in it): split_hot.py had renamed the old one code_hot.c.whole and left code_hot_*.c, which build.py compiled
     # again, the earlier lift's hot functions, each defined in a chunk too, linked twice. A lift with one: the old pieces, patched
-    # already, and the new whole file each held the output-size places, and nx2/oot_patches.py's count of them failed the lift)
+    # already, and the new whole file each held the output-size places, and nx2/oot_patches.py's count of them failed the lift).
+    # An earlier lift's split parts (code_NNN_M.c) go too, so split_big's _cut_already sees only parts this lift made: a saved
+    # boundary moved to where that lift cut a chunk leaves the new chunk the same as its first part, and its old parts, whose
+    # functions are now the next chunk's, were taken as this lift's and linked twice
     for f in os.listdir(gen_dir):
-        if f == "code_hot.c.whole" or HOT_PIECE.fullmatch(f):
+        if f == "code_hot.c.whole" or HOT_PIECE.fullmatch(f) or PART.fullmatch(f):
             os.remove(os.path.join(gen_dir, f))
     files += split_big(gen_dir, files)
     took("big chunks split")
@@ -559,8 +593,22 @@ def _side_run(fn, conn):
 def start_side(fn):
     """fn() started in a forked process, beside what the lift does next; None where there is no fork or one process is asked for
     (HOOKSHOT_LIFT_JOBS=1). end_side(side, fn) waits for it and gives its result"""
-    if _no_fork() or emit_jobs() <= 1:
+    if emit_jobs() <= 1:
         return None
+    if _no_fork():
+        # where there is no fork (Windows): a thread of this process. While the edits run, this process only waits on
+        # their workers, so the tables (~11 s of Python here, after the edits before) are made beside them, as a forked process does
+        import threading
+        box = {}
+
+        def side():
+            try:
+                box["out"] = (True, fn())
+            except BaseException as e:   # (said, then made again in end_side, as a failed forked process)
+                box["out"] = (False, repr(e))
+        t = threading.Thread(target=side, name="lift-side", daemon=True)
+        t.start()
+        return t, box
     ctx = multiprocessing.get_context("fork")
     mine, theirs = ctx.Pipe(duplex=False)
     p = ctx.Process(target=_side_run, args=(fn, theirs))
@@ -572,6 +620,14 @@ def start_side(fn):
 def end_side(side, fn):
     """start_side's result; fn() here when it was not started, or its process failed or died (the files are written whole again)"""
     if side is None:
+        return fn()
+    if isinstance(side[1], dict):   # (a thread: start_side where there is no fork)
+        t, box = side
+        t.join()
+        ok, out = box.get("out", (False, "the thread stopped"))
+        if ok:
+            return out
+        print("side thread failed (%s): done here" % out, flush=True)
         return fn()
     p, conn = side
     try:

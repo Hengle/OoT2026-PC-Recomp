@@ -81,7 +81,7 @@ class FinishOutputTests(unittest.TestCase):
 
     def assert_no_staging_files(self):
         self.assertEqual(sorted(path.name for path in self.out.iterdir() if path.name != make_game.INSTALLED_NOTE),
-                         ["image.bin", "ocarina_reborn.exe"])
+                         ["ocarina_reborn.exe", "image.bin"])   # (sorted: the game's name before image.bin)
 
     def stopped_output(self):
         output = io.StringIO()
@@ -225,7 +225,7 @@ class FinishOutputTests(unittest.TestCase):
         the image, which changed, is staged and swapped as before"""
         self.assertEqual(self.copied_by_finish(), [self.source, self.image])
         self.image.write_bytes(b"newer synthetic image")
-        (self.out / "hookshot.exe.new").write_bytes(b"left by a stopped build")
+        (self.out / "ocarina_reborn.exe.new").write_bytes(b"left by a stopped build")
         before = self.destination.stat()
         self.assertEqual(self.copied_by_finish(), [self.image])
         after = self.destination.stat()

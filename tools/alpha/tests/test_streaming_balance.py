@@ -69,6 +69,9 @@ void vkDestroyImageView(int,int,void*){}
 void destroy_image(int,int){++destroyed;}
 void destroy_buffer(int,int){}
 void vkFreeMemory(int,int,void*){}
+// The merged renderer defers Vulkan destruction through its reaper. This
+// policy harness runs the already-completed retirement callbacks immediately.
+template<class F>void reap(F f){f();}
 void cleanup(uint64_t completed){
 /* CLEANUP */
 }

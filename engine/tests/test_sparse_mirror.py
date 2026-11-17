@@ -70,10 +70,13 @@ def check_source():
     grow = block(mem, "void sparse_grow_all(const std::vector<Pool*>& pools) {")
     need(grow, ["sparse_bind_infos(infos)", "full_barrier(up,", "vkCmdCopyBuffer(up, p.buffer, p.mirror", "cap_pages_over(p,",
                 "sparse_table(p, ma, i, i + 1)", "shadow_forget(p, c.dstOffset, c.size)", "p.released[i] = nullptr;", "++p.release_gen[i];",
-                "mirror_bytes + taking + b > mirror_budget()", "p.refill.clear();",
+                "mirror_bytes + taking + b > mirror_budget()", "p.refill.clear();", "late_fix_emit();",
                 "vkCmdCopyBuffer(up, buf, p.mirror"], "sparse_grow_all()")
     if not grow.index("vkCmdCopyBuffer(up, p.buffer, p.mirror") < grow.index("sparse_table(p, ma, i, i + 1)"):
         raise SystemExit("vk_memory.cpp: sparse_grow_all() points the page table at blocks before it fills them")
+    # (as mirror_sync and mirror_make: the late pages' fix recorded before anything copies out of a capture's buffer)
+    if not grow.index("cap_pages_over(p,") < grow.index("late_fix_emit(") < grow.index("vkCmdCopyBuffer(up, buf, p.mirror"):
+        raise SystemExit("vk_memory.cpp: sparse_grow_all() copies out of a capture's buffer before the late pages' fix")
     rel = block(mem, "void sparse_release() {")
     need(rel, ["guest_pages_set(a, e, p.address + (a - p.lo))", "dead_blocks.push_back(",
                "std::max(mem_rec_value, p.last_value)", "|| p.wanted[i]",

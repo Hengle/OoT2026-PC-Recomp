@@ -42,7 +42,7 @@ elif mode == 'killed':
 raise SystemExit(7)
 ''', encoding='utf-8')
             env = dict(os=os, subprocess=subprocess, time=time, GATE=None, PLANNED={},
-                       OBJ_CACHE=str(folder / 'cache'), no_throttle=lambda handle: None,
+                       OBJ_CACHE=str(folder / 'cache'), no_throttle=lambda handle: None, below_normal=lambda handle: None,
                        object_key=lambda src, flags, deps: hashlib.sha1(repr((src, flags, deps)).encode()).hexdigest())
             exec(compile(ast.Module(body=functions, type_ignores=[]), str(BUILD), 'exec'), env)
             authored = folder / 'authored.c'

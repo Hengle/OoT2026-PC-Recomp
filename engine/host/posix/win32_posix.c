@@ -320,7 +320,10 @@ BOOL SetThreadPriority(HANDLE h, int p) {
     if (!t) { last_error = ERROR_INVALID_HANDLE; return FALSE; }
     t->priority = p;
     const int nice = p <= THREAD_PRIORITY_IDLE ? 19 : p <= THREAD_PRIORITY_LOWEST ? 10 : p == THREAD_PRIORITY_BELOW_NORMAL ? 5 : 0;
-    if (nice && t->tid) setpriority(PRIO_PROCESS, (id_t)t->tid, nice);
+    if (!nice) return TRUE;
+    /* (a thread just made has no id until it runs: hos_thread_start lowers it right after CreateThread) */
+    while (!t->tid && !t->done) sched_yield();
+    if (t->tid) setpriority(PRIO_PROCESS, (id_t)t->tid, nice);
     return TRUE;
 }
 int GetThreadPriority(HANDLE h) {
@@ -792,7 +795,9 @@ static const char *linux_name(const char *base) {
         if (!strcasecmp(base, map[i][0])) return map[i][1];
     return NULL;
 }
+static __thread char load_error[512];   /* (dlerror()'s text for the last failure: hos_load_error) */
 HMODULE LoadLibraryA(LPCSTR name) {
+    load_error[0] = 0;
     if (!name) return NULL;
     char path[PATH_MAX];
     snprintf(path, sizeof path, "%s", name);
@@ -810,9 +815,14 @@ HMODULE LoadLibraryA(LPCSTR name) {
         }
     }
     HMODULE m = dlopen(path, RTLD_NOW | RTLD_LOCAL);
-    if (!m) last_error = ERROR_FILE_NOT_FOUND;
+    if (!m) {
+        last_error = ERROR_FILE_NOT_FOUND;
+        const char *why = dlerror();
+        snprintf(load_error, sizeof load_error, "%s", why ? why : "");
+    }
     return m;
 }
+const char *hos_load_error(void) { return load_error; }
 BOOL FreeLibrary(HMODULE m) { return m && dlclose(m) == 0; }
 FARPROC GetProcAddress(HMODULE m, LPCSTR name) { return m ? (FARPROC)dlsym(m, name) : NULL; }
 HMODULE GetModuleHandleA(LPCSTR name) {
@@ -1169,6 +1179,10 @@ static void on_signal(int sig, siginfo_t *si, void *uctx) {
             context_to(uc, &ctx);
             return;
         }
+    /* Keep POSIX metadata in the unused tail, without changing NumberParameters
+       (the legacy CRASH log's read/write interpretation stays unchanged). */
+    rec.ExceptionInformation[13] = (ULONG_PTR)sig;
+    rec.ExceptionInformation[14] = (ULONG_PTR)(intptr_t)si->si_code;
     if (unhandled && unhandled(&ep) == EXCEPTION_CONTINUE_EXECUTION) {
         context_to(uc, &ctx);
         return;
@@ -1184,12 +1198,13 @@ static void on_signal(int sig, siginfo_t *si, void *uctx) {
         return;
     }
     signal(sig, SIG_DFL);
+    if (si->si_code <= 0) raise(sig);   /* sent signals cannot re-fault; real faults keep their original core siginfo */
 }
 static void install_signals(void) {
     static int done;
     if (done) return;
     done = 1;
-    const int sigs[] = {SIGSEGV, SIGBUS, SIGILL, SIGFPE};
+    const int sigs[] = {SIGSEGV, SIGBUS, SIGILL, SIGFPE, SIGABRT};
     for (size_t i = 0; i < sizeof sigs / sizeof sigs[0]; i++) {
         struct sigaction sa;
         memset(&sa, 0, sizeof sa);
@@ -1281,24 +1296,26 @@ DWORD GetWindowThreadProcessId(HWND w, DWORD *pid) {
 }
 int MessageBoxA(HWND w, LPCSTR text, LPCSTR caption, UINT type) {
     (void)w, (void)type;
-    fprintf(stderr, "%s: %s\n", caption ? caption : "Hookshot", text ? text : "");
+    fprintf(stderr, "%s: %s\n", caption ? caption : "Ocarina Reborn", text ? text : "");
     typedef int (*ShowFn)(uint32_t, const char *, const char *, void *);   /* (SDL3's and SDL2's alike; its result unread) */
     void *sdl = dlopen("libSDL3.so.0", RTLD_NOW | RTLD_NOLOAD);
     if (!sdl) sdl = dlopen("libSDL2-2.0.so.0", RTLD_NOW | RTLD_NOLOAD);
     ShowFn show = sdl ? (ShowFn)dlsym(sdl, "SDL_ShowSimpleMessageBox") : NULL;
-    if (show) show(0x10, caption ? caption : "Hookshot", text ? text : "", NULL);
+    if (show) show(0x10, caption ? caption : "Ocarina Reborn", text ? text : "", NULL);
     return 1;
 }
 
 /* ---- waveOut on SDL's audio (host/hos_sdl.c): a callback takes the written blocks in order and marks them done ---- */
 /* (the executable's: this file is in the Vulkan back end too, which plays no sound and has no hos_sdl.c) */
-int hos_sdl_audio_open(int freq, int channels, int s16, void (*pull)(void *user, uint8_t *out, int len), void *user)
+void *hos_sdl_audio_open(int freq, int channels, int s16, void (*pull)(void *user, uint8_t *out, int len), void *user)
     __attribute__((weak));
+void hos_sdl_audio_close(void *out) __attribute__((weak));
 typedef struct {
     pthread_mutex_t mu;
     WAVEHDR *q[64];
     int head, count;
     DWORD pos;
+    void *sdl;   /* (what hos_sdl_audio_open opened) */
 } WaveOut;
 static void wave_pull(void *user, uint8_t *out, int len) {
     WaveOut *w = (WaveOut *)user;
@@ -1323,7 +1340,8 @@ MMRESULT waveOutOpen(HWAVEOUT *out, UINT device, const WAVEFORMATEX *f, DWORD_PT
     if (!hos_sdl_audio_open) return MMSYSERR_ERROR;
     WaveOut *w = (WaveOut *)calloc(1, sizeof *w);
     pthread_mutex_init(&w->mu, NULL);
-    if (!hos_sdl_audio_open((int)f->nSamplesPerSec, (int)f->nChannels, f->wBitsPerSample == 16, wave_pull, w)) {
+    w->sdl = hos_sdl_audio_open((int)f->nSamplesPerSec, (int)f->nChannels, f->wBitsPerSample == 16, wave_pull, w);
+    if (!w->sdl) {
         pthread_mutex_destroy(&w->mu);
         free(w);
         return MMSYSERR_ERROR;
@@ -1361,4 +1379,14 @@ MMRESULT waveOutReset(HWAVEOUT hw) {
     pthread_mutex_unlock(&w->mu);
     return 0;
 }
-MMRESULT waveOutClose(HWAVEOUT hw) { waveOutReset(hw); return 0; }
+/* (the device closed first, so wave_pull has stopped: a reset only emptied the queue, and the device stayed open. Opened
+   again after a stall, the default output then refused a second open and the sound stayed off) */
+MMRESULT waveOutClose(HWAVEOUT hw) {
+    WaveOut *w = (WaveOut *)hw;
+    if (!w) return MMSYSERR_ERROR;
+    if (hos_sdl_audio_close) hos_sdl_audio_close(w->sdl);
+    waveOutReset(hw);
+    pthread_mutex_destroy(&w->mu);
+    free(w);
+    return MMSYSERR_NOERROR;
+}

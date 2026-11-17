@@ -1,4 +1,4 @@
-"""Fast float regions (A64_FASTFP, nx2/fastfp.py's ff_region): what may join a region, and the region's fast copy against
+"""Fast float regions (A64_FASTFP, a64_lift.py's ff_region): what may join a region, and the region's fast copy against
 plain IEEE single precision, game-free.
 
 Python, no compiler:
@@ -42,10 +42,9 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 KIT = os.path.join(ROOT, "third_party", "a64-kit")
 sys.path.insert(0, os.path.join(KIT, "lift"))
 sys.path.insert(0, os.path.join(KIT, "tools"))
-sys.path.insert(0, os.path.join(ROOT, "nx2"))
 os.environ["A64_FASTFP"] = "1"
 os.environ.pop("A64_FASTFP_MIN", None)
-import fastfp as L  # noqa: E402  (the rules and the header live in nx2, outside the kit)
+import a64_lift as L  # noqa: E402
 import toolchain  # noqa: E402
 
 

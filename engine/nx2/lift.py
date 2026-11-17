@@ -28,7 +28,6 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))   # (python -I le
 import kit
 import nso2  # noqa: F401  (DT_RELR)
 import insn
-import fastfp   # (hookshot) fast float regions (A64_FASTFP): its emit_function, under lift_fixes' and poll's wrappers
 import lift_fixes
 import suyu_rt_fixes
 import chunks
@@ -43,7 +42,6 @@ import a64_lift
 import a64_rtgen
 
 insn.install()
-fastfp.install()   # (before lift_fixes and poll wrap emit_function: theirs go around this one)
 lift_fixes.install()
 suyu_rt_fixes.install()
 
@@ -179,8 +177,6 @@ def main():
         ocr_view.install(L, img, next((m["build_id"] for m in meta["modules"] if m["name"] == "main"), ""))
         import ocr_counters   # (Ocarina Reborn: Classic counters, host/ocr_counters.c)
         ocr_counters.install(L, img, next((m["build_id"] for m in meta["modules"] if m["name"] == "main"), ""))
-        import oot_occlusion   # (no occlusion queries when HOOKSHOT_OCCLUSION_OFF=1: Fritchii's Occlusion Off)
-        oot_occlusion.install(L, img)
     L.discover(max_insns=a.max_func)
     print("discovered %d functions (%.0fs)" % (len(L.funcs), time.time() - t0))
     last[0] = time.time()

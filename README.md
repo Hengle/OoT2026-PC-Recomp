@@ -36,17 +36,19 @@ NVIDIA's DLSS files are downloaded separately through the launcher after accepti
 
 ## What's new in v1.1.4
 
-- Optional Classic UI with controller icons, four HUD styles and three title logos.
-- Direct download of the selected original mod variant from GameBanana; offline on/off afterwards.
-- Return to the launcher after a completed game build/update.
-- Prevent simultaneous game or shader-preparation processes in the same game folder.
-- Clearer cache-conflict diagnosis and correct session ownership for performance reports.
+- Engine v2.3.2: improved CPU-thread coordination, renderer scheduling and memory reuse.
+- Better cleanup of shader resources and memory-allocation recovery under Windows memory pressure.
+- Frame Generation respects display capacity; improved HDR, ultrawide transitions and shader compatibility.
+- Automatic save backups outside the game folder; improved audio recovery and crash reports.
+- Optional CRT filters and optional Intel XeSS runtime support in F1.
+- Classic UI selection and direct downloads, plus return to launcher after builds.
+- Same-folder startup protection and accurate debug-session reporting.
 
-Classic UI by [kuledawg](https://gamebanana.com/mods/737280) is optional. Mod assets are downloaded from GameBanana, not bundled in this distribution. Installation and switching have been tested; visual testing in game is ongoing. Other HUD mods may conflict.
+The full engine update is included. Let the launcher rebuild/update the game and prepare shaders; the first start can take longer. Do not delete compatible caches manually. No uninstall or game-file reimport is needed; saves and settings stay.
 
-This update uses the released v1.1.3 graphics engine with the targeted startup guard; the separate v2.3.2 engine test branch is not included. It does not claim to resolve all stutters or visual issues.
+If the withdrawn first v1.1.4 was already installed, download the installer again: the numeric version is unchanged.
 
-Update over your current installation and let the launcher update game components if prompted. No complete reinstall or game-file reimport is needed. Saves and settings stay.
+Classic UI by [kuledawg](https://gamebanana.com/mods/737280) is optional and downloaded directly from GameBanana, not bundled. In-game visual testing is ongoing. Intel XeSS requires its separate Windows runtime. Performance varies by scene and hardware; not all stutters or GPU issues are resolved.
 
 [Full release notes and SHA-256](https://github.com/ocarina-pc-native-build/ocarina-pc-native-build.github.io/releases/tag/v1.1.4) · [All releases](https://github.com/ocarina-pc-native-build/ocarina-pc-native-build.github.io/releases)
 

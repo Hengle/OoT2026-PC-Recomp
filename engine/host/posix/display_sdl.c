@@ -10,14 +10,16 @@
    While the Insert menu is open the mouse is free (the cursor shown, for the menu's clicks: hos_mouse_pointer) and
    the game gets none of it; the capture it had comes back when the menu closes. */
 #include "../hos.h"
+void hos_input_clear_toggles(void);
 #include "../hos_sdl.h"
 
 /* (the window's app id: the applications menu's entry names it as its StartupWMClass, builder/linux/ocarina_reborn_builder.py) */
-#define HOS_APP_ID "io.github.NotRexed.Hookshot"
+#define HOS_APP_ID "io.github.ocarina_reborn"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <windows.h>
+#include "../hos_paths.h"   /* (the game folder: its title and icon) */
 #include "../../gpu/vk/vk_api.h"
 #include "../display_pointer.h"
 #include <math.h>
@@ -32,6 +34,9 @@ void rx_close_asked(void);
 void hos_sdl_pads_pump(void);   /* host/pad_sdl.c: controllers, on this thread, as SDL's queue wants */
 void hos_relaunch_ask(void);        /* (host/hos_relaunch.c: the Insert menu's Restart now) */
 void hos_window_closed_exit(void);
+int hos_text_focus(void);           /* (host/rx_backend.c: the Insert menu's text fields, MkwVkHost.take_text) */
+void hos_text_put(uint32_t c);
+void hos_text_put_utf8(const char *s, int first_line);
 
 volatile LONG64 hos_present_count;   /* (nvn_native.c: the game's presents) */
 __attribute__((visibility("default"))) volatile uint8_t hos_posix_keys[256];
@@ -43,6 +48,8 @@ int hos_mouse_take(int32_t *dx, int32_t *dy) {
     *dy = InterlockedExchange(&mouse_dy, 0);
     return mouse_captured;
 }
+int hos_mouse_test_on(void) { return 0; }   /* (hookshot: a test's own mouse, HOS_MOUSE_TEST, is display.c's on Windows) */
+int hos_key_down(int vk) { return (GetAsyncKeyState(vk) & 0x8000) != 0; }   /* (hookshot: this window's own table of keys, win32_posix.c) */
 
 /* (mouse_native.c) motion taken and not used, put back for the next taker (the player camera's) */
 void hos_mouse_give_back(int32_t dx, int32_t dy) {
@@ -109,8 +116,29 @@ static void keys_update(void) {
         v[VK_MENU] = v[VK_LMENU] || v[VK_RMENU];
         const uint32_t b = hos_sdl_mouse_buttons();
         v[VK_LBUTTON] = (b & 1) != 0, v[VK_MBUTTON] = (b & 2) != 0, v[VK_RBUTTON] = (b & 4) != 0;
+        v[VK_XBUTTON1] = (b & 8) != 0, v[VK_XBUTTON2] = (b & 16) != 0;   /* (SDL's X1 and X2: Mouse 4 and 5) */
     }
     for (int i = 0; i < 256; i++) hos_posix_keys[i] = v[i];
+}
+
+/* ---- (hookshot) typed text, for the Insert menu's text field that has the keyboard (MkwVkHost.take_text): SDL's text input on
+   only while one has it (hos_text_focus), so no input method opens over the game; its editing keys, repeats too; paste ---- */
+static volatile int paste_asked;
+void hos_display_paste(void) { __atomic_store_n(&paste_asked, 1, __ATOMIC_RELEASE); }   /* (the menu's Paste: on this thread) */
+static void paste_clipboard(void) {   /* (the clipboard's first line, as typed) */
+    char *t = hos_sdl_clipboard();
+    hos_text_put_utf8(t, 1);
+    hos_sdl_free(t);
+}
+static void text_key(const HosSdlEvent *e) {
+    static const struct { int scancode, vk; } keys[] = {{80, VK_LEFT}, {79, VK_RIGHT}, {74, VK_HOME}, {77, VK_END}, {42, VK_BACK},
+                                                       {76, VK_DELETE}, {40, VK_RETURN}, {88, VK_RETURN}, {41, VK_ESCAPE}};
+    if ((e->key == 'v' && (e->mod & 0xC0)) || (e->scancode == 73 && (e->mod & 3))) {   /* (Ctrl+V, Shift+Insert) */
+        if (!e->repeat) paste_clipboard();
+        return;
+    }
+    for (size_t i = 0; i < sizeof keys / sizeof keys[0] && !(e->mod & 0x300); i++)   /* (not with Alt: Alt+Enter is fullscreen) */
+        if (e->scancode == keys[i].scancode) hos_text_put(HOS_TEXT_KEY | (uint32_t)keys[i].vk);
 }
 
 /* ---- the window ---- */
@@ -126,12 +154,20 @@ static void drawable_size(void *w, int *width, int *height) {
 /* (SDL's display calls belong on this thread: the loop asks every second, the renderer reads what it found) */
 static volatile int refresh_now;
 static int refresh_mhz(void *w) { (void)w; return __atomic_load_n(&refresh_now, __ATOMIC_RELAXED); }
-static MkwVkWindow vk_window = {MKWVK_WINDOW_VERSION, create_surface, drawable_size, NULL, refresh_mhz};
+/* (the desktop's size in pixels, read on this thread once the window is made: the Quality preset Auto (this PC)) */
+static volatile int desktop_w, desktop_h;
+static void desktop_size(void *w, int *width, int *height) {
+    (void)w;
+    *width = __atomic_load_n(&desktop_w, __ATOMIC_RELAXED), *height = __atomic_load_n(&desktop_h, __ATOMIC_RELAXED);
+}
+static MkwVkWindow vk_window = {MKWVK_WINDOW_VERSION, create_surface, drawable_size, NULL, refresh_mhz, desktop_size};
 
 /* Esc let the captured mouse go just before it opened the Insert menu (Menu shortcut "Insert, F1 or Esc"):
    the capture that comes back when the menu closes. Spent by the next capture or menu */
 static int esc_had_capture;
 static void mouse_capture(int on) {
+    int rx_option(int id, int otherwise);
+    if (on && rx_option(6, 0) == 2) return;   /* (Mouse camera Off: the mouse plays no part) */
     if (on == (int)mouse_captured) return;
     mouse_captured = on;
     InterlockedExchange(&mouse_dx, 0);
@@ -192,6 +228,7 @@ static void menu_mouse(int request) {
     if (open == menu_open) return;
     menu_open = open;
     if (open) {
+        hos_input_clear_toggles();
         captured_before_menu = (int)mouse_captured || (request == 2 && esc_had_capture);   /* (opened by Esc, which let it go) */
         esc_had_capture = 0;
         mouse_capture(0);
@@ -221,7 +258,7 @@ int hos_display_init(void) {
     }
     const char *env_class = getenv("HOS_WM_CLASS");
     const char *app_id = (env_class && env_class[0]) ? env_class : HOS_APP_ID;
-    hos_sdl_identity(window_title("Hookshot"), app_id);
+    hos_sdl_identity(window_title("Ocarina Reborn"), app_id);
     hos_sdl_hint("SDL_VIDEO_X11_NET_WM_BYPASS_COMPOSITOR", "0");
     hos_sdl_hint("SDL_JOYSTICK_ALLOW_BACKGROUND_EVENTS", "1");
     /* (bundled SDL tries x11 before wayland. NVIDIA's X11 surface has no mailbox, and an immediate
@@ -272,28 +309,38 @@ void hos_display_loop(void) {
         int w = 0, h = 0;
         if (sscanf(getenv("HOS_WINDOW_SIZE"), "%dx%d", &w, &h) == 2 && w >= 64 && h >= 64) win_w = w, win_h = h;
     }
-    window = hos_sdl_window(window_title(HOS_GAME_TITLE), win_w, win_h);
+    window = hos_sdl_window(window_title(hos_game_title(HOS_GAME_TITLE)), win_w, win_h);   /* (the game's own name: host/hos_paths.h) */
     if (!window) {
         hos_log("display: SDL_CreateWindow: %s: no window", hos_sdl_error());
         fprintf(stderr, "display: SDL_CreateWindow: %s: no window\n", hos_sdl_error());
         hos_log_flush();
+        void hos_crash_clean_end(void);
+        hos_crash_clean_end();
         ExitProcess(1);
     }
     vk_window.window = window;
     hos_posix_window[0] = 1;
-    {   /* the window's icon: ocarina_reborn.png beside the game (make_game.py puts it there), for X11 and the compositors that
-           take one from the window; the others find it through the menu entry */
+    {   /* the window's icon: ocarina_reborn.png in the game folder (make_game.py puts it there: the game's own icon, else Hookshot's),
+           for X11 and the compositors that take one from the window; the others find it through the menu entry. (The folder, not
+           the exe's: the game is bin/hookshot in a packaged builder's folder, and the icon was looked for in bin/) */
         char png[MAX_PATH];
-        DWORD n = GetModuleFileNameA(NULL, png, MAX_PATH);
+        DWORD n = hos_game_path_a(png, MAX_PATH);
         while (n && png[n - 1] != '/') n--;
         snprintf(png + n, sizeof png - n, "ocarina_reborn.png");
         hos_sdl_icon(window, png);
     }
     if (getenv("HOS_FULLSCREEN") && atoi(getenv("HOS_FULLSCREEN"))) set_fullscreen(1);
     __atomic_store_n(&refresh_now, hos_sdl_refresh_mhz(window), __ATOMIC_RELAXED);
+    {   /* (the desktop's size, before the renderer starts: the Quality preset Auto (this PC) reads it once, desktop_size) */
+        int dw, dh;
+        if (hos_sdl_desktop_size(&dw, &dh))
+            __atomic_store_n(&desktop_w, dw, __ATOMIC_RELAXED), __atomic_store_n(&desktop_h, dh, __ATOMIC_RELAXED);
+    }
     pointer_update(0, 0);
     CloseHandle(CreateThread(NULL, 0, renderer_main, NULL, 0, NULL));
     DWORD refresh_asked = GetTickCount();
+    int text_on = 0;
+    hos_sdl_text_input(window, 0);   /* (SDL2 starts with it on: off until a text field of the menu has the keyboard) */
     for (;;) {
         hos_sdl_pads_pump();
         if (GetTickCount() - refresh_asked >= 1000) {   /* (the window may have moved to another display) */
@@ -319,6 +366,7 @@ void hos_display_loop(void) {
                     hos_posix_window[0] = 1;
                     break;
                 case HOS_SDL_EV_FOCUS_LOST:
+                    hos_input_clear_toggles();
                     hos_posix_window[0] = 0;
                     esc_had_capture = 0;
                     mouse_capture(0);
@@ -341,6 +389,7 @@ void hos_display_loop(void) {
                         mouse_capture(0);
                     }
                     if (!e.repeat && ((scancode == 68 && !(mod & 0x0FC3)) || (scancode == 40 && (mod & 0x300)))) set_fullscreen(!fullscreen);   /* F11, Alt+Enter */
+                    if (hos_text_focus()) text_key(&e);   /* (a text field of the Insert menu has the keyboard) */
                     break;
                 }
                 case HOS_SDL_EV_MOUSE_DOWN:
@@ -366,10 +415,15 @@ void hos_display_loop(void) {
                         InterlockedExchangeAdd(&mouse_dy, dy);
                     }
                     break;
+                case HOS_SDL_EV_TEXT:
+                    hos_text_put_utf8(e.text, 0);
+                    break;
                 }
                 pointer_update(0, 0);
             } while (hos_sdl_poll_event(&e));
         }
+        if (hos_text_focus() != text_on) hos_sdl_text_input(window, text_on = hos_text_focus());
+        if (__atomic_exchange_n(&paste_asked, 0, __ATOMIC_ACQ_REL)) paste_clipboard();
         const int asked = __atomic_exchange_n(&fullscreen_asked, -1, __ATOMIC_ACQ_REL);
         if (asked >= 0) set_fullscreen(asked);
         const int menu = __atomic_exchange_n(&menu_asked, -1, __ATOMIC_ACQ_REL);

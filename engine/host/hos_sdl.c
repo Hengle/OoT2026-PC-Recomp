@@ -16,8 +16,10 @@ static struct {
     void *CreateWindow, *SetWindowPosition, *SetWindowFullscreen, *SetRelativeMouseMode, *GetPrimaryDisplay,
         *GetDesktopDisplayMode, *Vulkan_CreateSurface, *PixelSize, *GetKeyboardState, *GetMouseState, *WaitEventTimeout,
         *PollEvent, *GetWindowSize, *LoadPNG, *SetWindowIcon, *DestroySurface, *GetWindowDisplay, *GetCurrentDisplayMode;
+    void *StartTextInput, *StopTextInput, *GetClipboardText;   /* (hookshot: the menu's text fields; optional) */
     /* sound */
     void *OpenAudioDevice, *PauseAudioDevice, *OpenAudioDeviceStream, *ResumeAudioStreamDevice, *PutAudioStreamData;
+    void *CloseAudioDevice, *DestroyAudioStream;
     /* controllers */
     void *PadOpen, *PadClose, *PadConnected, *PadsUpdate, *PadButton, *PadAxis, *PadName, *PadRumble;
     void *PadType, *PadEffect;   /* (optional: HD rumble, host/pad_sdl.c) */
@@ -80,6 +82,10 @@ static int get_all(HMODULE m, int three) {
     *(FARPROC *)&f.SetHintPriority = GetProcAddress(m, "SDL_SetHintWithPriority");
     *(FARPROC *)&f.JoystickGUID = GetProcAddress(m, three ? "SDL_GetJoystickGUID" : "SDL_JoystickGetGUID");
     *(FARPROC *)&f.PadMapping = GetProcAddress(m, three ? "SDL_GetGamepadMapping" : "SDL_GameControllerMapping");
+    /* (hookshot: the Insert menu's text fields; without them a field takes nothing from the keyboard here) */
+    *(FARPROC *)&f.StartTextInput = GetProcAddress(m, "SDL_StartTextInput");
+    *(FARPROC *)&f.StopTextInput = GetProcAddress(m, "SDL_StopTextInput");
+    *(FARPROC *)&f.GetClipboardText = GetProcAddress(m, "SDL_GetClipboardText");
     if (three) {
         *(FARPROC *)&f.GetJoystick = GetProcAddress(m, "SDL_GetGamepadJoystick");   /* (optional: diagnostics only) */
         GET(SetWindowPosition, "SDL_SetWindowPosition");
@@ -87,6 +93,7 @@ static int get_all(HMODULE m, int three) {
         GET(OpenAudioDeviceStream, "SDL_OpenAudioDeviceStream");
         GET(ResumeAudioStreamDevice, "SDL_ResumeAudioStreamDevice");
         GET(PutAudioStreamData, "SDL_PutAudioStreamData");
+        GET(DestroyAudioStream, "SDL_DestroyAudioStream");
         GET(GetGamepads, "SDL_GetGamepads");
         GET(GetGamepadID, "SDL_GetGamepadID");
         GET(Free, "SDL_free");
@@ -101,6 +108,7 @@ static int get_all(HMODULE m, int three) {
         *(FARPROC *)&f.GetCurrentDisplayMode = GetProcAddress(m, "SDL_GetCurrentDisplayMode");
         GET(OpenAudioDevice, "SDL_OpenAudioDevice");
         GET(PauseAudioDevice, "SDL_PauseAudioDevice");
+        GET(CloseAudioDevice, "SDL_CloseAudioDevice");
         GET(NumJoysticks, "SDL_NumJoysticks");
         GET(IsGameController, "SDL_IsGameController");
         GET(DeviceInstanceID, "SDL_JoystickGetDeviceInstanceID");
@@ -180,24 +188,24 @@ void hos_sdl_relative_mouse(void *window, int on) {
     if (version == 3) CALL(_Bool (*)(void *, _Bool), SetRelativeMouseMode)(window, on != 0);
     else CALL(int (*)(int), SetRelativeMouseMode)(on);
 }
-int hos_sdl_desktop_size(int *width, int *height) {
-    /* (hookshot) no SDL loaded (a windowless start: HOS_HEADLESS), so the screen is unknown. The menu asks while it runs
-       (MkwVkHost.screen_size, rx_backend.c), and SDL2's branch below would call an empty slot */
-    if (!version) return 0;
+static int desktop_mode(int *width, int *height, int *refresh_rate) {
+    if (!version || !f.GetDesktopDisplayMode) return 0;
     if (version == 3) {   /* (SDL_DisplayMode: displayID, format, w and h at 8 and 12 in screen units, pixel_density at
-                             16: in pixels, as SDL2 gave them) */
+                             16: in pixels, as SDL2 gave them; refresh rate at 20) */
         const uint8_t *m = CALL(const uint8_t *(*)(uint32_t), GetDesktopDisplayMode)(CALL(uint32_t (*)(void), GetPrimaryDisplay)());
         if (!m) return 0;
         int w, h;
-        float density;
-        memcpy(&w, m + 8, 4), memcpy(&h, m + 12, 4), memcpy(&density, m + 16, 4);
+        float density, refresh;
+        memcpy(&w, m + 8, 4), memcpy(&h, m + 12, 4), memcpy(&density, m + 16, 4), memcpy(&refresh, m + 20, 4);
         if (!(density > 0)) density = 1;
         *width = (int)(w * density + 0.5f), *height = (int)(h * density + 0.5f);
+        if (refresh_rate) *refresh_rate = refresh > 1 ? (int)(refresh + 0.5f) : 0;
         return 1;
     }
     struct { uint32_t format; int w, h, refresh_rate; void *driverdata; } m;
     if (CALL(int (*)(int, void *), GetDesktopDisplayMode)(0, &m)) return 0;
     *width = m.w, *height = m.h;
+    if (refresh_rate) *refresh_rate = m.refresh_rate;
     return 1;
 }
 int hos_sdl_refresh_mhz(void *window) {
@@ -213,6 +221,11 @@ int hos_sdl_refresh_mhz(void *window) {
         if (index >= 0 && CALL(int (*)(int, void *), GetCurrentDisplayMode)(index, &m) == 0) hz = (float)m.refresh_rate;
     }
     return hz > 1 && hz < 1000 ? (int)(hz * 1000 + 0.5f) : 0;
+}
+int hos_sdl_desktop_size(int *width, int *height) { return desktop_mode(width, height, NULL); }
+int hos_sdl_desktop_hz(void) {
+    int width, height, refresh_rate = 0;
+    return desktop_mode(&width, &height, &refresh_rate) ? refresh_rate : 0;
 }
 int hos_sdl_vulkan_surface(void *window, void *instance, void *surface_out) {
     return version == 3 ? CALL(_Bool (*)(void *, void *, const void *, void *), Vulkan_CreateSurface)(window, instance, NULL, surface_out)
@@ -232,6 +245,16 @@ void hos_sdl_icon(void *window, const char *png) {
     CALL(_Bool (*)(void *, void *), SetWindowIcon)(window, icon);
     CALL(void (*)(void *), DestroySurface)(icon);
 }
+void hos_sdl_text_input(void *window, int on) {
+    void *fn = on ? f.StartTextInput : f.StopTextInput;
+    if (!fn) return;
+    if (version == 3) ((_Bool (*)(void *))fn)(window);
+    else ((void (*)(void))fn)();
+}
+char *hos_sdl_clipboard(void) { return f.GetClipboardText ? CALL(char *(*)(void), GetClipboardText)() : NULL; }
+void hos_sdl_free(void *p) {
+    if (p && f.Free) CALL(void (*)(void *), Free)(p);
+}
 uint32_t hos_sdl_mouse_buttons(void) {
     return version == 3 ? CALL(uint32_t (*)(float *, float *), GetMouseState)(NULL, NULL)
                         : CALL(uint32_t (*)(int *, int *), GetMouseState)(NULL, NULL);
@@ -250,6 +273,13 @@ void hos_sdl_window_size(void *window, int *width, int *height) {
 }
 
 /* ---- events ---- */
+/* (the text of a text event, cut at a whole character to fit e->text) */
+static void event_text(HosSdlEvent *e, const char *t) {
+    size_t n = t ? strnlen(t, sizeof e->text - 1) : 0;
+    if (t && t[n]) while (n && ((unsigned char)t[n] & 0xc0) == 0x80) n--;   /* (cut inside a character: before it) */
+    if (n) memcpy(e->text, t, n);
+    e->text[n] = 0;
+}
 static void read_event(const uint8_t *raw, HosSdlEvent *e) {
     uint32_t type;
     memcpy(&type, raw, 4);
@@ -263,11 +293,18 @@ static void read_event(const uint8_t *raw, HosSdlEvent *e) {
         case 0x20e: e->type = HOS_SDL_EV_FOCUS_GAINED; break;
         case 0x20f: e->type = HOS_SDL_EV_FOCUS_LOST; break;
         case 0x210: e->type = HOS_SDL_EV_CLOSE; break;
-        case 0x300:   /* (SDL_KeyboardEvent: scancode at 24, mod at 32, repeat at 37) */
+        case 0x300:   /* (SDL_KeyboardEvent: scancode at 24, keycode at 28, mod at 32, repeat at 37) */
             e->type = HOS_SDL_EV_KEY_DOWN;
-            memcpy(i, raw + 24, 4), e->scancode = i[0];
+            memcpy(i, raw + 24, 8), e->scancode = i[0], e->key = i[1];
             memcpy(&e->mod, raw + 32, 2), e->repeat = raw[37];
             break;
+        case 0x303: {   /* (SDL_TextInputEvent: the text's pointer at 24) */
+            const char *t;
+            memcpy(&t, raw + 24, sizeof t);
+            e->type = HOS_SDL_EV_TEXT;
+            event_text(e, t);
+            break;
+        }
         case 0x20c: e->type = HOS_SDL_EV_MOUSE_ENTER; break;
         case 0x400:   /* (SDL_MouseMotionEvent: x and y at 28 and 32, xrel and yrel at 36 and 40, floats) */
             e->type = HOS_SDL_EV_MOUSE_MOTION;
@@ -297,10 +334,14 @@ static void read_event(const uint8_t *raw, HosSdlEvent *e) {
                 : raw[12] == 12 ? HOS_SDL_EV_FOCUS_GAINED : raw[12] == 13 ? HOS_SDL_EV_FOCUS_LOST
                 : raw[12] == 14 ? HOS_SDL_EV_CLOSE : HOS_SDL_EV_OTHER;
         break;
-    case 0x300:   /* (SDL_KeyboardEvent: repeat at 13, scancode at 16, mod at 24) */
+    case 0x300:   /* (SDL_KeyboardEvent: repeat at 13, scancode at 16, keycode at 20, mod at 24) */
         e->type = HOS_SDL_EV_KEY_DOWN;
-        memcpy(i, raw + 16, 4), e->scancode = i[0];
+        memcpy(i, raw + 16, 8), e->scancode = i[0], e->key = i[1];
         memcpy(&e->mod, raw + 24, 2), e->repeat = raw[13];
+        break;
+    case 0x303:   /* (SDL_TextInputEvent: the text itself at 12, 32 bytes) */
+        e->type = HOS_SDL_EV_TEXT;
+        event_text(e, (const char *)raw + 12);
         break;
     case 0x400:   /* (SDL_MouseMotionEvent: x and y at 20 and 24, xrel and yrel at 28 and 32, whole pixels) */
         e->type = HOS_SDL_EV_MOUSE_MOTION;
@@ -341,6 +382,8 @@ typedef struct {
     void (*pull)(void *user, uint8_t *out, int len);
     void *user;
     int frame;   /* bytes a sample frame (all channels) */
+    void *stream;   /* (SDL3: the stream, which holds the device) */
+    uint32_t dev;   /* (SDL2: the device) */
 } Pull;
 static void pull3(void *p, void *stream, int want, int total) {   /* (SDL3: a stream asks for want more bytes) */
     (void)total;
@@ -359,21 +402,22 @@ static void pull2(void *p, uint8_t *out, int len) {   /* (SDL2: a device callbac
     const Pull *s = (const Pull *)p;
     s->pull(s->user, out, len);
 }
-int hos_sdl_audio_open(int freq, int channels, int s16, void (*pull)(void *user, uint8_t *out, int len), void *user) {
-    if (!hos_sdl_load()) return 0;
+void *hos_sdl_audio_open(int freq, int channels, int s16, void (*pull)(void *user, uint8_t *out, int len), void *user) {
+    if (!hos_sdl_load()) return NULL;
     const uint16_t format = s16 ? 0x8010 /* S16LE */ : 0x8120 /* F32LE */;   /* (both's numbers) */
     const char *env_samples = getenv("SDL_AUDIO_DEVICE_SAMPLE_FRAMES");
     if (version == 3 && !env_samples) hos_sdl_hint("SDL_AUDIO_DEVICE_SAMPLE_FRAMES", "480");   /* (SDL2's device buffer below) */
-    if (!hos_sdl_init(HOS_SDL_AUDIO)) return 0;
+    if (!hos_sdl_init(HOS_SDL_AUDIO)) return NULL;
     Pull *p = (Pull *)calloc(1, sizeof *p);
     p->pull = pull, p->user = user, p->frame = channels * (s16 ? 2 : 4);
     if (version == 3) {
         const struct { uint32_t format; int channels, freq; } spec = {format, channels, freq};
         void *stream = CALL(void *(*)(uint32_t, const void *, void (*)(void *, void *, int, int), void *), OpenAudioDeviceStream)(
             0xFFFFFFFFu /* the default output */, &spec, pull3, p);
-        if (stream && CALL(_Bool (*)(void *), ResumeAudioStreamDevice)(stream)) return 1;
+        if (stream && CALL(_Bool (*)(void *), ResumeAudioStreamDevice)(stream)) return p->stream = stream, p;
+        if (stream) CALL(void (*)(void *), DestroyAudioStream)(stream);
         free(p);
-        return 0;
+        return NULL;
     }
     struct {
         int freq;
@@ -392,10 +436,18 @@ int hos_sdl_audio_open(int freq, int channels, int s16, void (*pull)(void *user,
     const uint32_t dev = CALL(uint32_t (*)(const char *, int, const void *, void *, int), OpenAudioDevice)(NULL, 0, &want, &have, 0);
     if (!dev) {
         free(p);
-        return 0;
+        return NULL;
     }
     CALL(void (*)(uint32_t, int), PauseAudioDevice)(dev, 0);
-    return 1;
+    p->dev = dev;
+    return p;
+}
+void hos_sdl_audio_close(void *out) {   /* (pull is not called again once this returns) */
+    Pull *p = (Pull *)out;
+    if (!p) return;
+    if (version == 3) CALL(void (*)(void *), DestroyAudioStream)(p->stream);   /* (and the device it opened) */
+    else CALL(void (*)(uint32_t), CloseAudioDevice)(p->dev);
+    free(p);
 }
 /* SDL3's format of the default device; SDL2's default audio info (2.24 on: the bundled 2.32 has it). Looked up here,
    not at load: an SDL without it still plays, in stereo. */

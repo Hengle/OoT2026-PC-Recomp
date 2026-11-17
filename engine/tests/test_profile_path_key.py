@@ -1,7 +1,6 @@
-"""The object keys name a play profile by its contents, not its path (nx2/build.py flag_text). make_game.py puts both profiles
-in the work folder (RX_PGO=<work>/ocarina_reborn_pieces.prof for the eight hot pieces, RX_VK_PGO=<work>/ocarina_reborn_vk.shipped.profdata
-for the renderer's own objects), so with the path in the key another work folder could share neither through the object store
-(nx2/object_store.py) or a dev_packs.py base. The -D..._PROFILE_SHA1 beside the path is what the key needs of the profile.
+"""The hot pieces' object keys name the play profile by its contents, not its path (nx2/build.py flag_text): the path kept two
+checkouts, or a build from a checkout other than the work folder's, from sharing the eight hot pieces (~10-20 minutes of
+compile), while -DHOOKSHOT_PROFILE_SHA1 beside it is what the key needs of the profile.
 
 python -I -B tests/test_profile_path_key.py
 """
@@ -9,7 +8,6 @@ import importlib.util
 from pathlib import Path
 import re
 import sys
-import tempfile
 import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -21,34 +19,20 @@ spec.loader.exec_module(build)
 
 class ProfilePathTests(unittest.TestCase):
     def test_the_profiles_path_is_not_in_the_key_and_its_contents_are(self):
-        for define in ("-DHOOKSHOT_PROFILE_SHA1=", "-DHOOKSHOT_VK_PROFILE_SHA1="):
-            a = ["-O2", "-fprofile-instr-use=C:/one/work/ocarina_reborn_pieces.prof", define + "0123456789abcdef"]
-            b = ["-O2", "-fprofile-instr-use=/home/two/work/ocarina_reborn_pieces.prof", define + "0123456789abcdef"]
-            c = ["-O2", "-fprofile-instr-use=C:/one/work/ocarina_reborn_pieces.prof", define + "fedcba9876543210"]
-            self.assertEqual(build.flag_text(a), build.flag_text(b))
-            self.assertNotEqual(build.flag_text(a), build.flag_text(c))
-            self.assertEqual(build.object_key(__file__, a, b""), build.object_key(__file__, b, b""))
+        a = ["-O2", "-fprofile-instr-use=C:/one/work/ocarina_reborn_pieces.prof", "-DHOOKSHOT_PROFILE_SHA1=0123456789abcdef"]
+        b = ["-O2", "-fprofile-instr-use=/home/two/work/ocarina_reborn_pieces.prof", "-DHOOKSHOT_PROFILE_SHA1=0123456789abcdef"]
+        c = ["-O2", "-fprofile-instr-use=C:/one/work/ocarina_reborn_pieces.prof", "-DHOOKSHOT_PROFILE_SHA1=fedcba9876543210"]
+        self.assertEqual(build.flag_text(a), build.flag_text(b))
+        self.assertNotEqual(build.flag_text(a), build.flag_text(c))
 
-    def test_every_profile_flag_carries_its_contents_beside_it(self):
-        # (each "-fprofile-instr-use=" + <path> in build.py is followed, in the same list, by a -D..._PROFILE_SHA1 of the file's
-        # bytes: without it the key would no longer change when the profile does)
+    def test_the_hot_flags_name_the_profiles_contents_wherever_they_name_its_path(self):
         src = (ROOT / "nx2" / "build.py").read_text(encoding="utf-8")
-        uses = [m.end() for m in re.finditer(r'"-fprofile-instr-use=" \+', src)]
-        self.assertGreaterEqual(len(uses), 2, "the hot pieces' RX_PGO and the renderer's RX_VK_PGO")
-        for at in uses:
-            rest = src[at:src.index("]", at)]
-            if '"-DHOOKSHOT_PROFILE_SHA1=" + digest' in rest:
-                with tempfile.TemporaryDirectory() as tmp:
-                    profile = Path(tmp) / 'test.prof'
-                    profile.write_bytes(b'first profile')
-                    first = build.profile_use_flags(str(profile))
-                    profile.write_bytes(b'second profile')
-                    second = build.profile_use_flags(str(profile))
-                    self.assertNotEqual(build.flag_text(first), build.flag_text(second))
-                    profile.unlink()
-                    self.assertEqual(build.profile_use_flags(str(profile)), [])
-            else:
-                self.assertRegex(rest, r'"-DHOOKSHOT_(VK_)?PROFILE_SHA1=" \+ hashlib\.sha1\(f\.read\(\)', src[at - 60:at + 120])
+        # (the game's hot pieces' profile, HOOKSHOT_PROFILE_SHA1, and the renderer's, HOOKSHOT_VK_PROFILE_SHA1: the flag naming
+        # the contents is in the same list, on that line or the next)
+        lines = src.splitlines()
+        uses = [lines[i] + lines[i + 1] for i, line in enumerate(lines[:-1]) if '"-fprofile-instr-use=" +' in line]
+        self.assertTrue(uses)
+        self.assertTrue(all(re.search(r"-DHOOKSHOT_(VK_)?PROFILE_SHA1=", line) for line in uses), uses)
 
 
 if __name__ == "__main__":

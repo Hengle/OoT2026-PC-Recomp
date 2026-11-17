@@ -1,15 +1,16 @@
-/* (hookshot) The button prompts of the controller in use: the game's button-icon font (Font2/Scalable/External.*.bfotf,
-   every icon in a text: dialogue, the control hints, menus) served from prompts/External.bfotf in the game folder, which
-   nx2/prompt_assets.py draws with every controller face's icons at build time, with each Switch button's icon pointed at
-   the face's icon of the pad input bound to it (host/nn_hid.c's controls, the menu's Layout preset and Controls page). So
-   the icons say which button to press on this pad, custom controls too.
+/* (hookshot) The button prompts of the controller in use: the game's button-icon font (Font2/Scalable/External.*.bfotf, every
+   icon in a text: dialogue, the control hints, menus) made from prompts/External.bfotf in the game folder, which
+   nx2/prompt_assets.py draws with every controller face's icons at build time, and served from the game folder's cache/prompts/
+   (made again whenever the face or the controls change, so a cache: host/game_layout.c), with each Switch button's icon pointed
+   at the face's icon of the pad input bound to it (host/nn_hid.c's controls, the menu's Layout preset and Controls page). So the
+   icons say which button to press on this pad, custom controls too.
 
    The face: ocarina_reborn_options.ini's button_prompts (the menu's Button prompts row): 0 Auto, from the first controller's name
    (SDL; with none, and none through XInput, the keyboard's), else 1 Switch, 2 Xbox, 3 PlayStation 4, 4 PlayStation 5, 5 Steam
    Deck, 6 Keyboard. The keyboard face (nx2/prompt_keys.py) points each Switch button at the icon of the first key bound to it,
-   the sticks at the keys that move (WASD) and the mouse that turns the camera, and keeps the Switch's textures and the Talk
-   ring's places. The game reads the font once, at its start; a new face or new controls are written where it keeps it, and its
-   texts drawn again (the live part, below).
+   the sticks at the keys that move (the Controls page's: stick_shows) and the mouse that turns the camera, and keeps the
+   Switch's textures and the Talk ring's places. The game reads the font once, at its start; a new face or new controls are
+   written where it keeps it, and its texts drawn again (the live part, below).
 
    The font as built: an OpenType font behind an 8-byte header, XORed per little-endian word with the key the header's magic
    (0x18029a7f) gives. Its cmap has, for each face, one icon per pad input at U+F700 + 32 x HOS_PROMPT_* + HOS_PAD_* and the
@@ -22,6 +23,7 @@
    our entries merged into it (sizes), so a mod that grows files keeps the icons. */
 #include "hos.h"
 #include "hos_paths.h"
+#include "options_path.h"
 #include <ctype.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -54,7 +56,10 @@ int rx_option(int id, int otherwise);   /* rx_backend.c: the Insert menu's rows 
 #define SLOTS 320
 #define STICK_KEYS 0xF8C0
 #define STICK_GAME 0xF8D0
-#define BINDS (2 * HOS_SW_N)   /* (what the prompts follow: each Switch button's pad input, then its first key: current_binds) */
+/* what the prompts follow (current_binds): each Switch button's pad input, then its first key (BUTTON_BINDS: all the textures
+   and the layouts follow), then the first key of each way the keys move (HOS_KEY_MOVE_*'s order: the sticks' icons in texts) */
+#define BUTTON_BINDS (2 * HOS_SW_N)
+#define BINDS (BUTTON_BINDS + 4)
 static const char *const faces[HOS_PROMPT_N] = {"switch", "xbox", "ps4", "ps5", "steamdeck", "keyboard"};
 /* the Switch buttons' code points in the font, in HOS_SW_* order (nx2/prompt_assets.py SWITCH) */
 static const uint16_t switch_code[HOS_SW_N] = {0xE040, 0xE041, 0xE042, 0xE043, 0xE056, 0xE057, 0xE044, 0xE045,
@@ -70,6 +75,10 @@ static const uint16_t static_code[3] = {0xE049, 0xE064, 0xE065};
    any way; R the same; R's four ways */
 static const uint16_t stick_code[15] = {0xE050, 0xE052, 0xE054, 0xE058, 0xE05A, 0xE05C, 0xE05E, 0xE051, 0xE053, 0xE055,
                                         0xE059, 0xE05B, 0xE05D, 0xE05F, 0xE068};
+/* the ways each of L's icons means (a bit each, in HOS_KEY_MOVE_*'s order: up, down, left, right), and the keys the build drew
+   on the icons of more than one way (nx2/prompt_keys.py MOVE: host/nn_hid.c's default movement keys) */
+static const unsigned char stick_ways[7] = {2, 1, 12, 8, 4, 3, 15};
+static const unsigned char move_default[4] = {0x57, 0x53, 0x41, 0x44};
 
 static int game_dir(char *out, size_t cap) {   /* the game folder, with its separator */
     char path[MAX_PATH];
@@ -79,6 +88,21 @@ static int game_dir(char *out, size_t cap) {   /* the game folder, with its sepa
     slash[1] = 0;
     snprintf(out, cap, "%s", path);
     return 1;
+}
+
+/* the game folder's cache/prompts/, made, with its separator: what this player's face and controls make goes there. 0 when it
+   cannot be made: then nothing is written (not into the current folder) and the game keeps its own icons */
+static int made_dir(char *out, size_t cap) {
+    char game[MAX_PATH];
+    if (!game_dir(game, sizeof game)) return 0;
+    if (snprintf(out, cap, "%scache", game) >= (int)cap) return 0;
+    CreateDirectoryA(out, NULL);   /* (made at the start, host/game_layout.c; again here if it was deleted since) */
+    if (snprintf(out, cap, "%scache/prompts", game) >= (int)cap) return 0;
+    CreateDirectoryA(out, NULL);
+    const DWORD a = GetFileAttributesA(out);
+    if (a == INVALID_FILE_ATTRIBUTES || !(a & FILE_ATTRIBUTE_DIRECTORY)) return 0;
+    const size_t n = strlen(out);
+    return n + 1 < cap && (out[n] = '/', out[n + 1] = 0, 1);
 }
 
 static int contains(const char *text, const char *word) {   /* (any case) */
@@ -110,9 +134,23 @@ static int first_key(int b) {
 }
 
 /* the controls now (BINDS: hos_binding's, as the Controls page sets them): the pad input bound to each Switch button, then its
-   first key */
+   first key, then the first key of each way the keys move */
 static void current_binds(int *bind) {
     for (int b = 0; b < HOS_SW_N; b++) bind[b] = hos_binding(HOS_BIND_PAD, b, 0), bind[HOS_SW_N + b] = first_key(b);
+    for (int m = 0; m < 4; m++) bind[BUTTON_BINDS + m] = first_key(HOS_KEY_MOVE_UP + m);
+}
+
+/* the code whose icon the keyboard face shows for stick icon i (stick_code's order) with these movement keys (move: the first
+   key of up, down, left, right, 0 none). R's: the mouse's, as built. L's: the keys drawn on it at the build (W A S D) while
+   its ways are on those keys. On others, one way shows its key's icon; several ways, or a way on no key, the game's own stick
+   icon, since the font has no picture of other keys together */
+static unsigned stick_shows(int i, const int *move) {
+    if (i >= 7) return STICK_KEYS + (unsigned)i;
+    const unsigned ways = stick_ways[i];
+    for (int m = 0; m < 4; m++)
+        if ((ways >> m & 1) && move[m] != move_default[m])
+            return ways == 1u << m && move[m] ? KEY_BASE + (unsigned)move[m] : STICK_GAME + (unsigned)i;
+    return STICK_KEYS + (unsigned)i;
 }
 
 static int keyboard_built;   /* (the build made the keyboard face: prompts/keyboard/; choose_face) */
@@ -128,8 +166,7 @@ static int choose_face(const char *dir) {
     int choice = 0;
     snprintf(path, sizeof path, "%sprompts/keyboard", dir);
     keyboard_built = GetFileAttributesA(path) != INVALID_FILE_ATTRIBUTES;
-    snprintf(path, sizeof path, "%shookshot_options.ini", dir);
-    FILE *f = fopen(path, "r");
+    FILE *f = fopen(hos_options_file(), "r");   /* (host/options_path.c) */
     if (f) {
         while (fgets(line, sizeof line, f))
             if (!strncmp(line, "button_prompts=", 15)) choice = atoi(line + 15);
@@ -186,8 +223,8 @@ static int cmap4_point(uint8_t *st, unsigned segs, unsigned code, unsigned gid) 
 }
 
 /* the face's icons: each Switch button's segment pointed at the face's icon of its pad input (unbound: of its default's; the
-   keyboard face: the icon of its first key, if it has one), the d-pad's at the face's, and the sticks' at the keyboard's or the
-   game's own; how many buttons bound */
+   keyboard face: the icon of its first key, if it has one), the d-pad's at the face's, and the sticks' at the keyboard's for
+   the movement keys now (stick_shows; a key without an icon: the game's own) or the game's own; how many buttons bound */
 static int cmap4_bind(uint8_t *st, size_t n, int face) {
     const unsigned segs = rd16(st + 6) / 2;
     if (14 + 8 * (size_t)segs + 2 > n) return 0;   /* (as cmap4_glyph: the ranges' last entry too) */
@@ -209,8 +246,11 @@ static int cmap4_bind(uint8_t *st, size_t n, int face) {
         const unsigned gid = cmap4_glyph(st, n, base + STATIC_AT + (unsigned)k);
         if (gid) cmap4_point(st, segs, static_code[k], gid);
     }
+    int move[4];
+    for (int m = 0; m < 4; m++) move[m] = keys ? first_key(HOS_KEY_MOVE_UP + m) : 0;
     for (int i = 0; i < 15; i++) {   /* (a font built without the keyboard face has none of these: nothing changes) */
-        const unsigned gid = cmap4_glyph(st, n, (keys ? STICK_KEYS : STICK_GAME) + (unsigned)i);
+        unsigned gid = keys ? cmap4_glyph(st, n, stick_shows(i, move)) : 0;
+        if (!gid) gid = cmap4_glyph(st, n, STICK_GAME + (unsigned)i);
         if (gid) cmap4_point(st, segs, stick_code[i], gid);
     }
     return done;
@@ -362,7 +402,7 @@ static uint8_t *merge_restbl(const uint8_t *a, size_t an, const uint8_t *b, size
 }
 
 /* the size table served for a mod's own (mod: its file): the mod's with ours (prompts/rsizetable.zs) merged in, as raw zstd
-   blocks in prompts/rsizetable.mod.zs (out). 1 with it; 0 when we have none (the faces' fonts fit the game's entry); -1 when
+   blocks in cache/prompts/rsizetable.mod.zs (out). 1 with it; 0 when we have none (the faces' fonts fit the game's entry); -1 when
    the mod's cannot take ours: it is served as it is, and the game's own icons with it. Made once, for the first mod table asked */
 static int sizes(const char *dir, const char *mod, char *out, size_t cap) {
     static volatile LONG state;   /* 0 not made, 1 being made, 2 made, 3 none of ours, 4 failed */
@@ -383,8 +423,10 @@ static int sizes(const char *dir, const char *mod, char *out, size_t cap) {
             uint8_t *ours = read_all(path, NULL, &on), *theirs = read_all(file, NULL, &mn);
             uint8_t *b = ours ? unzstd(ours, (size_t)on, &bn) : NULL, *a = theirs ? unzstd(theirs, (size_t)mn, &an) : NULL;
             uint8_t *t = a && b ? merge_restbl(a, an, b, bn, &n, &raised) : NULL;
-            snprintf(path, sizeof path, "%sprompts/rsizetable.mod.zs", dir);
-            r = t && write_zstd_raw(path, t, n) ? 2 : 4;
+            char made[MAX_PATH];
+            const int have = made_dir(made, sizeof made);
+            snprintf(path, sizeof path, "%srsizetable.mod.zs", made);
+            r = t && have && write_zstd_raw(path, t, n) ? 2 : 4;
             if (r == 2)
                 hos_log("prompts: %s: the button prompts' sizes merged into the mod's resource size table (%d entries raised or added)",
                         mod, raised);
@@ -392,7 +434,7 @@ static int sizes(const char *dir, const char *mod, char *out, size_t cap) {
                 hos_log("prompts: %s: %s: the mod's resource size table as it is", mod,
                         !b ? "prompts/rsizetable.zs could not be read" : !theirs ? "could not be read"
                         : !a ? "not a zstd frame that gives its size" : !t ? "not a resource size table as the game's"
-                        : "prompts/rsizetable.mod.zs could not be written");
+                        : "cache/prompts/rsizetable.mod.zs could not be written");
             free(t), free(a), free(b), free(theirs), free(ours);
         }
         InterlockedExchange(&state, r);
@@ -446,10 +488,10 @@ static void add_run(Run **runs, size_t *nruns, size_t *cap, uint32_t off, uint32
     (*nruns)++;
 }
 
-/* prompts/Common.bntx.zs: the game's textures (prompts/Common.bntx) with the blocks of prompts/<face>/textures.bin that this
+/* cache/prompts/Common.bntx.zs: the game's textures (prompts/Common.bntx) with the blocks of prompts/<face>/textures.bin that this
    pad's controls choose (nx2/prompt_assets.py: "HPTX", u32 count; each: u8 Switch button (0xff: always), u8 pad input, u16,
    u32 runs; each run: u32 offset, u32 length, the bytes; a later entry over an earlier). Written again only when the face, the
-   controls or the blocks changed (prompts/Common.key) */
+   controls or the blocks changed (cache/prompts/Common.key) */
 /* out: the game's file (game) with the runs written over it (a later one over an earlier where they meet), as raw zstd blocks;
    written again only when its key (keypath: the hash h of what chose the runs) changed. Written beside it first (out.tmp), and
    moved over it with the key removed until then: a failed write leaves the last good file and its key, a stop between the
@@ -558,16 +600,17 @@ static int build_textures(char *out, size_t cap) {
     if (!t) return 0;   /* (built without the textures: the game's) */
     int bind[BINDS], own[HOS_SW_N];
     current_binds(bind);
-    uint64_t h = fnv(fnv(fnv(0xcbf29ce484222325ull, &face, sizeof face), bind, sizeof bind), t, (size_t)tn);
+    uint64_t h = fnv(fnv(fnv(0xcbf29ce484222325ull, &face, sizeof face), bind, BUTTON_BINDS * sizeof *bind), t, (size_t)tn);
     size_t nruns;
     Run *runs = texture_runs(t, tn, texture_bind(face, bind, own), &nruns);
     snprintf(path, sizeof path, "%sprompts/Common.bntx", dir);
     live_textures_start(path, runs, nruns);   /* (before write_patched sorts them: the ranges only) */
-    snprintf(out, cap, "%sprompts/Common.bntx.zs", dir);
+    char keypath[MAX_PATH], made[MAX_PATH];
+    const int have = made_dir(made, sizeof made);
+    snprintf(out, cap, "%sCommon.bntx.zs", made);
     snprintf(path, sizeof path, "%sprompts/Common.bntx", dir);
-    char keypath[MAX_PATH];
-    snprintf(keypath, sizeof keypath, "%sprompts/Common.key", dir);
-    const int ok = write_patched(path, out, keypath, h, runs, nruns);
+    snprintf(keypath, sizeof keypath, "%sCommon.key", made);
+    const int ok = have && write_patched(path, out, keypath, h, runs, nruns);
     hos_log("prompts: %s textures, %zu runs for this pad's controls%s", faces[face], nruns,
             ok ? "" : ": could not be written");
     if (ok) part_served(PART_TEXTURES, face, bind);
@@ -963,7 +1006,8 @@ static int font_point(uint8_t *otf, size_t n, unsigned code, unsigned to) {
 
 /* the keyboard face's codes in texts: one for each Switch button and key shown, given out as they come (from SLOT_BASE: a code
    whose glyph the game has never drawn) and pointed at the key's icon where the game keeps the font; the font served again
-   (live_font) keeps them (slots_point) */
+   (live_font) keeps them (slots_point). L's icon of one way on a key other than the build's takes one as a button does (as
+   button HOS_SW_N + its place in stick_code) */
 static SRWLOCK slot_lock = SRWLOCK_INIT;
 static uint8_t slot_button[SLOTS], slot_key[SLOTS];
 static volatile int nslots;
@@ -972,7 +1016,8 @@ static void slots_point(uint8_t *otf, size_t n) {   /* (slot_lock held) */
     for (int s = 0; s < nslots; s++) font_point(otf, n, SLOT_BASE + (unsigned)s, KEY_BASE + slot_key[s]);
 }
 
-/* the code of Switch button b on key k in a text; -1 when the key has no icon, the font is not found, or all are given out */
+/* the code of Switch button b (or stick icon b - HOS_SW_N) on key k in a text; -1 when the key has no icon, the font is not
+   found, or all are given out */
 static int key_slot(int b, int k) {
     AcquireSRWLockExclusive(&slot_lock);
     int s = 0;
@@ -995,13 +1040,20 @@ static int key_slot(int b, int k) {
 }
 
 static int text_code(unsigned c, int face, const int *bind) {   /* the code that shows c's button now, else -1 */
-    int b = -1, k = -1;
-    for (int i = 0; i < 15 && keyboard_built; i++)   /* (a stick's: the keyboard's keys, or the game's own icon) */
-        if (c == stick_code[i] || c == STICK_KEYS + (unsigned)i || c == STICK_GAME + (unsigned)i)
-            return (face == HOS_PROMPT_KEYBOARD ? STICK_KEYS : STICK_GAME) + i;
+    int b = -1, k = -1, stick = -1;
+    for (int i = 0; i < 15 && keyboard_built && stick < 0; i++)
+        if (c == stick_code[i] || c == STICK_KEYS + (unsigned)i || c == STICK_GAME + (unsigned)i) stick = i;
     for (int i = 0; i < HOS_SW_N && b < 0; i++)
         if (c == switch_code[i]) b = i;
     if (c >= SLOT_BASE && c < SLOT_BASE + SLOTS && (int)(c - SLOT_BASE) < nslots) b = slot_button[c - SLOT_BASE];
+    if (b >= HOS_SW_N) stick = b - HOS_SW_N;
+    if (stick >= 0) {   /* (a stick's: the keyboard's keys as they are bound now, or the game's own icon) */
+        const unsigned shows = face == HOS_PROMPT_KEYBOARD ? stick_shows(stick, bind + BUTTON_BINDS) : STICK_GAME + (unsigned)stick;
+        if (shows < KEY_BASE || shows >= KEY_BASE + 256) return (int)shows;
+        /* (a key's icon: the code the game drew for this stick before may show another key, so one of its own) */
+        const int s = key_slot(HOS_SW_N + stick, (int)(shows - KEY_BASE));
+        return s >= 0 ? s : STICK_GAME + stick;
+    }
     for (int i = 0; i < 3 && k < 0; i++)
         if (c == static_code[i]) k = i;
     if (c >= BIND_BASE && c < BIND_BASE + HOS_PROMPT_N * HOS_SW_N * HOS_PAD_ART_N) b = (int)((c - BIND_BASE) / HOS_PAD_ART_N % HOS_SW_N);
@@ -1154,13 +1206,14 @@ void hos_prompts_live(void) {
         const int found[PARTS] = {0, lay.base != 0, font.at != 0};   /* (the textures: looked at under tex_lock) */
         char dir[MAX_PATH];
         int start, ready = -1;
-        if (tex.l.base && (part_face[PART_TEXTURES] != face || memcmp(part_bind[PART_TEXTURES], bind, sizeof bind)) &&
+        if (tex.l.base && (part_face[PART_TEXTURES] != face || memcmp(part_bind[PART_TEXTURES], bind, BUTTON_BINDS * sizeof *bind)) &&
             (ready = setup(dir, sizeof dir, &start)))
             texture_bin(dir, face);   /* (read before tex_lock) */
         for (int p = 0; p < PARTS; p++) {
             if (p == PART_TEXTURES) AcquireSRWLockExclusive(&tex_lock);   /* (the pool kept, or let go, till its writes end) */
             const int here = p == PART_TEXTURES ? tex.l.base != 0 : found[p];
-            if (here && (part_face[p] != face || memcmp(part_bind[p], bind, sizeof bind))) {
+            const size_t follows = (p == PART_FONT ? BINDS : BUTTON_BINDS) * sizeof *bind;   /* (the movement keys: the font alone) */
+            if (here && (part_face[p] != face || memcmp(part_bind[p], bind, follows))) {
                 if (ready < 0) ready = setup(dir, sizeof dir, &start);
                 if (ready && p == PART_TEXTURES) live_textures(dir, face, bind);
                 if (ready && p == PART_LAYOUTS) live_layouts(dir, face, bind);
@@ -1217,7 +1270,7 @@ static void ring_places(const int *bind, int place[4]) {
     }
 }
 
-/* prompts/Common.blarc.zs: the game's layouts (prompts/Common.blarc) with
+/* cache/prompts/Common.blarc.zs: the game's layouts (prompts/Common.blarc) with
    - the Talk ring's A B X Y where their pad inputs are (prompts/ring.bin, nx2/prompt_assets.py: "HPRG", u32 count; each: u8
      group, u8 Switch button placed, u8 place, u8, u32 runs, the runs);
    - the ocarina hint's icons moved apart for the wide ones bound (prompts/<face>/hint.bin, nx2/prompt_assets.py HINTS: "HPHN",
@@ -1233,16 +1286,17 @@ static int build_layouts(char *out, size_t cap) {
     current_binds(bind);
     Layout o;
     if (!layout_runs(dir, face, bind, &o)) return 0;
-    char keypath[MAX_PATH];
-    snprintf(out, cap, "%sprompts/Common.blarc.zs", dir);
+    char keypath[MAX_PATH], made[MAX_PATH];
+    const int have = made_dir(made, sizeof made);
+    snprintf(out, cap, "%sCommon.blarc.zs", made);
     snprintf(path, sizeof path, "%sprompts/Common.blarc", dir);
-    snprintf(keypath, sizeof keypath, "%sprompts/Common.blarc.key", dir);
+    snprintf(keypath, sizeof keypath, "%sCommon.blarc.key", made);
     FILE *f = fopen(path, "rb");
     long n = 0;
     const int headed = f && fread(lay_head, 1, sizeof lay_head, f) == sizeof lay_head && !in_runs(0, sizeof lay_head, o.runs, o.n) &&
                        !fseek(f, 0, SEEK_END) && (n = ftell(f)) > 0;
     if (f) fclose(f);
-    const int ok = write_patched(path, out, keypath, o.h, o.runs, o.n);
+    const int ok = have && write_patched(path, out, keypath, o.h, o.runs, o.n);
     hos_log("prompts: the Talk ring's A B X Y at places %d %d %d %d, the ocarina hint %s%s", o.place[0], o.place[1],
             o.place[2], o.place[3], o.spread ? "spread" : "as is", ok ? "" : ": could not be written");
     if (ok) part_served(PART_LAYOUTS, face, bind);
@@ -1342,7 +1396,7 @@ static int game_table(char *out, size_t cap) {
     return 1;
 }
 
-/* builds prompts/External.bfotf.zs for this run; 1 when there is one */
+/* builds cache/prompts/External.bfotf.zs for this run; 1 when there is one */
 static int build(char *out, size_t cap) {
     char dir[MAX_PATH], path[MAX_PATH];
     int face;
@@ -1361,8 +1415,10 @@ static int build(char *out, size_t cap) {
     if (!b) return 0;
     if (n >= 8 + 64) memcpy(font.head, b + 8, sizeof font.head);
     for (long i = 8; i < n; i += 4) wr32le(b + i, rd32le(b + i) ^ key);
-    snprintf(out, cap, "%sprompts/External.bfotf.zs", dir);
-    const int ok = write_zstd_raw(out, b, (size_t)n);
+    char made[MAX_PATH];
+    const int have = made_dir(made, sizeof made);
+    snprintf(out, cap, "%sExternal.bfotf.zs", made);
+    const int ok = have && write_zstd_raw(out, b, (size_t)n);
     if (ok) {
         int bind[BINDS];
         current_binds(bind);

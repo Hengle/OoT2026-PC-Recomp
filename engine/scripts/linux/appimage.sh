@@ -21,13 +21,6 @@ VERSION=${HOOKSHOT_VERSION:-$(git describe --tags --long --always --match "v[0-9
 export EMSDK=$DEPS/emsdk RX_CPM=$DEPS/cpm
 PY=$DEPS/python/bin/python3
 
-# ---- the Vulkan back end, built here once (it needs no game) ----
-VKW=$B/vk-work
-rm -rf "$VKW/sa/build/ocarina_reborn_vk.so"
-OOT_WORK=$VKW RX_MARCH=x86-64-v3 RX_VK_ONLY=1 RX_RELEASE=1 "$PY" -I nx2/build.py --standalone --jobs "${JOBS:-$(nproc)}"
-VK=$VKW/sa/build/ocarina_reborn_vk.so
-[ -f "$VK" ] || { echo "ocarina_reborn_vk.so was not built"; exit 1; }
-
 # ---- the tools' native helpers, built now: the AppImage is read-only. a64emit with its C++ runtime inside (the one this system
 # builds with is newer than older systems have), and the stamp build_emit.py checks, so it is not built again ----
 E=third_party/a64-kit/lift
@@ -40,7 +33,7 @@ E=third_party/a64-kit/lift
 rm -rf "$APPDIR"
 mkdir -p "$APPDIR/usr/share/ocarina_reborn" "$APPDIR/usr/lib/ocarina_reborn"
 T=$APPDIR/usr/share/hookshot
-L=$APPDIR/usr/lib/hookshot
+L=$APPDIR/usr/lib/hookshot   # (what the image builds with: emsdk's clang, FFmpeg, SDL2, the sysroot; AppRun points there)
 
 # ---- the tools (the sources the player's build compiles, and the scripts) ----
 cp -a nx2 host scripts LICENSE readme.md assets "$T/"
@@ -55,18 +48,25 @@ for h in $(grep -rhoE 'gpu/vk/[A-Za-z0-9_/]+[.]h' host | sort -u); do if [ -f "$
 cp -a third_party/opus "$T/third_party/"
 cp -a third_party/kenney_input "$T/third_party/"
 cp -a third_party/kenney_input_keyboard "$T/third_party/"
-# (NVIDIA DLSS, when ticked in the builder: scripts/ngx_sdk.py and the Vulkan back end's sources, compiled with HOOKSHOT_NGX_SDK)
+# (the Vulkan back end's sources, which every player's build compiles (nx2/build.py), and, for NVIDIA DLSS when ticked in the
+# builder, scripts/ngx_sdk.py, compiled with HOOKSHOT_NGX_SDK. assets/ above carries its play profile, assets/profiles/)
 mkdir -p "$T/scripts"
 cp scripts/ngx_sdk.py "$T/scripts/"
 cp -a gpu/vk gpu/compat gpu/third_party "$T/gpu/"
 cp -a third_party/imgui third_party/zstd third_party/fonts "$T/third_party/"
 mkdir -p "$T/third_party/zbic" "$T/third_party/a64-kit"
-cp -a third_party/zbic/zbic.so third_party/zbic/LICENSE third_party/zbic/PROVENANCE.md "$T/third_party/zbic/"
+# (the whole folder, not only its prebuilt helper: the player's build compiles the back end from the sources inside the
+# read-only image and reads third_party/zbic's zstd.c, zstd.h and zstd_errors.h for its vk_zstd.o; shipping only zbic.so
+# stopped those builds at FileNotFoundError on third_party/zbic/zstd.h)
+cp -a third_party/zbic "$T/third_party/"
+# (AMD FSR 4, when chosen: AMD's MIT FSR API headers, which the player's Vulkan back end builds with (make_game.py --fsr,
+# nx2/build.py). AMD's runtime is not among them: on Linux the player's own amd_fidelityfx_upscaler_vk.so, the readme)
+cp -a third_party/fidelityfx "$T/third_party/"
 cp -a third_party/a64-kit/* "$T/third_party/a64-kit/"
 rm -f "$T/third_party/a64-kit/tools/lld-link.exe"
 if [ -d work ]; then
     mkdir -p "$T/work/image"
-    for f in hot_funcs.txt hot_order.txt ocarina_reborn_pieces.prof; do [ -f "work/$f" ] && cp "work/$f" "$T/work/"; done
+    for f in hot_funcs.txt hot_order.txt ocarina_reborn_pieces.prof ocarina_reborn_vk.profdata; do [ -f "work/$f" ] && cp "work/$f" "$T/work/"; done
     [ -f work/image/chunks.txt ] && cp work/image/chunks.txt "$T/work/image/"
 fi
 # (the pipeline state list's sources, assets/pipeline_states/, came with assets/ above, and are required: nx2/make_game.py merges
@@ -81,7 +81,6 @@ cp "$DEPS/tk/libtcl9tk9.0.so" "$DEPS/tk/libXft.so.2" "$DEPS/tk/libXrender.so.1" 
 mkdir -p "$L/emsdk"
 cp -a "$DEPS/emsdk/upstream" "$L/emsdk/"
 cp -a "$DEPS/ffmpeg" "$L/ffmpeg"
-cp "$VK" "$L/ocarina_reborn_vk.so"
 cp "$DEPS/sdl2/libSDL2-2.0.so.0" "$L/libSDL2-2.0.so.0"
 for d in "$DEPS"/cpm/*/*; do
     mkdir -p "$T/cpm/${d#"$DEPS/cpm/"}"
@@ -89,10 +88,11 @@ for d in "$DEPS"/cpm/*/*; do
 done
 cp -a "$DEPS/licenses" "$T/licenses"   # (LLVM, FFmpeg, dav1d, SDL2: what this AppImage carries besides Hookshot)
 # ---- the licences of the third-party parts compiled into ocarina_reborn_vk.so (tests/test_appimage_licenses.py) ----
-mkdir -p "$T/licenses/imgui" "$T/licenses/zstd" "$T/licenses/libertinus"
+mkdir -p "$T/licenses/imgui" "$T/licenses/zstd" "$T/licenses/libertinus" "$T/licenses/fidelityfx"
 cp third_party/imgui/LICENSE.txt third_party/imgui/PROVENANCE.md "$T/licenses/imgui/"
 cp third_party/zstd/LICENSE third_party/zstd/PROVENANCE.md "$T/licenses/zstd/"
 cp third_party/fonts/libertinus/OFL.txt third_party/fonts/PROVENANCE.md "$T/licenses/libertinus/"
+cp third_party/fidelityfx/LICENSE.md third_party/fidelityfx/PROVENANCE.md "$T/licenses/fidelityfx/"   # (with AMD FSR 4)
 # ---- end of the licences ----
 
 # the sysroot: this system's C library (headers, start files, the libraries to link against) and GCC's runtime pieces
@@ -119,6 +119,14 @@ for f in crtbegin.o crtbeginS.o crtbeginT.o crtend.o crtendS.o libgcc.a libgcc_e
     [ -e "$GCC/$f" ] && cp -aL "$GCC/$f" "$G/" || true
 done
 # (libgcc_s.so is a linker script naming /lib/x86_64-linux-gnu/libgcc_s.so.1: found in the sysroot through lib -> usr/lib)
+
+# ---- the third-party code's objects, compiled here with the build tools every player's build uses (tools.lock's clang,
+# sysroot and CPM headers), so a player's build links them instead of compiling them: Eden's shader recompiler, sirit, Dear
+# ImGui, zstd, libopus. Their sources are in the image too (above); nothing of the game's, and none of the renderer's own
+# files, which every build compiles. A build whose keys differ (another compiler, other headers, another CPU level) compiles
+# them as before (nx2/third_party_objects.py); scripts/linux/check_player_build.sh checks that a player's build finds them all.
+# (After the sysroot, which they are compiled against: a merge took this out with the sysroot moved below the licences) ----
+HOOKSHOT_SYSROOT=$S "$PY" -I -B nx2/third_party_objects.py make "$T/third_party_objects" --jobs "$(nproc)"
 
 # ---- check: the bundled compiler builds and links a program against the sysroot, and it runs ----
 cat > "$B/t.c" <<'EOF'
@@ -154,13 +162,15 @@ cp assets/ocarina_reborn.png "$APPDIR/usr/share/icons/hicolor/256x256/apps/ocari
 # scripts/linux/publish_parts.sh uploads them: without --base the list named NotRexed/Hookshot's release, which a fork's
 # CI does not upload to, so a fork's update list named parts that were not there)
 python3 scripts/linux/make_parts.py "$APPDIR" "$VERSION" "$B/parts" \
-    --base "https://github.com/${GITHUB_REPOSITORY:-NotRexed/Hookshot}/releases/download/linux-parts"
+    --base "https://git.notrexed.dev/${HOOKSHOT_REPOSITORY:-Hookshot/Hookshot}/releases/download/linux-parts"
 
 # The update information AppImageUpdate and Gear Lever read: the newest .zsync of this repository's latest release (or of
 # the release HOOKSHOT_UPDATE_RELEASE names). appimagetool writes it into the image and makes the .zsync beside it with
 # its bundled zsyncmake, which names the AppImage by its file name, next to the .zsync on the same release.
-UPDATE_REPO=${GITHUB_REPOSITORY:-NotRexed/Hookshot}
-UPDATE_INFO=${HOOKSHOT_UPDATE_INFO:-"gh-releases-zsync|${UPDATE_REPO%%/*}|${UPDATE_REPO#*/}|${HOOKSHOT_UPDATE_RELEASE:-latest}|Hookshot-*-x86_64.AppImage.zsync"}
+UPDATE_REPO=${HOOKSHOT_REPOSITORY:-Hookshot/Hookshot}
+UPDATE_RELEASE=${HOOKSHOT_UPDATE_RELEASE:-latest}
+[ "$UPDATE_RELEASE" = latest ] && UPDATE_PATH=latest/download || UPDATE_PATH=download/$UPDATE_RELEASE
+UPDATE_INFO=${HOOKSHOT_UPDATE_INFO:-"zsync|https://git.notrexed.dev/$UPDATE_REPO/releases/$UPDATE_PATH/Hookshot-x86_64.AppImage.zsync"}
 OUT=$B/Hookshot-$VERSION-x86_64.AppImage
 rm -f "$OUT" "$OUT.zsync"
 # (from build-linux/: appimagetool writes the .zsync into the current folder)

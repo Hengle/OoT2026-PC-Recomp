@@ -205,11 +205,15 @@ static Obj *obj(uint64_t key, int kind) {
 static Obj *obj_nockpt(uint64_t key, int kind) {
     /* (hookshot: 128 still missed: obj_lookup was the busiest leaf in dense Kokiri, 3.2% of all samples, 4.3% of the instants when one
        thread alone ran; each actor has its own mutexes) */
-    static _Thread_local struct { uint64_t key; Obj *o; } cache[1024];
+    /* (hookshot: 4096; at 1024 obj_lookup was still 2.2% of OoT's game threads outdoors) */
+    /* (hookshot, 10/11, MEASURED, not kept: 32768 entries (a table per thread made at its first call) for these 4096. In the
+       Kokiri village obj_lookup is the main thread's busiest leaf while the frame's commands are generated (5.3% of its running
+       time, hs800), but the bigger cache gave nothing: 52.1 and 50.7 fps with it, 53.1 without (hs880 / hs882 / hs881)) */
+    static _Thread_local struct { uint64_t key; Obj *o; } cache[4096];
     static int off = -1;
     if (off < 0) off = env_on("HOS_NO_OBJ_CACHE");
     if (!off) {
-        const unsigned i = (unsigned)((key * 0x9E3779B97F4A7C15ULL) >> 54);
+        const unsigned i = (unsigned)((key * 0x9E3779B97F4A7C15ULL) >> 52);
         Obj *o = cache[i].o;
         if (cache[i].key == key && o && __atomic_load_n(&o->key, __ATOMIC_RELAXED) == key &&
             __atomic_load_n(&o->kind, __ATOMIC_ACQUIRE) == kind)
@@ -282,7 +286,9 @@ static int wait_until(Obj *o, int64_t deadline) {
     if (!deadline) return hos_cv_sleep(&o->cv, &o->lk, INFINITE), 1;
     int64_t left = deadline - hos_now_ns();
     if (left <= 0) return 0;
-    hos_cv_sleep(&o->cv, &o->lk, (DWORD)((left + 999999) / 1000000));
+    /* (in steps of at most ~24 days: 0xFFFFFFFF ms is INFINITE; callers wait again until the deadline) */
+    const int64_t ms = (left + 999999) / 1000000;
+    hos_cv_sleep(&o->cv, &o->lk, (DWORD)(ms < 0x7FFFFFFF ? ms : 0x7FFFFFFF));
     return 1;
 }
 
@@ -441,7 +447,6 @@ static int handoff_on(void) {   /* HOS_NO_HANDOFF=1: the old way (any thread may
     if (v < 0) v = env_on("HOS_NO_HANDOFF") ? 0 : 1;
     return v;
 }
-/* a waiter in: (cv->lk held) */
 /* a waiter counted in for SignalConditionVariable's check, before it takes cv->lk: a signal that reads 0 then came
    before this waiter started to wait. Counted after cv->lk instead, a signal made without the guest mutex could read 0
    while the waiter held cv->lk between its generation read and cv_enter, and return without the wake the old Signal
@@ -449,6 +454,7 @@ static int handoff_on(void) {   /* HOS_NO_HANDOFF=1: the old way (any thread may
 static void cv_count_in(Obj *cv) {
     __atomic_add_fetch(&cv->cv_waiting, 1, __ATOMIC_SEQ_CST);
 }
+/* a waiter in: (cv->lk held) */
 static void cv_enter(Obj *cv, Obj *m) {
     if (cv->cv_in && cv->cv_mutex != m) cv->cv_mixed = 1;
     if (!cv->cv_in) cv->cv_mixed = 0;
@@ -613,6 +619,19 @@ HLE(_ZN2nn2os23SignalConditionVariableEPNS0_21ConditionVariableTypeE) {
     ReleaseSRWLockExclusive(&cv->lk);
     WakeConditionVariable(&cv->cv);
 }
+/* (hookshot) Broadcast: every waiter wakes. Left to the guest SDK, it signals the kernel key at cv+4, which no HLE waiter
+   sleeps on, so its waiters slept on until some Signal (the movie framework's reply and buffer queues, NVIDIA's OS layer:
+   untimed waits). Horizon moves all the waiters onto the mutex, so each is owed it, as a Signal's one is (cv_reserve: one mutex for all of them, at most 8 owed). */
+HLE(_ZN2nn2os26BroadcastConditionVariableEPNS0_21ConditionVariableTypeE) {
+    Obj *cv = obj(ARG(0), K_COND);
+    if (watched_cv(ARG(0))) watch_log("broadcast", watch_mutex(), ARG(0), c, NULL);
+    HOS_CHAIN(HOS_CHAIN_SIGNAL, cv->key);
+    AcquireSRWLockExclusive(&cv->lk);
+    for (int n = cv->cv_waiting - cv->cv_owed; n > 0; n--) cv_reserve(cv);
+    cv->gen++;
+    ReleaseSRWLockExclusive(&cv->lk);
+    WakeAllConditionVariable(&cv->cv);
+}
 HLE(_ZN2nn2os21WaitConditionVariableEPNS0_21ConditionVariableTypeEPNS0_9MutexTypeE) {
     Obj *cv = obj(ARG(0), K_COND), *m = obj(ARG(1), K_MUTEX);
     const int w = watched(ARG(1));
@@ -734,7 +753,50 @@ void hos_event_signal(uint64_t guest_event) { event_signal(obj(guest_event, K_EV
 
 HLE(_ZN2nn2os15InitializeEventEPNS0_9EventTypeEbNS0_14EventClearModeE) { event_init(ARG(0), (int)(ARG(1) & 1), (int)ARG(2)); }
 HLE(_ZN2nn2os13FinalizeEventEPNS0_9EventTypeE) { drop(ARG(0)); }
-HLE(_ZN2nn2os11SignalEventEPNS0_9EventTypeE) { event_signal(obj(ARG(0), K_EVENT)); }
+/* (hookshot) HOS_EVENT_WATCH_LR=<hex> (diagnostic): WaitEvent calls returning there are timed, and the threads (and callers) that
+   SignalEvent the events they wait on are counted; every 5 s. OoT's main thread waits so every 40 frames, outdoors */
+static uint64_t ew_lr = ~0ull;
+static uint64_t ew_keys[16];
+static int ew_n;
+static SRWLOCK ew_lk = SRWLOCK_INIT;
+static struct { uint64_t key, lr; const char *thread; int64_t n; } ew_sig[32];
+static int64_t ew_waits, ew_wait_ns, ew_max_ns, ew_last;
+static int ew_on(void) {
+    if (ew_lr == ~0ull) {
+        const char *e = getenv("HOS_EVENT_WATCH_LR");
+        ew_lr = e ? strtoull(e, NULL, 16) : 0;
+    }
+    return ew_lr != 0;
+}
+static void ew_report_locked(void) {
+    const int64_t now = hos_now_ns();
+    if (now - ew_last < 5000000000LL) return;
+    ew_last = now;
+    hos_log("ewatch: %lld waits at lr %#llx, %.1f ms in all, longest %.2f ms", (long long)ew_waits, (unsigned long long)ew_lr,
+            ew_wait_ns / 1e6, ew_max_ns / 1e6);
+    for (int i = 0; i < 32 && ew_sig[i].key; i++)
+        hos_log("ewatch:   event %#llx signaled by %s (lr %#llx) %lld times", (unsigned long long)ew_sig[i].key,
+                ew_sig[i].thread, (unsigned long long)ew_sig[i].lr, (long long)ew_sig[i].n);
+    memset(ew_sig, 0, sizeof ew_sig);
+    ew_waits = ew_wait_ns = ew_max_ns = 0;
+}
+static void ew_note_signal(Ctx *c, uint64_t key) {
+    if (!ew_on()) return;
+    AcquireSRWLockExclusive(&ew_lk);
+    int hit = 0;
+    for (int i = 0; i < ew_n && !hit; i++) hit = ew_keys[i] == key;
+    if (hit) {
+        const char *t = hos_thread_name(hos_self());
+        int i = 0;
+        while (i < 32 && ew_sig[i].key && !(ew_sig[i].key == key && ew_sig[i].lr == c->x[30] && ew_sig[i].thread == t)) i++;
+        if (i < 32) ew_sig[i].key = key, ew_sig[i].lr = c->x[30], ew_sig[i].thread = t, ew_sig[i].n++;
+    }
+    ReleaseSRWLockExclusive(&ew_lk);
+}
+HLE(_ZN2nn2os11SignalEventEPNS0_9EventTypeE) {
+    ew_note_signal(c, ARG(0));
+    event_signal(obj(ARG(0), K_EVENT));
+}
 HLE(_ZN2nn2os10ClearEventEPNS0_9EventTypeE) { event_clear(obj(ARG(0), K_EVENT)); }
 
 /* HOS_WAIT_LOG=1 (diagnostic): event waits by guest caller and thread every 5 s (count, total, longest), the
@@ -944,6 +1006,20 @@ static void sema_release(Obj *s, int n) {
     WakeAllConditionVariable(&s->cv);
     poke_multiwait(s);
 }
+/* an acquire that waits at most ns (<= 0: does not wait); whether it got one */
+static int sema_acquire_for(Obj *s, int64_t ns) {
+    const int64_t now = hos_now_ns();
+    const int64_t deadline = ns <= 0 ? now : ns > INT64_MAX - now ? INT64_MAX : now + ns;   /* (a huge TimeSpan: no wrap) */
+    const int chain = ns > 0 && s->sem <= 0 && hos_chain_on;
+    if (chain) hos_chain_note(HOS_CHAIN_WAIT, s->key, 0);
+    AcquireSRWLockExclusive(&s->lk);
+    while (s->sem <= 0 && wait_until(s, deadline) && hos_now_ns() < deadline) {}
+    const int ok = s->sem > 0;
+    if (ok) s->sem--;
+    ReleaseSRWLockExclusive(&s->lk);
+    if (chain) hos_chain_note(HOS_CHAIN_WOKE, s->key, 0);
+    return ok;
+}
 HLE(_ZN2nn2os19InitializeSemaphoreEPNS0_13SemaphoreTypeEii) { sema_init(ARG(0), (int)ARG(1), (int)ARG(2)); }
 HLE(_ZN2nn2os17FinalizeSemaphoreEPNS0_13SemaphoreTypeE) { drop(ARG(0)); }
 HLE(_ZN2nn2os16AcquireSemaphoreEPNS0_13SemaphoreTypeE) { sema_acquire(obj(ARG(0), K_SEMA)); }
@@ -954,6 +1030,12 @@ HLE(_ZN2nn2os21AcquireLightSemaphoreEPNS0_18LightSemaphoreTypeE) { sema_acquire(
 HLE(_ZN2nn2os21ReleaseLightSemaphoreEPNS0_18LightSemaphoreTypeE) { sema_release(obj(ARG(0), K_SEMA), 1); }
 /* (hookshot) the count overload, which OoT imports: left to the guest SDK it would bypass the host's state */
 HLE(_ZN2nn2os21ReleaseLightSemaphoreEPNS0_18LightSemaphoreTypeEi) { sema_release(obj(ARG(0), K_SEMA), (int)ARG(1)); }
+/* (hookshot) the timed and try acquires: left to the guest SDK they read its count words, which the HLE never writes, and
+   wait on a kernel key no HLE release signals (the C library's timed semaphore wait and NVIDIA's OS layer call
+   TimedAcquireSemaphore). */
+HLE(_ZN2nn2os21TimedAcquireSemaphoreEPNS0_13SemaphoreTypeENS_8TimeSpanE) { RET(sema_acquire_for(obj(ARG(0), K_SEMA), (int64_t)ARG(1))); }
+HLE(_ZN2nn2os26TimedAcquireLightSemaphoreEPNS0_18LightSemaphoreTypeENS_8TimeSpanE) { RET(sema_acquire_for(obj(ARG(0), K_SEMA), (int64_t)ARG(1))); }
+HLE(_ZN2nn2os24TryAcquireLightSemaphoreEPNS0_18LightSemaphoreTypeE) { RET(sema_acquire_for(obj(ARG(0), K_SEMA), 0)); }
 
 /* ---- message queues (normal and light): the guest's buffer size is the capacity ------------------------------ */
 static void queue_init(uint64_t key, int capacity) {
@@ -1258,7 +1340,26 @@ HLE(_ZN2nn2os11SystemEventC2ENS0_14EventClearModeEb) { event_init(ARG(0), 0, (in
 HLE(_ZN2nn2os11SystemEventD2Ev) { drop(ARG(0)); }
 
 /* ---- the remaining waits on the HLE's objects ----------------------------------------------------------------- */
-HLE(_ZN2nn2os9WaitEventEPNS0_9EventTypeE) { event_wait(obj(ARG(0), K_EVENT), 0, 0); }
+HLE(_ZN2nn2os9WaitEventEPNS0_9EventTypeE) {
+    if (ew_on() && c->x[30] == ew_lr) {   /* (hookshot, HOS_EVENT_WATCH_LR) */
+        const uint64_t key = ARG(0);
+        AcquireSRWLockExclusive(&ew_lk);
+        int known = 0;
+        for (int i = 0; i < ew_n && !known; i++) known = ew_keys[i] == key;
+        if (!known && ew_n < 16) ew_keys[ew_n++] = key;
+        ReleaseSRWLockExclusive(&ew_lk);
+        const int64_t t0 = hos_now_ns();
+        event_wait(obj(key, K_EVENT), 0, 0);
+        const int64_t took = hos_now_ns() - t0;
+        AcquireSRWLockExclusive(&ew_lk);
+        ew_waits++, ew_wait_ns += took;
+        if (took > ew_max_ns) ew_max_ns = took;
+        ew_report_locked();
+        ReleaseSRWLockExclusive(&ew_lk);
+        return;
+    }
+    event_wait(obj(ARG(0), K_EVENT), 0, 0);
+}
 HLE(_ZN2nn2os12TryWaitEventEPNS0_9EventTypeE) { RET(event_wait(obj(ARG(0), K_EVENT), 0, 1)); }
 HLE(_ZN2nn2os14TimedWaitEventEPNS0_9EventTypeENS_8TimeSpanE) {
     RET(event_wait(obj(ARG(0), K_EVENT), (int64_t)ARG(1) > 0 ? (int64_t)ARG(1) : 1, (int64_t)ARG(1) <= 0));

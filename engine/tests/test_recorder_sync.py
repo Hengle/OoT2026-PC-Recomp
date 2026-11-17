@@ -32,7 +32,8 @@ python -I -B tests/test_recorder_sync.py --headers <Vulkan-Headers/include> [--c
    Thread (each run with --only thread, so the recorder thread's checks alone catch it): no wait before vkEndCommandBuffer, before
    vkQueueSubmit2, at the replay lock's release, before vkResetCommandPool; no backpressure (the ring overwritten); no join at
    teardown; a packet bigger than its room written into the ring when the ring has more free; the recorder's exception swallowed
-   (--throw).
+   (--throw). Destruction leaves a copy unpublished, with the recorder awake until a boundary publishes it: skipping the destruction
+   boundary must put that copy after destruction, even if the producer is paused before it calls the fake driver.
 4. (Windows) the process ends cleanly with the recorder parked in idle() holding its lock: tests/recorder_exit_test.cpp, a DLL with
    the real headers and an exe that calls ExitProcess (as the window's close does); exit code 0 within 20 s (a watchdog ends only
    that child) and the DLL's last global destructor run. Broken: the old global recorder with its destructor (wake, join).
@@ -96,7 +97,9 @@ C_COMMENT_OR_STRING = re.compile(r'//[^\n]*|/\*.*?\*/|"(?:\\.|[^"\\\n])*"|\'(?:\
 UI_RECORD_CALL = re.compile(r"\bui\s*::\s*record(?:_to)?\s*\(")
 NGX_RECORD_CALL = re.compile(r"\bNGX_(?:VULKAN_\w+_EXT|VK_\w+_DLSSG)\s*\(")   # (NVIDIA NGX's create/evaluate, DLSS's and frame generation's: its own commands into cmd)
 FFX_RECORD_CALL = re.compile(r"\bl\s*\.\s*dispatch\s*\(")   # (AMD FidelityFX's ffxDispatch, through its loaded pointer: its own commands into cmd)
-OPAQUE_RECORD_CALL = re.compile(UI_RECORD_CALL.pattern + "|" + NGX_RECORD_CALL.pattern + "|" + FFX_RECORD_CALL.pattern)
+XESS_RECORD_CALL = re.compile(r"\bl\s*\.\s*execute\s*\(")   # (Intel XeSS's xessVKExecute, through its loaded pointer: its own commands into cmd)
+OPAQUE_RECORD_CALL = re.compile(UI_RECORD_CALL.pattern + "|" + NGX_RECORD_CALL.pattern + "|" + FFX_RECORD_CALL.pattern + "|" +
+                                XESS_RECORD_CALL.pattern)
 B_DIRECT_BEFORE = re.compile(r"::\s*mkwvk\s*::\s*rec\s*::\s*boundary\s*\(\s*::\s*mkwvk\s*::\s*rec\s*::\s*B_DIRECT\s*\)\s*;\Z")
 
 
@@ -158,11 +161,18 @@ def check_sources():
     if not m:
         raise SystemExit("RX_REC_BOUNDARIES not found in vk_recorder.h")
     bounds = dict((f, k) for k, f in re.findall(r"\b([KM])\((\w+)\)", m.group(1)))
-    bmacros = dict(re.findall(r"#define (\w+)\(\.\.\.\) \(::mkwvk::rec::boundary\(::mkwvk::rec::B_\w+\), (::vkx::|::)\w+\(__VA_ARGS__\)\)", work))
-    for f, q in bmacros.items():
-        if "#define %s(...) (::mkwvk::rec::boundary(::mkwvk::rec::B_%s), %s%s(__VA_ARGS__))" % (f, f, q, f) not in work:
-            problems.append("vk_work.h: %s's macro calls another function" % f)
-    if set(bmacros) != set(bounds) or any(bmacros[f] != ("::vkx::" if k == "K" else "::") for f, k in bounds.items() if f in bmacros):
+    timed = {"vkWaitForFences": "fences", "vkWaitSemaphores": "timeline", "vkQueueWaitIdle": "idle",
+             "vkDeviceWaitIdle": "idle", "vkGetQueryPoolResults": "queries"}
+    bmacros = {f: (b, call) for f, b, call in re.findall(
+        r"^#define (\w+)\(\.\.\.\) \(::mkwvk::rec::boundary\(::mkwvk::rec::B_(\w+)\), (.+)\)[ \t]*$", code(work), re.M)}
+    for f, k in bounds.items():
+        q = "::vkx::" if k == "K" else "::"
+        mask = ", VK_QUERY_RESULT_WAIT_BIT" if f == "vkGetQueryPoolResults" else ""
+        call = ("::mkwvk::gpu_wait_stats::%s(%s%s%s, __VA_ARGS__)" % (timed[f], q, f, mask)
+                if f in timed else "%s%s(__VA_ARGS__)" % (q, f))
+        if bmacros.get(f) != (f, call):
+            problems.append("vk_work.h: %s does not drain first and call its own driver function" % f)
+    if set(bmacros) != set(bounds):
         problems.append("vk_work.h's boundary macros and RX_REC_BOUNDARIES differ: only in vk_work.h %s, only in vk_recorder.h %s"
                         % (sorted(set(bmacros) - set(bounds)), sorted(set(bounds) - set(bmacros))))
     unwrapped = {}
@@ -234,6 +244,13 @@ def check_sources():
         problems.append("vk_fsr4.cpp: no ffxDispatch call (l.dispatch) found: update FFX_RECORD_CALL")
     elif not direct_unbounded(fsr4.replace(B_DIRECT_STMT, "", 1), "vk_fsr4.cpp", FFX_RECORD_CALL):
         problems.append("the B_DIRECT check missed an ffxDispatch recording without its boundary")
+    # (Intel XeSS records into cmd through xessVKExecute: after a B_DIRECT boundary; control: that boundary removed)
+    xess = (VK / "vk_xess.cpp").read_text(encoding="utf-8")
+    problems += direct_unbounded(xess, "vk_xess.cpp", XESS_RECORD_CALL)
+    if not XESS_RECORD_CALL.search(blank_comments(xess)):
+        problems.append("vk_xess.cpp: no xessVKExecute call (l.execute) found: update XESS_RECORD_CALL")
+    elif not direct_unbounded(xess.replace(B_DIRECT_STMT, "", 1), "vk_xess.cpp", XESS_RECORD_CALL):
+        problems.append("the B_DIRECT check missed an xessVKExecute recording without its boundary")
     # (and any other recording vk_work.h does not see must be registered: every hand-written note_work() follows a known one)
     for path in sorted(VK.glob("*.cpp")):
         problems += opaque_unregistered(path.read_text(encoding="utf-8"), path.name)
@@ -264,6 +281,7 @@ def build(cxx, headers, out, recorder_text, name, extra=(), work_text=None):
     (d / "vk_loader.h").write_text(test_loader(), encoding="utf-8")
     (d / "vk_work.h").write_text(work_text or (VK / "vk_work.h").read_text(encoding="utf-8"), encoding="utf-8")
     (d / "vk_recorder.h").write_text(recorder_text, encoding="utf-8")
+    (d / "gpu_wait_stats.h").write_text((VK / "gpu_wait_stats.h").read_text(encoding="utf-8"), encoding="utf-8")
     exe = d / "recorder_sync_test.exe"
     cmd = [cxx, "-std=c++20", "-include", ENV_ON_H, "-O2", "-Wall", "-Wextra", "-Werror", "-Wno-unused-function", "-Wno-missing-field-initializers", "-DVK_NO_PROTOTYPES",
            "-D_CRT_SECURE_NO_WARNINGS",
@@ -334,8 +352,8 @@ def unordered_too(rec, f):
 
 def no_wait(work_h, f):
     """vk_work.h with f's boundary macro calling the driver at once (no drain, no wait)"""
-    return broken(work_h, "#define %s(...) (::mkwvk::rec::boundary(::mkwvk::rec::B_%s), ::vkx::%s(__VA_ARGS__))" % (f, f, f),
-                  "#define %s(...) (::vkx::%s(__VA_ARGS__))" % (f, f), f)
+    return broken(work_h, "#define %s(...) (::mkwvk::rec::boundary(::mkwvk::rec::B_%s), " % (f, f),
+                  "#define %s(...) (" % f, f)
 
 
 EXIT_LINES = ("recorder parked in idle() holding sleep_mu: 1; ExitProcess", "DLL detach: the global destructors ran to the end")
@@ -350,6 +368,7 @@ def exit_test(cxx, headers, out, recorder_text, name):
     (d / "vk_loader.h").write_text(test_loader(), encoding="utf-8")
     (d / "vk_work.h").write_text((VK / "vk_work.h").read_text(encoding="utf-8"), encoding="utf-8")
     (d / "vk_recorder.h").write_text(recorder_text, encoding="utf-8")
+    (d / "gpu_wait_stats.h").write_text((VK / "gpu_wait_stats.h").read_text(encoding="utf-8"), encoding="utf-8")
     src = str(ROOT / "tests" / "recorder_exit_test.cpp")
     flags = ["-std=c++20", "-include", ENV_ON_H, "-O2", "-Wall", "-Wextra", "-Werror", "-DVK_NO_PROTOTYPES", "-D_CRT_SECURE_NO_WARNINGS"]
     for cmd in ([cxx, *flags, "-shared", "-DRX_EXIT_DLL", "-I" + str(d), "-I" + str(headers), src, "-o", str(d / "rx_exit.dll")],

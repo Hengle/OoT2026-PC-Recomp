@@ -1,11 +1,11 @@
-"""Save my pipeline list: the zip a player attaches to the "Submit your pipelines" issue (#2034), so that the pipelines their play
+"""Save my pipeline list: the zip a player attaches to the "Submit your pipelines" issue (#14), so that the pipelines their play
 built go into the list the next release builds before the game (nx2/pipeline_states.py, assets/pipeline_states/README.md).
 
-The zip holds two files and nothing else: the game folder's ocarina_reborn_pipeline_states.bin (checked first as
+The zip holds two files and nothing else: the game folder's ocarina_reborn_pipeline_states.bin (in its cache/; checked first as
 nx2/pipeline_states.py --check checks a list: whole, of a format this build reads, holding pipelines) and
 ocarina_reborn_pipeline_report.txt, the issue's template filled in from the game folder: the version, the OS, the GPU and its driver
 (from the game's last log), the output and render resolution, the upscaler, frame generation and HDR (from
-ocarina_reborn_options.ini) and the mods found in its mods folder. Where the player played is left for them to fill in. Nothing is
+ocarina_reborn_options.ini, the one the log names in the user folder, else the game folder's) and the mods found in its mods folder. Where the player played is left for them to fill in. Nothing is
 uploaded: the player attaches the zip to the issue and pastes the template themselves.
 
 The game's Insert menu does the same in C++ (Debug tab, Save my pipeline list: gpu/vk/pipeline_share.h, vk_menu.cpp), and
@@ -29,8 +29,8 @@ import zipfile
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import pipeline_states  # noqa: E402  (the list's checks: parse, strict)
 
-ISSUE = 2034
-ISSUE_URL = "https://github.com/NotRexed/Hookshot/issues/%d" % ISSUE
+ISSUE = 14
+ISSUE_URL = "https://git.notrexed.dev/Hookshot/Hookshot/issues/%d" % ISSUE
 LIST = "ocarina_reborn_pipeline_states.bin"
 REPORT = "ocarina_reborn_pipeline_report.txt"
 # (the issue's template, its lines in its order; gpu/vk/pipeline_share.h writes the same: tests/test_pipeline_share.py)
@@ -44,7 +44,8 @@ NOTE = ("Attach this zip to a comment on %s and paste the lines below into it, w
 
 # (ocarina_reborn_options.ini's values as the menu names them: gpu/vk/vk_menu.cpp tx_upscaler, tx_framegen, tx_hdr, and
 # gpu/vk/upscaler_rows.h kPercent)
-UPSCALERS = ("Game's own", "NVIDIA DLSS", "NVIDIA DLAA", "AMD FSR 3.1", "AMD FSR 4", "AMD FSR 4 Native AA", "Off (no upscaling)")
+UPSCALERS = ("Game's own", "NVIDIA DLSS", "NVIDIA DLAA", "AMD FSR 3.1", "AMD FSR 4", "AMD FSR 4 Native AA", "Off (no upscaling)",
+             "Intel XeSS", "Intel XeSS Native AA")
 PERCENT = (0, 100, 75, 67, 50, 58, 33, 42, 83, 92)
 MODES = {67: "Quality", 58: "Balanced", 50: "Performance", 33: "Ultra Performance"}
 FRAMEGEN = ("Off", "Auto", "2x", "3x", "4x", "5x", "6x", "7x", "8x")
@@ -89,10 +90,20 @@ def check_list(path):
     return read_list(path)[1]
 
 
-def read_ini(folder):
+def options_file(folder, log=()):
+    """The settings the game played with: the file its log names (host/options_path.c: in the user folder, every build's), else
+    the game folder's, where a build from before kept them"""
+    for line in reversed(list(log)):
+        m = re.search(r"options: the settings file is (.+?hookshot_options\.ini)\s*$", line)
+        if m:
+            return m.group(1)
+    return os.path.join(folder, "ocarina_reborn_options.ini")
+
+
+def read_ini(folder, log=()):
     values = {}
     try:
-        with open(os.path.join(folder, "ocarina_reborn_options.ini"), encoding="utf-8", errors="replace") as f:
+        with open(options_file(folder, log), encoding="utf-8", errors="replace") as f:
             for line in f:
                 k, eq, v = line.strip().partition("=")
                 if eq and k:
@@ -186,7 +197,7 @@ def mods_text(names):
 
 
 def _log_lines(folder):
-    for d in (folder, os.path.join(folder, "bin")):
+    for d in (os.path.join(folder, "logs"), folder, os.path.join(folder, "bin")):   # (logs/: host/game_layout.c; the others before it)
         try:
             with open(os.path.join(d, "ocarina_reborn_log.txt"), encoding="utf-8", errors="replace") as f:
                 return f.read(4 << 20).splitlines()
@@ -268,7 +279,7 @@ def os_text():
 def details(folder, recs, log=None):
     """The template's values, in FIELDS' order ("" for one to fill in)"""
     log = _log_lines(folder) if log is None else log
-    values = read_ini(folder)
+    values = read_ini(folder, log)
     gpu = gpu_text(folder, log)
     return [version_text(folder, log), "%s; %s" % (os_text(), gpu or "(GPU and driver: fill in)"), output_text(values),
             upscaler_text(values), framegen_hdr_text(values), mods_text(find_mods(folder)), "",
@@ -311,10 +322,17 @@ def downloads_dir():
     return d if os.path.isdir(d) else home
 
 
+def list_path(folder):
+    """The game folder's pipeline list: in its cache/ (host/game_layout.c, gpu/vk/vk_draw.cpp state_list_path), or loose in the
+    folder from a build before cache/"""
+    cached = os.path.join(folder, "cache", LIST)
+    return cached if os.path.isfile(cached) else os.path.join(folder, LIST)
+
+
 def make_zip(folder, out_dir=None, day=None):
     """The zip for the issue, from the game folder: (its path, the filled template, the number of pipelines). ShareError when the
     list is missing or not one to share (nothing written then)"""
-    path = os.path.join(folder, LIST)
+    path = list_path(folder)
     data, recs = read_list(path)   # (read once: the bytes checked are the bytes zipped)
     text = template(details(folder, recs))
     out_dir = out_dir or downloads_dir()

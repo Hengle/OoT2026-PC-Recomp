@@ -13,15 +13,15 @@ Hookshot's shader hashes; their notes say how. They hold the same records as any
   - the draw state it was built with
 
   There are no shaders in it, only their hashes. A player's build turns those hashes back into shaders from the
-  player's own `hookshot_shaders.bin`. `nx2/pipeline_states.py` documents the record layout.
+  player's own `ocarina_reborn_shaders.bin`. `nx2/pipeline_states.py` documents the record layout.
 - **Compute programs:** a record can also name a compute program the game ran (culling, terrain, post-processing). It
   holds the hash of that one shader and nothing else, because a compute pipeline has no formats or draw state. It is
   the same on every GPU and with any settings. The tools count these as `compute` beside `graphics` and `mesh`.
 - **What it is for:** `nx2/make_game.py` merges every list here into the game folder's
-  `hookshot_pipeline_states_shipped.bin`. The first start's shader preparation then builds these pipelines before the
+  `ocarina_reborn_pipeline_states_shipped.bin`. The first start's shader preparation then builds these pipelines before the
   title screen, so the first field load doesn't wash out white while they compile. Every start also keeps the listed
   compute programs' pipelines ready, together with the ones the player's own play has run, so a program is not set up
-  the first time the game runs it. `nx2/pipeline_states.py check` stops when the merged list names more than 1024
+  the first time the game runs it. `nx2/pipeline_states.py check` stops when the merged list names more than 2560
   compute programs (`COMPUTE_MOST`): the game keeps memory for each one listed and never drops one itself, so raise
   the number with a measurement or prune the list.
 
@@ -47,9 +47,9 @@ a pipeline again, the merge keeps it once.
 
 ## Contributing a list
 
-Players without a clone send their list to the [Submit your pipelines](https://github.com/NotRexed/Hookshot/issues/2034)
+Players without a clone send their list to the [Submit your pipelines](https://git.notrexed.dev/Hookshot/Hookshot/issues/2034)
 issue: **Save my pipeline list** (the game's menu, Debug tab, or the builders' launcher page; readme, *Send your
-pipeline list*) zips the game folder's `hookshot_pipeline_states.bin` with a filled-in report
+pipeline list*) zips the game folder's `ocarina_reborn_pipeline_states.bin` with a filled-in report
 (`hookshot_pipeline_report.txt`: the version, OS, GPU and driver, settings and mods), and nothing else. A maintainer then
 adds it as below, with the report's lines as `--gpu`, `--build`, `--settings` and `--route`. The zip is made by
 `gpu/vk/pipeline_share.h` in the game and `nx2/pipeline_share.py` in the builders, after the same checks as
@@ -67,7 +67,7 @@ With a clone:
 
 1. Build the game from current `main`. A list from an older build may hold pipelines the current build no longer asks
    for.
-2. Move the game folder's `hookshot_pipeline_states.bin` aside if there is one. Play: every pipeline the game makes in
+2. Move the game folder's `ocarina_reborn_pipeline_states.bin` aside if there is one. Play: every pipeline the game makes in
    play is added to that file. A run doesn't write the pipelines that the shipped list already built before the title,
    so your list only holds what the current one misses. It does write every compute program the run used, and `add`
    keeps the ones no other contributed list has. Play what the current lists miss, such as areas, dungeons,
@@ -75,7 +75,7 @@ With a clone:
 3. Add it, from the repository's root:
 
    ```sh
-   python -I nx2/pipeline_states.py add <github user>-<what you played> <game folder>/hookshot_pipeline_states.bin \
+   python -I nx2/pipeline_states.py add <github user>-<what you played> <game folder>/ocarina_reborn_pipeline_states.bin \
        --who "<github user>" --gpu "<GPU>, driver <version>, <OS>" --build "main at <commit>" \
        --settings "<resolution, upscaler, frame generation, mods>" --route "<what you played>"
    python -I nx2/pipeline_states.py check
@@ -96,8 +96,15 @@ converted to the new format (or recorded again) in place, and the layout stays t
 
 ## The tour's list
 
-The pipeline tour plays a fixed route on its own and records the pipelines it makes. It then replaces `tour.bin.xz` and
-`tour.md` with that list:
+The pipeline tour (`scripts/pipeline_tour.py`, [docs/development.md](../../docs/development.md#the-pipeline-tour)) plays a
+fixed route on its own, through the game's control bridge, and records the pipelines it makes. With `--publish` it then
+replaces `tour.bin.xz` and `tour.md` with that list, filling the note in from its runs:
+
+```sh
+python -I scripts/pipeline_tour.py tour --game <game folder> --out <tour dir> --name play --publish
+```
+
+which runs, for the parts' lists:
 
 ```sh
 python -I nx2/pipeline_states.py tour <tour lists>... --gpu "..." --build "main at <commit>" --settings "..." --route "..."

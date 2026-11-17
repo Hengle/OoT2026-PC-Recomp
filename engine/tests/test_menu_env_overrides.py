@@ -3,7 +3,8 @@
 RX_VK_FRAMEGEN_MULT, RX_VK_PACE, RX_VK_UPSCALE, HOS_REALTIME_STEP, HOS_DYNRES and HOS_OUTPUT_RES are applied to the
 rows in menu_init. They used to be copied into the rows as if chosen, so the next save (any row changed in the menu)
 wrote them into the player's options for good. Compile the menu's real save() and the overrides' part of menu_init with
-small stand-ins and check what the file gets. No game or GPU is needed.
+small stand-ins and check what the file gets. On Linux, a save that cannot write a byte leaves the file as it was and no
+part file, and an options file that is a link stays one, also to a file not made yet. No game or GPU is needed.
 """
 import argparse
 import os
@@ -44,6 +45,16 @@ FIXTURE = r"""
 #include <cstring>
 #include <iterator>
 #include <mutex>   // (save() locks since the control bridge, #926)
+#include <cerrno>   // (save(): what failed, the options file's mode, its move)
+#ifdef _WIN32
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#else
+#include <sys/stat.h>
+#include <unistd.h>
+#endif
 #include <string>
 #include "ocarina_reborn_env.h"   // (gpu/vk/compat: env_value_off, the switches' rule)
 #include "hos_wide_size.h"   // (host/: the output sizes the menu accepts, hos_output_size_valid)
@@ -60,7 +71,18 @@ int ultrawide_read = 1, aspect_started = -1;
 bool aspect_follows_host(int) { return false; }
 #ifdef _WIN32
 static int setenv(const char* name, const char* value, int) { return _putenv_s(name, value); }
+#define NOMINMAX
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>   // (save(): MoveFileExA)
 #endif
+#ifdef __linux__
+#include <csignal>
+#include <sys/resource.h>
+#include <sys/stat.h>
+#include <unistd.h>
+#endif
+static int logged;   // (save()'s line when the options file could not be written)
+void logf(const char*, ...) { logged++; }
 
 #define CHECK(x) do { if (!(x)) { std::fprintf(stderr, "FAIL %d: %s\n", __LINE__, #x); return 1; } } while (0)
 /* OPTIONS */
@@ -81,11 +103,18 @@ Row rows[] = {
 std::string ini_file;
 std::string ini_path() { return ini_file; }
 std::string mic_want;
+uint64_t auto_for = 0, auto_tuned = 0;   // (the Quality preset Auto (this PC)'s fingerprints, which save() writes)
+#include "gpu_choice.h"   // (the GPU device row saved as the card itself, which save() writes)
+namespace gpu_choice = mkwvk::gpu_choice;
+std::vector<gpu_choice::Card> gpu_device_cards;
+std::string gpu_saved_card;
+bool gpu_card_missing = false;
+struct { int steps = 0; bool went_down = false; } auto_tuning;   // (and its tuning's steps)
 constexpr int HOS_KEY_N = 1, HOS_SW_N = 1, HOS_BIND_PAD = 0, HOS_BIND_KEY = 1;
 constexpr int HOS_KEY_OC_NOTE_L = 1, HOS_KEY_OC_NOTE_X = 1;   /* (the note rows: past this stub's one row) */
 const char* const bind_names[1] = {"a"};
 struct Host { int (*binding)(int, int, int); } host_value{nullptr}, *host = &host_value;
-bool can_bind() { return false; }
+bool can_bind() { return host->binding != nullptr; }
 /* INI_KEY */
 /* SAVE */
 void env_part() {
@@ -106,6 +135,10 @@ int main(int argc, char** argv) {
     CHECK(argc == 2);
     ini_file = argv[1];
     setenv("HOS_DISPLAY_MODES", "1920x1080,2560x1440", 1);   // (the screen's sizes: the game's own, these, 16:9's common ones)
+    FILE* initial = std::fopen(ini_file.c_str(), "w");
+    CHECK(initial);
+    std::fputs("pad_a=1,17\nkey_a=69,0\ntoggle_a=1\n", initial);
+    std::fclose(initial);
     // The player's own: pace off, Per frame, 75%, Bilinear, 3x, a size of their own
     opts.pace = 0, opts.realtime = 0, opts.resolution = 2, opts.upscale = 0, opts.framegen = 3;
     opts.output_res = parse_output("3000x1688");
@@ -126,6 +159,7 @@ int main(int argc, char** argv) {
     opts.sharpness = 40;
     save();
     CHECK(has("sharpness=40\n"));
+    CHECK(has("pad_a=1,17\n") && has("key_a=69,0\n") && has("toggle_a=1\n"));
     CHECK(has("frame_pacing=0\n"));
     CHECK(has("game_speed=0\n"));
     CHECK(has("resolution=2\n"));
@@ -148,12 +182,51 @@ int main(int argc, char** argv) {
     CHECK(opts.output_res == 3 && output_at(3).w == 2560 && output_at(3).h == 1440);
     save();
     CHECK(has("output_res=2560x1440\n"));
-    // A preset (or the Upscaler's snap) sets an overridden row to the very value the environment forced: the menu's, saved
+    // A preset sets an overridden row to the very value the environment forced: the menu's, saved
     CHECK(has("game_speed=0\n"));
     env_release(&opts.realtime);
     save();
     CHECK(has("game_speed=1\n"));
-    std::puts("PASS: the environment's rows last for the run; the options file keeps the player's");
+    CHECK(!logged && !std::fopen((ini_file + ".new").c_str(), "r"));
+    host->binding = [](int set, int, int slot) {
+        return set == HOS_BIND_PAD ? (slot ? 17 : 1) : (slot ? 0 : 69);
+    };
+    save();
+    CHECK(has("pad_a=1,17\n") && has("key_a=69,0\n") && has("toggle_a=0\n"));
+    CHECK(!has("toggle_a=1\n"));   // the old flag must not overwrite the new one on reload
+    opts.hold_toggle = 1;
+    save();
+    CHECK(has("toggle_a=1\n") && !has("toggle_a=0\n"));
+#ifdef __linux__
+    // A save that cannot be written (a full disk: no byte may be written here): the options file as it was, no part file left
+    const std::string before = slurp();
+    rlimit was{};
+    getrlimit(RLIMIT_FSIZE, &was);
+    rlimit none = was;
+    none.rlim_cur = 0;
+    std::signal(SIGXFSZ, SIG_IGN);
+    CHECK(setrlimit(RLIMIT_FSIZE, &none) == 0);
+    opts.sharpness = 70;
+    save();
+    setrlimit(RLIMIT_FSIZE, &was);
+    CHECK(!before.empty() && slurp() == before && logged == 1);
+    CHECK(!std::fopen((ini_file + ".new").c_str(), "r"));
+    save();   // (and the next save that can write does)
+    CHECK(has("sharpness=70\n"));
+    // The options file a link: its target written and the link kept, also when the target is not made yet
+    const std::string target = ini_file + ".target";
+    std::remove(ini_file.c_str());
+    CHECK(symlink(target.c_str(), ini_file.c_str()) == 0);
+    struct stat st;
+    for (int sharpness : {60, 50}) {   // (the target missing, then there)
+        opts.sharpness = sharpness;
+        save();
+        CHECK(lstat(ini_file.c_str(), &st) == 0 && S_ISLNK(st.st_mode));
+        CHECK(has(("sharpness=" + std::to_string(sharpness) + "\n").c_str()) && logged == 1);
+        CHECK(!std::fopen((ini_file + ".new").c_str(), "r") && !std::fopen((target + ".new").c_str(), "r"));
+    }
+#endif
+    std::puts("PASS: the environment's rows last for the run; the options file keeps the player's, also when a save fails");
 }
 """
 

@@ -7,8 +7,9 @@ namespace mkwvk {
 
 bool framegen_on();
 /// Records the frame's processing into the present's recording (src: the window texture's view, sw x sh, the crop
-/// x, y, w, h); false when interpolation cannot run (the present goes to the window as without it)
-bool framegen_record(VkCommandBuffer cmd, VkImageView src, uint32_t sw, uint32_t sh, const int crop[4]);
+/// x, y, w, h; cover: wide_sides_tick's, this frame's; native_pq: the encoding of that captured present); false when
+/// interpolation cannot run (the present goes to the window as without it)
+bool framegen_record(VkCommandBuffer cmd, VkImageView src, uint32_t sw, uint32_t sh, const int crop[4], float cover, bool native_pq);
 /// (hookshot) Who made the made frames of the sets shown lately (the last 64, about a second at 60): what the Insert menu's
 /// Frame generation by row and the FPS counter name. None: none made (Off, nothing to blend from, none for half a second)
 enum class FgMaker { None, BuiltIn, Dlss, Fsr3 };
@@ -33,19 +34,25 @@ struct PendingPresent {
 };
 extern thread_local PendingPresent* present_defer_into;
 bool present_commit(const PendingPresent& p);   // (false: not shown, nothing deferred or a swapchain made again since)
-/// The Insert menu's upscaling of a frame to the window (dw x dh), recorded: the image to show, or null when it is off.
-/// pq: src is the game's own HDR10 picture (Native HDR), scaled into an RGB10A2 image
+/// The Insert menu's output effects at dw x dh: window scaling/sharpness/sides, then the optional SDR CRT.
+/// Returns null when Off or unavailable, leaving the existing direct-copy path. CRT runs after frame generation.
+/// pq: src is Native HDR10, scaled in RGB10A2; the SDR CRT is bypassed, never applied to PQ codes.
 VkImage framegen_scale(VkCommandBuffer cmd, VkImageView src, VkImage image, uint32_t sw, uint32_t sh, const int crop[4], uint32_t dw, uint32_t dh,
                        bool pq = false);
-VkImageView framegen_scaled_view();   // (hookshot) the view of framegen_scale's last image
+VkImageView framegen_scaled_view();   // final scale/CRT view for the existing HDR expansion
 /// (hookshot) The HDR10 picture of src's crop at dw x dh (the Insert menu's HDR), GENERAL; null: none (the SDR picture then;
 /// Native's scaled picture, else black: present_image).
 /// pq: src is the game's own HDR10 picture (Native), its PQ codes as they are at 100% contrast, else graded and written again;
 /// else the SDR picture, expanded
 VkImage framegen_hdr(VkCommandBuffer cmd, VkImageView src, uint32_t sw, uint32_t sh, const int crop[4], uint32_t dw, uint32_t dh,
                      bool pq = false);
-/// Each present: ultrawide's menus (the Insert menu's setting to the game's side, the sides blurred or black while a menu shows)
-void wide_sides_tick();
+/// Each present: ultrawide's menus (the Insert menu's setting to the game's side, the sides blurred or black while a menu shows);
+/// cover: how far the loading cover was closed when the game presented this frame (wide_cover_sample), the sides closed by as much
+void wide_sides_tick(float cover);
+/// How far the loading cover between two areas is closed now, 0 to 1 (0 unless ultrawide's menus are in the middle): asked as the
+/// game presents a frame, on its thread, and carried with that frame to wide_sides_tick, since the game goes on to the next one.
+/// The larger of this reading and the last (wide_cover_held): the game may already have moved the cover on for its next frame
+float wide_cover_sample();
 /// Whether ultrawide's menu sides can show at all: Ultrawide with a margin and the Insert menu's setting on
 bool wide_sides_possible();
 

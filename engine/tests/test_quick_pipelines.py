@@ -84,6 +84,10 @@ def check_source(draw):
     for switch in ("RX_VK_QUICK_MS", "RX_VK_PIPE_WAIT_MS", "RX_VK_TEST_SLOW_MS"):
         if f'getenv("{switch}")' not in draw or "atoi(getenv(\"" + switch in draw or "atof(getenv(\"" + switch in draw:
             raise SystemExit(f"{switch} is not read strictly (quick_pipe.h)")
+    docs = (ROOT / "docs/development.md").read_text(encoding="utf-8")
+    for switch in ("RX_VK_QUICK_MS", "RX_VK_PIPE_WAIT_MS", "RX_VK_TEST_SLOW_MS"):
+        if f"`{switch}" not in docs:
+            raise SystemExit(f"{switch} is not in docs/development.md's switch table")
 
 
 def cut(draw):

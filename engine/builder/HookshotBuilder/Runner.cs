@@ -113,7 +113,7 @@ sealed class Runner
         si.Environment["PYTHONIOENCODING"] = "utf-8";
         BuildWorkers.Apply(si, workers);
         BuildMemory.Apply(si, memoryGb);
-        // (written into the game folder's hookshot_version.txt: the game starts this app again to update, host/hos_update.c)
+        // (written into the game folder's hookshot_version.txt: which builder made the folder)
         BuilderHome.PassTo(si);
         if (Environment.ProcessPath != null) si.Environment["HOOKSHOT_BUILDER_EXE"] = Environment.ProcessPath;
         // (NVIDIA DLSS: only when ticked. Without it, one set on the PC is not passed on either: a build is with DLSS only when asked)
@@ -122,8 +122,10 @@ sealed class Runner
         // (AMD FSR 4, the same: AMD's runtime kept in the builder's own folder only when ticked)
         if (ffxSdk != null) si.Environment["HOOKSHOT_FFX_SDK"] = ffxSdk;
         else si.Environment.Remove("HOOKSHOT_FFX_SDK");
+        // (Intel XeSS: the game loads the player's own libxess.dll; an SDK folder set on the PC is not passed on)
+        si.Environment.Remove("HOOKSHOT_XESS_SDK");
         // (the folder's own compiler, headers and libraries, when it has them: nothing of the PC's but Windows' own)
-        var sets = new[] { ("EMSDK", "emsdk"), ("RX_CPM", "cpm"), ("WGPU_NATIVE", "wgpu-native") };
+        var sets = new[] { ("EMSDK", "emsdk"), ("RX_CPM", "cpm") };
         foreach (var (name, folder) in sets)
         {
             var path = Path.Combine(tools.Root, folder);

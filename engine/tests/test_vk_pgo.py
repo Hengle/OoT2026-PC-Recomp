@@ -69,7 +69,8 @@ def check_make_game():
     check("the renderer's profile is committed (assets/profiles/ocarina_reborn_vk.profdata.xz)", shipped.is_file())
     with lzma.open(shipped) as f:
         check("it is an indexed LLVM profile", f.read(8) == b"\xfflprofi\x81")
-    check("its note says where it was recorded", "Recorded:" in (ROOT / "assets" / "profiles" / "README.md").read_text(encoding="utf-8"))
+    note = (ROOT / "assets" / "profiles" / "README.md").read_text(encoding="utf-8")
+    check("its note says where it was recorded", "RX_VK_PGO=gen" in note and "recording" in note.lower())
     text = (ROOT / "nx2" / "make_game.py").read_text(encoding="utf-8")
     check("the committed profile is checked on every system (another LLVM than llvm-mingw's made it)",
           "profile_readable(p, any_os=True)" in text)
@@ -85,13 +86,30 @@ def check_dev_packs():
     spec.loader.exec_module(packs)
     with tempfile.TemporaryDirectory(prefix="hookshot-vk-pgo-base-") as work:
         prof = os.path.join(work, make_game.VK_PROFILE)
+        shipped = os.path.join(work, make_game.VK_PROFILE_UNPACKED)
         check("a base with no profile: a renderer pack is built with none", packs.renderer_profile(work, {}) == {})
+        # (a base of main: make_game.py unpacked the committed profile and built with it)
+        with open(shipped, "wb") as f:
+            f.write(b"committed profile")
+        check("a base built with the committed profile: a renderer pack is built with it too, by the base's path",
+              packs.renderer_profile(work, {}) == {"RX_VK_PGO": shipped})
         with open(prof, "wb") as f:
             f.write(b"profile")
-        check("a renderer pack is built with its base's profile, by the base's path", packs.renderer_profile(work, {}) == {"RX_VK_PGO": prof})
+        check("a base whose checkout had its own profile: that one, as make_game.py chose it",
+              packs.renderer_profile(work, {}) == {"RX_VK_PGO": prof})
         check("a counting pack stays one", packs.renderer_profile(work, {"RX_VK_PGO": "gen"}) == {})
+    # (what a pack builds: a profile switch set for it builds, even with no file changed)
+    for how, env, want, why in ((None, {}, None, "no change, no switch: nothing to build"),
+                                (None, {"RX_VK_PGO": "gen"}, "renderer", "a counting renderer of an unchanged tree is built"),
+                                (None, {"RX_VK_PGO": "/other.profdata"}, "renderer", "another renderer profile is built"),
+                                ("game", {"RX_VK_PGO": "gen"}, "game", "a game change still builds both modules"),
+                                ("renderer", {}, "renderer", "a renderer change, as before"),
+                                (None, {"RX_PGO": "gen"}, "game", "the game's counting build of an unchanged tree is built"),
+                                ("renderer", {"RX_PGO": "/p.prof"}, "game", "a game profile builds the game")):
+        check("pack_route: " + why, packs.pack_route(how, env) == want)
     text = (ROOT / "scripts" / "dev_packs.py").read_text(encoding="utf-8")
     check("the renderer's own build takes it", '**renderer_profile(b["work"], os.environ)' in text)
+    check("cmd_pack routes through pack_route", "how = pack_route(route(changed, tree), os.environ)" in text)
 
 
 def check_writer():
@@ -108,13 +126,10 @@ def check_writer():
 
 def check_release():
     appimage = (ROOT / "scripts" / "linux" / "appimage.sh").read_text(encoding="utf-8")
-    build = next(line for line in appimage.splitlines() if "RX_VK_ONLY=1" in line and "nx2/build.py" in line)
-    check("the AppImage's renderer is built with the checkout's profile, else the committed one, never the shell's RX_VK_PGO",
-          "RX_VK_PGO=$VK_PGO " in build and "\nVK_PGO=\n" in appimage and
-          "if [ -f work/ocarina_reborn_vk.profdata ]; then VK_PGO=$ROOT/work/ocarina_reborn_vk.profdata" in appimage and
-          'xz -dc assets/profiles/ocarina_reborn_vk.profdata.xz > "$VKW/ocarina_reborn_vk.shipped.profdata"' in appimage)
-    check("the AppImage carries assets/ (the committed profile, for a player's own renderer with DLSS or FSR 4)",
-          "cp -a nx2 host scripts LICENSE README.md assets tools.lock" in appimage)
+    check("the AppImage builds no renderer of its own (every player's build compiles it, with the profile)",
+          "RX_VK_ONLY" not in appimage and "RX_VK_PGO" not in appimage)
+    check("the AppImage carries assets/ (the committed profile, for every player's own renderer)",
+          "cp -a nx2 host scripts LICENSE readme.md assets " in appimage)
     check("and a developer's own profile when the checkout has one",
           "for f in hot_funcs.txt hot_order.txt ocarina_reborn_pieces.prof ocarina_reborn_vk.profdata; do" in appimage)
     docs = (ROOT / "docs" / "development.md").read_text(encoding="utf-8")
@@ -124,7 +139,7 @@ def check_release():
 
 if __name__ == "__main__":
     check_make_game()
-    # Ocarina uses tools/alpha packaging; upstream dev_packs is not shipped.
+    check_dev_packs()
     check_writer()
-    # The Windows make_game profile path is tested above.
+    check_release()
     print("OK: the renderer's play profile is opt-in, and the game's counters keep their own switch")

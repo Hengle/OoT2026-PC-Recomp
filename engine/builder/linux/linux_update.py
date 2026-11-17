@@ -1,6 +1,6 @@
 """Linux builder updates, the same way Windows installs (builder/setup/setup.c, scripts/make_setup_parts.py).
 
-A release publishes hookshot-linux.txt. Each part is a zip named by its SHA-256 and kept on the linux-parts release, so a
+A release publishes ocarina_reborn-linux.txt. Each part is a zip named by its SHA-256 and kept on the linux-parts release, so a
 part whose files did not change is not downloaded again. The player's copy lives at
 $XDG_DATA_HOME/hookshot/builder/versions/<tag> (AppRun at its root, the same layout as the AppImage). An unchanged part
 is copied from the builder that is running now (the mounted AppImage, or the version installed last time).
@@ -22,12 +22,12 @@ import zipfile
 
 from part_links import SYSROOT_PART, is_absolute_link, relative_sysroot_link
 
-LIST_NAME = "hookshot-linux.txt"
-LATEST_LIST = "https://github.com/NotRexed/Hookshot/releases/latest/download/" + LIST_NAME
-LATEST_API = "https://api.github.com/repos/NotRexed/Hookshot/releases/latest"
-RELEASES_API = "https://api.github.com/repos/NotRexed/Hookshot/releases?per_page=20"
-# (the update tracks: the builder's Track choice, by default the track of the build installed. The game's own check,
-# host/hos_update.c, and the Windows builder, Updater.cs, use the same rules)
+LIST_NAME = "ocarina_reborn-linux.txt"
+LATEST_LIST = "https://git.notrexed.dev/Hookshot/Hookshot/releases/latest/download/" + LIST_NAME
+LATEST_API = "https://git.notrexed.dev/api/v1/repos/Hookshot/Hookshot/releases/latest"
+RELEASES_API = "https://git.notrexed.dev/api/v1/repos/Hookshot/Hookshot/releases?limit=20"
+# (the update tracks: the builder's Track choice, by default the track of the build installed. The setup,
+# builder/setup/setup.c, and the Windows builder, Updater.cs, use the same rules)
 TRACKS = ("release", "rc", "nightly")
 
 
@@ -130,7 +130,7 @@ def release_of(tag):
 def list_url(tag=None):
     if not tag:
         return LATEST_LIST
-    return "https://github.com/NotRexed/Hookshot/releases/download/%s/%s" % (release_of(tag), LIST_NAME)
+    return "https://git.notrexed.dev/Hookshot/Hookshot/releases/download/%s/%s" % (release_of(tag), LIST_NAME)
 
 
 def newest_release(tags):
@@ -216,7 +216,7 @@ def game_version(folder):
     """The release a folder was built with, when it still has the game files an update builds from."""
     if not folder:
         return None, False
-    kept = os.path.isdir(os.path.join(folder, ".hookshot_exefs")) and os.path.isdir(os.path.join(folder, "romfs"))
+    kept = os.path.isdir(os.path.join(folder, ".ocarina_reborn_exefs")) and os.path.isdir(os.path.join(folder, "romfs"))
     version = None
     try:
         with open(os.path.join(folder, "hookshot_version.txt"), encoding="utf-8") as f:
@@ -307,7 +307,7 @@ def _request(url, timeout, limit=MAX_DOWNLOAD, stop=None):
 
 def _api_download(url, stop=None):
     """A GitHub release link that failed: the same file through the API (scripts/linux/deps.sh does this for 504s)."""
-    prefix = "https://github.com/"
+    prefix = "https://git.notrexed.dev/"
     mark = "/releases/download/"
     if not url.startswith(prefix) or mark not in url:
         return None
@@ -315,11 +315,11 @@ def _api_download(url, stop=None):
     tag, _, name = rest.partition("/")
     if not repo or not tag or not name or "/" in name:
         return None
-    info = _request("https://api.github.com/repos/%s/releases/tags/%s" % (repo, tag), 30)
+    info = _request("https://git.notrexed.dev/api/v1/repos/%s/releases/tags/%s" % (repo, tag), 30)
     import json
     for asset in json.loads(info.decode("utf-8")).get("assets", []):
         if asset.get("name") == name:
-            req = urllib.request.Request(_https(asset.get("url")), headers={
+            req = urllib.request.Request(_https(asset.get("browser_download_url")), headers={
                 "User-Agent": "Hookshot", "Accept": "application/octet-stream"})
             with _open(req, 120) as response:
                 return _read_at_most(response, MAX_DOWNLOAD, stop)
@@ -336,7 +336,7 @@ def fetch_bytes(url, timeout=60, stop=None):
         except Cancelled:
             raise
         except urllib.error.HTTPError as error:
-            last = "GitHub answered %s" % error.code
+            last = "git.notrexed.dev answered %s" % error.code
             if error.code < 500 and error.code != 429:
                 break
         except Exception as error:
@@ -358,6 +358,57 @@ def fetch_bytes(url, timeout=60, stop=None):
     if got is not None:
         return got
     raise RuntimeError(last)
+
+
+# (hookshot, 2026-11-15) The Version menu: every release on git.notrexed.dev, page by page (Forgejo gives 50 a page at most), read
+# when the menu is first opened. As the Windows builder's ReleaseList.cs. tests/test_builder_version_menu.py
+RELEASES_PAGE = "https://git.notrexed.dev/api/v1/repos/Hookshot/Hookshot/releases?limit=50&page=%d"
+PAGE_SIZE, MOST_PAGES = 50, 40
+
+
+def releases_in(pages):
+    """The menu's releases from the API's pages (each a JSON list): drafts and tags that are no version left out (the parts',
+    rc's and nightly's releases hold files), each tag once, newest version first. Each a dict: tag, prerelease, published
+    (YYYY-MM-DD or ""), installable (it has this builder's list, ocarina_reborn-linux.txt, to install from)"""
+    import json
+    seen, out = set(), []
+    for page in pages:
+        items = json.loads(page) if isinstance(page, (str, bytes)) else page
+        if not isinstance(items, list):
+            continue
+        for r in items:
+            tag = r.get("tag_name") or ""
+            if not re.fullmatch(r"v\d+\.\d+\.\d+(-rc\.\d+)?", tag) or tag in seen or r.get("draft"):
+                continue
+            seen.add(tag)
+            names = {a.get("name") for a in r.get("assets") or []}
+            out.append({"tag": tag, "prerelease": bool(r.get("prerelease")), "published": (r.get("published_at") or "")[:10],
+                        "installable": LIST_NAME in names})
+    out.sort(key=lambda r: release_key(r["tag"]), reverse=True)
+    return out
+
+
+def all_releases(get=None):
+    """Every release, all pages, newest first; None when git.notrexed.dev did not answer (a page failing part way too, so the
+    menu never shows a list cut short as if it were all)"""
+    import json
+    get = get or (lambda url: fetch_bytes(url, 20))
+    pages = []
+    try:
+        for n in range(1, MOST_PAGES + 1):
+            items = json.loads(get(RELEASES_PAGE % n).decode("utf-8"))
+            pages.append(items)
+            if not isinstance(items, list) or len(items) < PAGE_SIZE:
+                break
+    except Exception:
+        return None
+    return releases_in(pages)
+
+
+def release_label(r):
+    """What the menu shows for one: "v2.3.1 · 2026-11-15", a release candidate and one that cannot be installed saying so"""
+    return r["tag"] + (" · " + r["published"] if r["published"] else "") + (" · release candidate" if r["prerelease"] else "") + \
+        ("" if r["installable"] else " · can't be installed from here")
 
 
 def latest_tag(get=None, track="release"):
@@ -562,16 +613,16 @@ def _check_links_inside(dest):
 def _finish_tree(dest):
     """AppRun at the root, from the tools just installed, so this folder starts the way the AppImage does."""
     _check_links_inside(dest)
-    for name in ("AppRun", "hookshot.png", "hookshot-builder.desktop"):
+    for name in ("AppRun", "ocarina_reborn.png", "hookshot-builder.desktop"):
         if os.path.islink(os.path.join(dest, name)):   # (written below: never through a link a part made)
             raise ValueError("the update has a link where %s goes" % name)
     tools = os.path.join(dest, "usr", "share", "hookshot")
     apprun = os.path.join(dest, "AppRun")
     shutil.copyfile(os.path.join(tools, "builder", "linux", "AppRun"), apprun)
     os.chmod(apprun, 0o755)   # (rwxr-xr-x: the launcher must run; only its owner may change it)
-    icon = os.path.join(tools, "assets", "hookshot.png")
+    icon = os.path.join(tools, "assets", "ocarina_reborn.png")
     if os.path.isfile(icon):
-        shutil.copyfile(icon, os.path.join(dest, "hookshot.png"))
+        shutil.copyfile(icon, os.path.join(dest, "ocarina_reborn.png"))
     desktop = os.path.join(tools, "builder", "linux", "hookshot-builder.desktop")
     if os.path.isfile(desktop):
         shutil.copyfile(desktop, os.path.join(dest, "hookshot-builder.desktop"))

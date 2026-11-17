@@ -52,8 +52,9 @@ def main():
     # (an ask that compiles nothing never waits behind a worker's compile: it is answered cold, HumanBean's review of #252)
     need("std::try_to_lock" in gate and "busy = !hold.owns_lock();" in gate, "an ask waits for the lock")
     menu = (ROOT / "gpu/vk/vk_menu.cpp").read_text(encoding="utf-8")
-    need("intel_side_by_side_chosen(opts.intel_compiles, dev.props.deviceID, dev.props.driverVersion)" in menu,
-         "the lock does not read the Intel shader compiles row")
+    side = block(menu, "bool intel_compiles_side_by_side() {")
+    need("return intel_side_by_side_chosen(opts.intel_compiles, dev.props.deviceID, dev.props.driverVersion);" in side,
+         "the lock does not read the Intel shader compiles row (its Auto with the GPU and the driver: intel_compiles.h)")
     need('if (const char* e = getenv("RX_VK_NO_INTEL_SERIAL")) env_override(&opts.intel_compiles, env_value_off(e) ? 2 : 1);'
          in block(menu, "void menu_init() {"), "RX_VK_NO_INTEL_SERIAL does not turn the lock off")
     need('{TAB_DEBUG, "Intel shader compiles", &opts.intel_compiles, 0, 2, 1, tx_intel_compiles,' in menu,
@@ -109,7 +110,7 @@ def main():
     need(link.index("IntelDriverGate") < link.index("guarded_graphics"), "gpl_link's pipeline is not guarded")
     need("vkCreateGraphicsPipelines" not in link, "gpl_link still calls the driver with no guard")
     # (a pipeline cache's data fetched while another thread builds: the same crash in igvk64. main's fetch lock covers it,
-    # PcacheFetch, MagicBeanDev/Hookshot#190 (tests/test_pcache_fetch_lock.py). The gate stays outside that lock: a builder
+    # PcacheFetch, #190 (tests/test_pcache_fetch_lock.py). The gate stays outside that lock: a builder
     # takes the gate, then PcacheUse's shared side, so a fetch taking the gate inside PcacheFetch would wait for a builder
     # that waits for it)
     for fn in ("size_t play_file_write(", "void pcache_init()", "bool pcache_saved_now()", "void pipeline_cache_save(bool force)"):

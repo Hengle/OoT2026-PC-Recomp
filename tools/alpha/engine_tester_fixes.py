@@ -349,16 +349,32 @@ def apply_perf(root):
     engine_startup_guard.apply(root)
 
 
+# These patch recipes reproduce the old 2.2 engine. The published source build
+# stages the authored engine directly; it never reapplies them to the 2.3 tree.
+LEGACY_RECIPE_COMMIT = '3eed25bdeeb593127254e56b48fd0d8972583932'
+
+
+def historical_engine_bytes(rel):
+    """Pinned fixture for historical patch-recipe tests, not the current runtime."""
+    import subprocess
+    return subprocess.check_output(['git', 'show', LEGACY_RECIPE_COMMIT + ':engine/' + rel],
+                                   cwd=Path(__file__).resolve().parents[2])
+
+
 def pre_perf_text(rel, engine=None):
-    """(the checks of the earlier patches) an engine file as it was before engine-perf.patch: that patch reversed on a copy"""
+    """Reverse the historical performance patch on its pinned release fixture.
+
+    An explicit engine directory remains available for inspecting a legacy tree.
+    Current runtime tests must read the authored engine directly instead.
+    """
     import os
     import subprocess
     import tempfile
-    engine = Path(engine) if engine else Path(__file__).resolve().parents[2] / 'engine'
+    data = (Path(engine) / rel).read_bytes() if engine else historical_engine_bytes(rel)
     with tempfile.TemporaryDirectory() as tmp:
         dst = Path(tmp) / 'e' / rel
         dst.parent.mkdir(parents=True)
-        dst.write_bytes((engine / rel).read_bytes())
+        dst.write_bytes(data)
         env = dict(os.environ, GIT_CEILING_DIRECTORIES=str(Path(tmp)))
         r = subprocess.run(['git', 'apply', '-R', '-p1', '--whitespace=nowarn', '--include=' + rel, str(PERF)],
                            cwd=str(Path(tmp) / 'e'), capture_output=True, text=True, env=env)

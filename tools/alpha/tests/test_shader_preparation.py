@@ -134,6 +134,7 @@ struct PipeNote {int s=0,topo=0;};
 struct ComputePlan {bool all=false,none=false;std::unordered_set<uint64_t> keys{200,201};};
 std::vector<std::pair<size_t,size_t>> progress_values;
 std::atomic<unsigned> destroyed=0,computed=0,borrowed=0;
+std::atomic<bool> prepare_saving_now=false;
 unsigned saved=0,marked=0;
 std::string precompile_built_path(){return "built";}
 void pcache_init(){}

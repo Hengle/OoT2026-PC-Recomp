@@ -14,6 +14,9 @@
 #include <string>
 #include <thread>
 #include <vector>
+#ifndef _WIN32
+#include <unistd.h>   // (sysconf: the RAM, auto_profile)
+#endif
 
 #include "vk_api.h"
 #include "vk_draw.h"
@@ -23,8 +26,10 @@
 static_assert(mkwvk::kQueueGraphics == VK_QUEUE_GRAPHICS_BIT && mkwvk::kQueueCompute == VK_QUEUE_COMPUTE_BIT);
 #include "gpu_choice.h"
 #include "vk_menu.h"
+#include "auto_settings.h"
 #include "vk_dlss.h"
 #include "vk_fsr4.h"
+#include "vk_xess.h"
 #include "vk_reflex.h"
 #include "vk_antilag.h"
 #include "vk_progress.h"
@@ -76,8 +81,20 @@ void load_device(VkDevice device) {
 
 namespace mkwvk {
 
+bool predicted_complete();   // vk_draw.cpp: completion of explicit All preparation, including zero keys
+
+int display_refresh_mhz();   // (below, outside the unnamed namespace)
+
 std::vector<std::string> gpu_device_names;
+std::vector<gpu_choice::Card> gpu_device_cards;
 const MkwVkHost* host;
+std::string options_path() {
+    if (host && host->options_path) {
+        const char* p = host->options_path();
+        return p ? p : "";
+    }
+    return game_folder_path() + "ocarina_reborn_options.ini";
+}
 int64_t prof_ns[PROF_COUNT];
 Device dev;
 PFN_vkGetInstanceProcAddr instance_proc() { return vkx::instance_proc_addr(); }
@@ -98,19 +115,32 @@ std::string driver_text() {
     return info.empty() ? name : name.empty() ? info : name + " " + info;
 }
 
+std::string device_name_text() { return std::string(dev.props.deviceName, strnlen(dev.props.deviceName, sizeof dev.props.deviceName)); }
+
 /// (hookshot) Milliseconds on the steady clock: the log's last line and the preparation's watchdog
 int64_t steady_ms() {
     return std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
 }
 std::atomic<int64_t> last_log_ms{0};   // (when logf last wrote: the preparation's status line comes after a silence)
-void logf(const char* fmt, ...) {
+static void vlogf(LogLevel level, const char* fmt, std::va_list a) {
+    static const char* const tags[] = {"[error] ", "[warn] ", "", "[debug] ", "[trace] "};
     char b[1024];
-    std::va_list a;
-    va_start(a, fmt);
-    std::vsnprintf(b, sizeof b, fmt, a);
-    va_end(a);
+    const int n = std::snprintf(b, sizeof b, "%s", tags[level >= log_error && level <= log_trace ? level : log_info]);
+    std::vsnprintf(b + n, sizeof b - n, fmt, a);
     last_log_ms.store(steady_ms(), std::memory_order_relaxed);
     if (host) host->log(b);
+}
+void logf(const char* fmt, ...) {
+    std::va_list a;
+    va_start(a, fmt);
+    vlogf(log_info, fmt, a);
+    va_end(a);
+}
+void logf_at(LogLevel level, const char* fmt, ...) {
+    std::va_list a;
+    va_start(a, fmt);
+    vlogf(level, fmt, a);
+    va_end(a);
 }
 
 namespace {
@@ -156,6 +186,7 @@ bool create_instance() {
         std::vector<VkExtensionProperties> all(n);
         vkEnumerateInstanceExtensionProperties(nullptr, &n, all.data());
         dlss_instance_extensions(ext_list, all);
+        xess_instance_extensions(ext_list, all, app.apiVersion);   // (hookshot: Intel XeSS's, when its library is there: vk_xess.cpp)
         // (hookshot) the HDR10 colour space for the Insert menu's HDR (the menu's settings are read after the instance is made, so
         // whenever the driver has it; the SDR choice in create_swapchain keeps to the sRGB surface)
         if (has_extension(all, VK_EXT_SWAPCHAIN_COLOR_SPACE_EXTENSION_NAME))
@@ -183,14 +214,17 @@ bool pick_device() {
 
     std::vector<uint32_t> valid_gpus;
     gpu_device_names.clear();
+    gpu_device_cards.clear();
     for (uint32_t i = 0; i < n; i++) {
         VkPhysicalDeviceProperties p;
         vkGetPhysicalDeviceProperties(all[i], &p);
-        logf("vk: device %u: %s, Vulkan %u.%u, driver %#x, type %d", i, p.deviceName, VK_API_VERSION_MAJOR(p.apiVersion),
-             VK_API_VERSION_MINOR(p.apiVersion), p.driverVersion, (int)p.deviceType);
+        logf("vk: device %u: %s, Vulkan %u.%u, driver %#x, type %d, id %04x:%04x", i, p.deviceName,
+             VK_API_VERSION_MAJOR(p.apiVersion), VK_API_VERSION_MINOR(p.apiVersion), p.driverVersion, (int)p.deviceType,
+             p.vendorID, p.deviceID);
         if (p.apiVersion >= VK_API_VERSION_1_3) {
             valid_gpus.push_back(i);
             gpu_device_names.push_back(p.deviceName);
+            gpu_device_cards.push_back({p.vendorID, p.deviceID});   // (the row's saved card: gpu_choice.h card_id)
         }
     }
     menu_set_gpu_count((int)valid_gpus.size());
@@ -240,7 +274,6 @@ bool pick_device() {
     dev.physical = all[best];
     vkGetPhysicalDeviceProperties(dev.physical, &dev.props);
     vkGetPhysicalDeviceMemoryProperties(dev.physical, &dev.memory);
-    menu_first_start_for_gpu(dev.props, dev.memory);   // (no options yet: the preset for this card's memory)
     return true;
 }
 
@@ -277,11 +310,7 @@ bool create_device() {
     // fallback the GTX 10xx and RX 5000 cards run (issue 640) can be tried on any GPU. The Graphics tab's row it was, and its
     // mesh_shaders= in ocarina_reborn_options.ini, no longer choose: the line is only told of in the log)
     static const mesh_rule::Choice mesh_choice = [] {
-        char exe[MAX_PATH];
-        const DWORD len = game_module_path(exe, MAX_PATH);   // (the game folder, not bin beside the launcher: vk_paths.h)
-        std::string ini(exe, len);
-        ini = ini.substr(0, ini.find_last_of("\\/") + 1) + "ocarina_reborn_options.ini";
-        if (FILE* fl = fopen(ini.c_str(), "r")) {
+        if (FILE* fl = fopen(options_path().c_str(), "r")) {   // (vk_paths.h)
             char line[80];
             int old = 0;
             while (fgets(line, sizeof line, fl))
@@ -301,6 +330,14 @@ bool create_device() {
     // only full Compute is stable there, and the reports span Navi 2x (RX 6800, RX 6600 XT) and the RDNA3 APUs (Steam
     // Deck OLED, Rog Xbox Ally X). On Linux, where AMD's Vulkan driver is RADV, Automatic picks Compute; Native stays
     // a choice (RX_VK_MESH_SHADERS=native). RDNA1 and older have no mesh shaders on RADV: for them a no-op.
+    // (the card's own, before the mode below: whether it has task and mesh shaders, for the Quality preset Auto (this PC), which
+    // must not put a card that has them on Minimum because this run uses Compute)
+    if (has_extension(exts, VK_EXT_MESH_SHADER_EXTENSION_NAME)) {
+        VkPhysicalDeviceMeshShaderFeaturesEXT m{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MESH_SHADER_FEATURES_EXT};
+        VkPhysicalDeviceFeatures2 f2{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2, &m};
+        vkGetPhysicalDeviceFeatures2(dev.physical, &f2);
+        dev.mesh_capable = m.meshShader && m.taskShader;
+    }
     int mesh_mode_used = mesh_mode;
 #ifndef _WIN32
     if (mesh_mode_used == 0 && dev.props.vendorID == 0x1002) mesh_mode_used = 2;   // (Linux AMD is RADV)
@@ -364,6 +401,7 @@ bool create_device() {
     dlss_fg_device_extensions(want, exts);   // (hookshot: NVIDIA DLSS Frame Generation's through NGX, asked of NGX)
     bool fsr_descriptor_buffer = false;   // (hookshot, linux: only with a Vulkan FSR 4 library beside the game, vk_fsr4.cpp)
     if (fsr4_wants_descriptor_buffer()) optional(VK_EXT_DESCRIPTOR_BUFFER_EXTENSION_NAME, fsr_descriptor_buffer);
+    xess_device_extensions(want, exts);   // (hookshot: Intel XeSS's, when its library is there and the instance took its own)
     reflex_device_extensions(want, exts);   // (hookshot: NVIDIA Reflex's, vk_reflex.cpp)
     antilag_device_extensions(want, exts);   // (hookshot: AMD Anti-Lag 2's, vk_antilag.cpp)
 
@@ -522,12 +560,8 @@ bool create_device() {
     // over it. Off is null descriptors only: some NVIDIA cards ran slower with it on, issues 394, 418, 419)
     static const bool robust = []() -> bool {
         if (const char* e = getenv("RX_VK_ROBUST")) return atoi(e) != 0;
-        char exe[MAX_PATH];
-        const DWORD n = game_module_path(exe, MAX_PATH);   // (the game folder, not bin beside the launcher: vk_paths.h)
-        std::string ini(exe, n);
-        ini = ini.substr(0, ini.find_last_of("\\/") + 1) + "ocarina_reborn_options.ini";
         int v = 0;   // (Auto)
-        if (FILE* f = fopen(ini.c_str(), "r")) {
+        if (FILE* f = fopen(options_path().c_str(), "r")) {   // (vk_paths.h)
             char line[80];
             while (fgets(line, sizeof line, f))
                 if (!strncmp(line, "robust_buffers=", 15)) {
@@ -635,8 +669,13 @@ bool create_device() {
     dev.sparse_images = (families[dev.queue_family].queueFlags & VK_QUEUE_SPARSE_BINDING_BIT) && f.features.sparseBinding &&
                         f.features.sparseResidencyImage2D && !(getenv("RX_VK_SPARSE") && !atoi(getenv("RX_VK_SPARSE")));
     dev.sparse_buffers = (families[dev.queue_family].queueFlags & VK_QUEUE_SPARSE_BINDING_BIT) && f.features.sparseBinding;
+    // (hookshot) Intel XeSS's features (vk_xess.cpp), last, into the chain as it will be made: the library sets what it needs in
+    // the renderer's structures and adds what it lacks (VK_EXT_mutable_descriptor_type's); nothing without its library, and a
+    // refusal leaves the chain as it was and XeSS out for the run
+    void* chain = &f;
+    xess_device_features(&chain, tail);
     VkDeviceCreateInfo ci{VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO};
-    ci.pNext = &f;
+    ci.pNext = chain;
     ci.queueCreateInfoCount = (uint32_t)qs.size();
     ci.pQueueCreateInfos = qs.data();
     ci.enabledExtensionCount = (uint32_t)want.size();
@@ -1015,12 +1054,7 @@ HWND main_window = nullptr;
 // "@@progress" lines on stdout. A skip there leaves ocarina_reborn_prepare_skipped beside the game: its own starts then
 // leave the work out too (what was not prepared is built when first drawn), until a --prepare-shaders run ends it
 bool prepare_only() { return env_on("HOOKSHOT_PREPARE_ONLY"); }
-std::string skipped_path() {
-    char exe[MAX_PATH];
-    const DWORD n = game_module_path(exe, MAX_PATH);
-    std::string path(exe, n);
-    return path.substr(0, path.find_last_of("\\/") + 1) + "ocarina_reborn_prepare_skipped";
-}
+std::string skipped_path() { return cache_path("ocarina_reborn_prepare_skipped"); }
 // (hookshot) The --prepare-shaders run's watchdog, for any GPU and any part of it.
 // - What it waits on, in the log the builder shows: every 30 s that nothing has moved, the part, its count, and whether the
 //   GPU driver faulted; a driver fault as soon as it is caught. (The pipeline steps log their own progress every 10 s,
@@ -1197,7 +1231,7 @@ void prepare_with_screen() {
         const bool prepared = !update && prepare_run(prep_progress, false);
         if (!prepared) prep_skip[0].store(true);
         // (a first start, or one after a start that did not finish them: the pipelines the notes predict, into the driver's cache)
-        if ((prepared || (!update && predict_pending())) && !prepare_stopped()) {
+        if ((prepared || (!update && predict_pending())) && compile_all() && !prepare_stopped()) {
             prep_done.store(0), prep_total.store(0);
             prep_stage.store(1);
             predict_run(prep_progress);
@@ -1205,6 +1239,7 @@ void prepare_with_screen() {
             prep_skip[1].store(true);
         }
         if (!prepare_stopped()) {
+            if (update) state_list_run();   // (the shipped list's pipelines, as a start with no screen makes them)
             prep_done.store(0), prep_total.store(0);
             prep_stage.store(2);
             precompile_run(prep_progress);
@@ -1250,6 +1285,7 @@ void prepare_with_screen() {
             StartupState st;
             st.stage = stage, st.done = done, st.total = total, st.left = left, st.secs = secs;
             st.prepared = prepared, st.finished = finished, st.stopping = prepare_stopped();
+            st.saving = prepare_saving();
             st.whole = whole;
             const StartupView view = startup_view(st);
             startup_screen(&view);
@@ -1335,11 +1371,13 @@ bool started_up() {
         }
         part = 0;
         const bool prepared = prepare_run(progress, false, true);
-        const bool predict = prepared || predict_pending();   // (or the last run did not finish the prediction)
-        if (!prepared) {
-            if (!bar.counted[0]) bar.skip(0);   // (an already prepared seed can still import pipeline states)
-            if (!predict) bar.skip(1);
-        }
+        // (or the last run did not finish the prediction; Compile shaders on Most: never, compile_all)
+        // An explicit All request also upgrades a folder prepared on Most. Completed All work stays skipped.
+        const bool predict = compile_all() && (prepared || predict_pending() || !predicted_complete());
+        if (!prepared && !bar.counted[0]) bar.skip(0);   // (an already prepared seed can still import pipeline states)
+        // (no prediction: its part of the bar goes. On Most after a preparation too: left in, the step to the noted pipelines
+        // counted it done at its guess, and the bar jumped by the prediction's share, about half of it)
+        if (!predict) bar.skip(1);
         part = 1;
         prepare_moved(1, 0, 0);
         if (predict) predict_run(progress);
@@ -1407,7 +1445,7 @@ bool started_up() {
             WriteFile(console, line, (DWORD)n, &wrote, nullptr);
         };
         const bool update = prepare_is_update();   // (an update: what the notes name now, the rest in play)
-        if (!update && (prepare_run(progress, false) || predict_pending())) predict_run(progress);
+        if (!update && (prepare_run(progress, false) || predict_pending()) && compile_all()) predict_run(progress);
         if (update) state_list_run();
         precompile_run(progress);
         if (update) prepare_background();
@@ -1461,8 +1499,63 @@ bool open_window_surface(bool log_failure) {
     return true;
 }
 
+/// (hookshot) What this PC reports about itself, for the Quality preset Auto (this PC) (auto_settings.h, vk_menu.cpp
+/// menu_auto_for_gpu): once, when the window is known (its screen's size and refresh), the card already chosen
+void auto_profile() {
+    static bool done;
+    if (done) return;
+    done = true;
+    ::auto_settings::Hardware hw;
+    const VkPhysicalDeviceProperties& p = dev.props;
+    hw.vendor = p.vendorID == 0x10de ? ::auto_settings::NVIDIA : p.vendorID == 0x1002 ? ::auto_settings::AMD
+              : p.vendorID == 0x8086 ? ::auto_settings::INTEL : ::auto_settings::OTHER;
+    hw.integrated = p.deviceType == VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU;
+    for (uint32_t i = 0; i < dev.memory.memoryHeapCount; i++)
+        if (dev.memory.memoryHeaps[i].flags & VK_MEMORY_HEAP_DEVICE_LOCAL_BIT)
+            hw.vram_mb = std::max<uint32_t>(hw.vram_mb, (uint32_t)(dev.memory.memoryHeaps[i].size >> 20));
+    hw.mesh_native = dev.mesh_capable;   // (the card's, not this run's mode: Linux AMD's Automatic is Compute, #2245)
+    hw.mesh_as_compute = dev.mesh_capable && !dev.mesh_shader;
+    hw.rtx = hw.vendor == ::auto_settings::NVIDIA && strstr(p.deviceName, "RTX");
+    // (RDNA 4: "AMD Radeon RX 9070 XT", RADV's "(RADV GFX1201)")
+    hw.rdna4 = hw.vendor == ::auto_settings::AMD && (strstr(p.deviceName, "RX 9") || strstr(p.deviceName, "GFX12"));
+    // (the Steam Deck's APU, LCD and OLED, or Steam's flag on an integrated GPU: Steam sets SteamDeck=1 wherever it runs as on a
+    // Deck, Gaming Mode sessions on desktops with a discrete card too, which are no handheld)
+    const char* deck = getenv("SteamDeck");
+    hw.handheld = (deck && atoi(deck) == 1 && hw.integrated) || strstr(p.deviceName, "Custom GPU 0405") ||
+                  strstr(p.deviceName, "Custom GPU 0932");
+    hw.dlss_built = dlss_built();
+    hw.fsr4_built = fsr4_built();
+    hw.xess_ready = xess_library_loaded();
+    hw.threads = (int)std::thread::hardware_concurrency();
+#ifdef _WIN32
+    MEMORYSTATUSEX m{};
+    m.dwLength = sizeof m;
+    if (GlobalMemoryStatusEx(&m)) hw.ram_mb = (uint32_t)(m.ullTotalPhys >> 20);
+    MONITORINFOEXW mi{};
+    mi.cbSize = sizeof mi;
+    DEVMODEW dm{};
+    dm.dmSize = sizeof dm;
+    // (no window, the Builder's shader preparation and a headless start: the primary monitor, MonitorFromWindow(NULL, ...).
+    // A 0x0 screen made a fingerprint no options file had, so such a run chose Auto again for no screen and wrote it over
+    // the player's settings: issue 165)
+    if (GetMonitorInfoW(MonitorFromWindow(main_window, MONITOR_DEFAULTTOPRIMARY), &mi) &&
+        EnumDisplaySettingsW(mi.szDevice, ENUM_CURRENT_SETTINGS, &dm)) {
+        hw.screen_w = (int)dm.dmPelsWidth, hw.screen_h = (int)dm.dmPelsHeight;
+        if (!main_window && dm.dmDisplayFrequency > 1) hw.refresh_hz = (int)dm.dmDisplayFrequency;   // (as display_refresh_mhz)
+    }
+#else
+    const long pages = sysconf(_SC_PHYS_PAGES), page = sysconf(_SC_PAGE_SIZE);
+    if (pages > 0 && page > 0) hw.ram_mb = (uint32_t)(((uint64_t)pages * (uint64_t)page) >> 20);
+    const MkwVkWindow* w = (const MkwVkWindow*)main_window;
+    if (w && w->version >= 3 && w->desktop_size) w->desktop_size(w->window, &hw.screen_w, &hw.screen_h);
+#endif
+    if (main_window || !hw.refresh_hz) hw.refresh_hz = (display_refresh_mhz() + 500) / 1000;
+    menu_auto_for_gpu(p, hw);
+}
+
 int start(void* hwnd) {
     main_window = (HWND)hwnd;
+    auto_profile();   // (the Quality preset Auto (this PC): before the game first asks its mode, which reads the options)
     if (!hwnd) {   // (HOS_HEADLESS: no window; the frames are rendered all the same, RX_VK_SHOTS writes them out)
         dev.offscreen = true;
         dev.swap_extent = {1920, 1080};
@@ -1560,7 +1653,12 @@ const MkwVkRenderer* mkwvk_init(const MkwVkHost* h) {
     }
     host = h;
     if (!load_global()) {
+#ifdef _WIN32
         logf("vk: load_global failed (Vulkan loader library or vkCreateInstance missing)");
+#else   // (linux: why libvulkan.so.1 did not load, kept by LoadLibraryA, which read the one message; "" if it loaded)
+        const char* why = hos_load_error();
+        logf("vk: load_global failed (Vulkan loader library or vkCreateInstance missing)%s%s", *why ? ": " : "", why);
+#endif
         return nullptr;
     }
     if (!create_instance()) {
@@ -1634,5 +1732,23 @@ int display_refresh_mhz() {
 #endif
     cached.store(mhz, std::memory_order_relaxed);
     return mhz;
+}
+
+// (hookshot) The device is lost: nothing is drawn again in this run, while the game itself goes on (its sound,
+// the frame counter), and players took it for a load that never ends: "black screen after the intro, waited a long time".
+// Said once, in the log in plain words and in a box on its own thread (the replay goes on to write its report); the game is
+// left running so the log keeps what follows
+void device_lost_notice() {
+    logf("vk: THE GRAPHICS CARD STOPPED (device lost): the picture stays black until the game is started again. "
+         "Please send ocarina_reborn_log.txt with a report");
+#ifdef _WIN32
+    if (dev.offscreen || env_on("HOS_HEADLESS")) return;   // (no window: shader preparation, tests)
+    std::thread([name = std::string(dev.props.deviceName)] {
+        const std::string text = "The graphics card (" + name + ") stopped responding to Ocarina Reborn (Vulkan: device lost), so the "
+            "picture will stay black. The game cannot recover from this: close it and start it again.\n\nIf it happens again at "
+            "the same place, please open an issue at github.com/ocarina-pc-native-build/ocarina-pc-native-build.github.io/issues and attach ocarina_reborn_log.txt from the game folder.";
+        MessageBoxA(nullptr, text.c_str(), "Ocarina Reborn: graphics card stopped", MB_OK | MB_ICONERROR | MB_TOPMOST);
+    }).detach();
+#endif
 }
 } // namespace mkwvk

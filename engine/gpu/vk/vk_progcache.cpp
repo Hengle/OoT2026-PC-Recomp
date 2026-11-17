@@ -1,7 +1,7 @@
 // (hookshot) The program cache: ocarina_reborn_programs.bin (and its .idx) beside the game, what translation made, kept between runs; its
 // reads for play, the precompile, the prediction and the prepare; and the sizes of the prepare's worker pools.
 //
-// Not part of the translator stamp (nx2/build.py hashes vk_shader.cpp, vk_bank.cpp, vk_state.h, vk_api.h and the recompiler's
+// Not part of the translator stamp (nx2/translator_files.py: vk_shader.cpp, vk_bank.cpp, vk_state.h and the recompiler's
 // folders): a change here keeps every player's translated programs. What the cache is good for is program_cache_stamp: the
 // translator's stamp (translator_stamp, vk_shader.cpp) and kProgramCacheFormat below. A change to what a record holds or how it is
 // laid out (put_head/get_head, put_info/get_info, program_cache_save/program_cache_read, the file and index heads) must raise
@@ -134,10 +134,7 @@ void disk_init() {
         // (hookshot) RX_VK_PROGRAM_CACHE_ZSTD=1: each record compressed with zstd, in a file of its own so that a build
         // without this switch never reads it. SPIR-V compresses about 7.7x at zstd's level 3.
         disk_zstd = env_on("RX_VK_PROGRAM_CACHE_ZSTD");
-        char exe[MAX_PATH];
-        const DWORD n = game_module_path(exe, MAX_PATH);
-        std::string path(exe, n);
-        path = path.substr(0, path.find_last_of("\\/") + 1) + (disk_zstd ? "ocarina_reborn_programs.zst.bin" : "ocarina_reborn_programs.bin");
+        const std::string path = cache_path(disk_zstd ? "ocarina_reborn_programs.zst.bin" : "ocarina_reborn_programs.bin");   // (vk_paths.h)
         // (one Hookshot at a time on a cache: a second one, started while the first wrote, took the record being written for one
         // cut short and cut the file there, under the first, whose list of records then named bytes written over since. Held
         // until the process ends)
@@ -145,7 +142,7 @@ void disk_init() {
             uint64_t h = 0xCBF29CE484222325ull;
             for (const char ch : path) h = (h ^ (uint8_t)tolower((unsigned char)ch)) * 1099511628211ull;
             char name[64];
-            snprintf(name, sizeof name, "Local\\HookshotProgramCache_%016llx", (unsigned long long)h);
+            snprintf(name, sizeof name, "Local\\OcarinaRebornProgramCache_%016llx", (unsigned long long)h);
 #ifdef _WIN32
             const HANDLE held = CreateMutexA(nullptr, FALSE, name);
             const bool taken = !held || GetLastError() == ERROR_ALREADY_EXISTS;
@@ -898,13 +895,24 @@ size_t program_cache_load_some(const std::unordered_set<uint64_t>& wanted, const
 /// (hookshot) Program key's kept variants made for fn, then let go (modules and layouts): the records stay for play
 void program_cache_borrow(uint64_t key, const std::function<void(Program&)>& fn) {
     std::vector<std::unique_ptr<Program>> variants;
+    // Own the handles before loading: both the loader and the callback may throw.
+    // Program's vectors are RAII-managed, but its Vulkan handles are not.
+    struct Cleanup {
+        std::vector<std::unique_ptr<Program>>& variants;
+        static void release(Program& p) {
+            for (Stage& st : p.stages)
+                if (st.module) vkDestroyShaderModule(dev.device, st.module, nullptr), st.module = VK_NULL_HANDLE;
+            if (p.layout) vkDestroyPipelineLayout(dev.device, p.layout, nullptr), p.layout = VK_NULL_HANDLE;
+            if (p.set_layout) vkDestroyDescriptorSetLayout(dev.device, p.set_layout, nullptr), p.set_layout = VK_NULL_HANDLE;
+        }
+        ~Cleanup() {
+            for (auto& p : variants) release(*p);
+        }
+    } cleanup{variants};
     program_cache_load(key, variants, true);
     for (auto& p : variants) {
         fn(*p);
-        for (Stage& st : p->stages)
-            if (st.module) vkDestroyShaderModule(dev.device, st.module, nullptr);
-        if (p->layout) vkDestroyPipelineLayout(dev.device, p->layout, nullptr);
-        if (p->set_layout) vkDestroyDescriptorSetLayout(dev.device, p->set_layout, nullptr);
+        Cleanup::release(*p);   // (release each variant before starting the next one)
     }
 }
 

@@ -12,19 +12,11 @@ from pathlib import Path
 import subprocess
 import sys
 import tempfile
+sys.path.insert(0, str(Path(__file__).resolve().parent))   # (tests/srccut.py: python -I leaves this folder off the path)
+from srccut import block   # noqa: E402
 
 ROOT = Path(__file__).resolve().parents[1]
 RUN_ALL_ARGS = ["--cxx", "{cxx}"]
-
-
-def block(text, marker):
-    start = text.index(marker)
-    end = text.index("{", start) + 1
-    depth = 1
-    while depth:
-        depth += (text[end] == "{") - (text[end] == "}")
-        end += 1
-    return text[start:end]
 
 
 def check(cond, what):
@@ -51,7 +43,8 @@ def main():
     banner = banner[:banner.index("\n    }\n")]
     check("ui::fit_px(px, opts.menu_size == 3 ? px : kVersionMinPt * s, 0.5f * s, room, width)" in banner and "if (fit > 0)" in banner,
           "the banner's version is not shrunk to fit at Small and Medium (and kept at its size at Large)")
-    check(banner.index('ver.resize(ver.find(" ("))') < banner.index("ui::fit_px("), "the version shrinks before it drops its source")
+    check('std::string("Hookshot ") + version_text(HOOKSHOT_VERSION)' in banner and "(source" not in banner.split("ui::fit_px(")[0].split("version_text")[1],
+          "the banner's version is not shown as players see it (version_text: no source fingerprint)")
     check("constexpr float kVersionMinPt = 10;" in menu, "the version's smallest size is not 10 points")
 
     src = "#include <cmath>\n#include <cstdio>\n#include <cstring>\n" + block(ui, "inline float unit(") + "\n" + \

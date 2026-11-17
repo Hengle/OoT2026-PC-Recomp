@@ -97,7 +97,7 @@ def main():
          "return dev.props.deviceType == VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU;" in block(menu, "bool laptop_row() {"),
          "the weak laptop button shows on a dedicated card")
     apply = block(menu, "void weak_laptop_apply() {")
-    for want, why in (("apply_preset(1);", "Minimum's rows and memory budgets"),
+    for want, why in (("apply_preset(1);", "Minimum's rows and mip trimming"),
                       ("opts.resolution = ur::snap_render(upscaler(), 6);", "Render resolution 33%"),
                       ("opts.upscale = 0, opts.sharpness = 0;", "the plain window scale"),
                       ("opts.framegen = 0;", "frame generation off"),

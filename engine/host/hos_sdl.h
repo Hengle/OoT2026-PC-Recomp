@@ -23,34 +23,45 @@ void hos_sdl_fullscreen(void *window, int on);   /* (the desktop's mode, borderl
 void hos_sdl_relative_mouse(void *window, int on);
 int hos_sdl_desktop_size(int *width, int *height);
 int hos_sdl_refresh_mhz(void *window);   /* the refresh rate of the window's display in mHz, 0 when not known (the main thread) */
+int hos_sdl_desktop_hz(void);   /* rounded refresh rate; 0 when SDL cannot report one */
 int hos_sdl_vulkan_surface(void *window, void *instance, void *surface_out);   /* (VkInstance, VkSurfaceKHR *): 1 if made */
 void hos_sdl_pixel_size(void *window, int *width, int *height);
 const uint8_t *hos_sdl_keys(int *count);   /* the keyboard by scancode (USB HID usage), 1 a key down */
-uint32_t hos_sdl_mouse_buttons(void);   /* 1 left, 2 middle, 4 right */
+uint32_t hos_sdl_mouse_buttons(void);   /* 1 left, 2 middle, 4 right, 8 and 16 the side buttons */
 void hos_sdl_mouse_position(float *x, float *y);   /* main thread, window-coordinate units */
 void hos_sdl_window_size(void *window, int *width, int *height);   /* (in the units of the mouse's position, not pixels) */
 void hos_sdl_icon(void *window, const char *png);   /* (SDL 3.4's PNG loader: nothing on SDL2 or an older SDL3) */
+/* (hookshot) typed text, for the Insert menu's text fields: text input on or off for the window (SDL_StartTextInput: text
+   events, an input method's window; SDL2 has it on from the start, SDL3 off), the clipboard's text (UTF-8, NULL when none;
+   given back with hos_sdl_free) */
+void hos_sdl_text_input(void *window, int on);
+char *hos_sdl_clipboard(void);
+void hos_sdl_free(void *p);
 
 /* ---- events, as the window's loop wants them ---- */
 enum {
     HOS_SDL_EV_OTHER, HOS_SDL_EV_QUIT, HOS_SDL_EV_CLOSE, HOS_SDL_EV_RESIZED, HOS_SDL_EV_FOCUS_GAINED,
     HOS_SDL_EV_FOCUS_LOST, HOS_SDL_EV_MOUSE_LEAVE, HOS_SDL_EV_KEY_DOWN, HOS_SDL_EV_MOUSE_DOWN, HOS_SDL_EV_MOUSE_MOTION,
-    HOS_SDL_EV_MOUSE_UP, HOS_SDL_EV_MOUSE_WHEEL, HOS_SDL_EV_MOUSE_ENTER
+    HOS_SDL_EV_MOUSE_UP, HOS_SDL_EV_MOUSE_WHEEL, HOS_SDL_EV_MOUSE_ENTER, HOS_SDL_EV_TEXT
 };
 typedef struct {
     int type;
     int scancode, repeat;   /* (key down) */
-    uint16_t mod;           /* (key down: 0x300 an Alt key) */
+    int key;                /* (key down: SDL's keycode, by the keyboard's layout: a letter's lower case) */
+    uint16_t mod;           /* (key down: 0x300 an Alt key, 0xC0 a Ctrl key, 3 a Shift key) */
     float dx, dy;           /* (mouse motion, relative) */
     float x, y;             /* (mouse motion, down and up: the cursor in the window, hos_sdl_window_size's units) */
     int button;             /* (mouse down and up: 1 left, 2 middle, 3 right, as SDL numbers them) */
     float wheel;            /* (mouse wheel: notches, up or away from the player positive) */
+    char text[32];          /* (text: what was typed, UTF-8, cut at a character's end to fit) */
 } HosSdlEvent;
 int hos_sdl_wait_event(HosSdlEvent *e, int timeout_ms);   /* 1 when there was one */
 int hos_sdl_poll_event(HosSdlEvent *e);
 
-/* ---- sound: the default output, pull() asked for len more bytes as it runs low (s16: 16-bit samples, else float) ---- */
-int hos_sdl_audio_open(int freq, int channels, int s16, void (*pull)(void *user, uint8_t *out, int len), void *user);
+/* ---- sound: the default output, pull() asked for len more bytes as it runs low (s16: 16-bit samples, else float).
+   NULL when it does not open; hos_sdl_audio_close closes what it opened ---- */
+void *hos_sdl_audio_open(int freq, int channels, int s16, void (*pull)(void *user, uint8_t *out, int len), void *user);
+void hos_sdl_audio_close(void *out);
 int hos_sdl_audio_channels(void);   /* the default output's channels (6 for 5.1); 2 when SDL cannot say */
 
 /* ---- (hookshot) microphones: SDL3's recording devices or SDL2's capture devices, for the game's input streams

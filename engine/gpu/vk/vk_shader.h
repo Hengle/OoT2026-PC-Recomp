@@ -39,8 +39,13 @@ struct Stage {
 };
 
 /// A texture handle the stage reads from a storage buffer: its handle program (Shader::Info::handle_programs, Eden's
-/// recompiler) run over the stage's constant banks and storage buffers as the draw has them
+/// recompiler) run over the stage's constant banks and storage buffers as the draw has them. element is the descriptor
+/// array element it computes, for a program that gives one handle per element of a table (Shader::HandleOp::Index)
 uint32_t stage_handle(const NvnState& s, const Stage& st, uint32_t program, uint32_t element = 0);
+/// The handles of elements 0 .. count-1 of such a table (one shadow map per light, say), into out: stage_handle for each,
+/// with the constant words and storage buffer addresses the program reads read once
+void stage_handles(const NvnState& s, const Stage& st, uint32_t program, uint32_t count, uint32_t* out);
+void handle_memo_next();   // (hookshot) a new draw or dispatch on this thread: the handles kept for the last one go
 
 /// A translated program variant: its stages, in descriptor order. The pipeline layout and pipelines made for it live
 /// in vk_pipeline.cpp (keyed by key).
@@ -48,10 +53,6 @@ struct Program {
     uint64_t key = 0;
     bool compute = false, failed = false;
     std::atomic<bool> ready{false};   // translated (graphics programs are translated on a worker: vk_jobs.h)
-    // (Ocarina Reborn) how many buffer, image and texel view descriptors its stages have, packed (vk_draw.cpp desc_counts_pack);
-    // ~0: not counted yet. 32 bits in the room before stages, so a Program is as large as before: its size is part of the
-    // program cache's stamp (vk_shader.cpp translator_stamp), and every player's caches stay good
-    mutable std::atomic<uint32_t> desc_counts{~0u};
     std::vector<Stage> stages;
     std::array<uint32_t, 3> workgroup{1, 1, 1};
     uint32_t shared_memory = 0;
@@ -95,6 +96,8 @@ struct Program {
     std::vector<Answer> answers;
     uint64_t variant = 0;   // (a hash of the answers: key alone names all the variants of these stages)
     mutable std::atomic<int64_t> wm_sig{-1};   // (hookshot: what its write masks are made from, vk_draw.cpp program_wm_sig; -1: not asked yet)
+    // (hookshot) how many buffer, image and texel view descriptors its stages have, packed (vk_draw.cpp desc_counts_pack); ~0: not counted yet
+    mutable std::atomic<uint64_t> desc_counts{~0ull};
     // (hookshot) the translation's texture questions as answered, in the order asked: what makes this variant again with nothing
     // bound (the pipeline state list, vk_draw.cpp)
     std::vector<uint8_t> questions;
@@ -116,6 +119,10 @@ std::string program_textures(const NvnState& s, const Program& p);   // (hooksho
 std::string program_code_keys(const NvnState& s);   // (hookshot) " stage:key" for each of the bound program's codes
 const Program* program_pick(const NvnState& s, ProgramKind kind, const uint8_t color_types[8]);   // (program_for without its cache)
 void program_wait(const Program* p);
+/// (hookshot) draw() sets it around its pick: a pick there hands a cached program's read to the workers and gets a stand-in
+void program_load_async_here(bool on);
+/// (hookshot) a cached program's stand-in: once ready (and failed), its records are read and the draw picks again
+bool program_is_stand_in(const Program* p);
 uint64_t program_cache_stamp();   // (what the kept programs and pipelines are good for)
 size_t program_cache_load_some(const std::unordered_set<uint64_t>& wanted, const std::function<void(Program&)>& fn,
                                bool computes = true, bool fallbacks = false);   // (computes: and every kept compute program)
@@ -199,6 +206,8 @@ void log_program_stages(const NvnState& s, const char* why);
 Shader::AttributeType attribute_type_of(uint32_t vattr);
 Shader::TextureType handle_texture_type(uint32_t handle);
 void shader_stats(int64_t* translated, int64_t* failed);
+/// The networks this card left out on purpose (not among the failed)
+int64_t shader_left_out();
 double shader_translate_ms();
 void program_released(const nvn_prog* p);
 /// (hookshot) A guest program as the game makes it (nvnProgramSetShaders), before any draw (vk_programs.cpp): its stages' code keys

@@ -32,6 +32,7 @@ def main():
             sites.append(snippet)
     assert len(sites) == 4, 'Audit any added or removed submission paths'
     fixture = r'''
+#include <atomic>
 #include <cstdio>
 #include <string>
 using VkResult = int;

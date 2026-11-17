@@ -2,10 +2,10 @@
 follows its @@ lines (make_game.py's docstring), then offers to start the game. The AppImage starts it (builder/linux/AppRun),
 with the compiler, sysroot and libraries it brings in the environment.
 
-    hookshot_builder.py                     the window. Its button is Build, Update, Play, or Update builder
-    hookshot_builder.py --play              the game built last time, if there is one (else the window)
-    hookshot_builder.py --launch <folder>   that folder's launcher: Play, and Update when a newer release is out
-    hookshot_builder.py --update <folder>   download the new release (only parts that changed) and build the folder again
+    ocarina_reborn_builder.py                     the window. Its button is Build, Update, Play, or Update builder
+    ocarina_reborn_builder.py --play              the game built last time, if there is one (else the window)
+    ocarina_reborn_builder.py --launch <folder>   that folder's launcher: Play, and Update when a newer release is out
+    ocarina_reborn_builder.py --update <folder>   download the new release (only parts that changed) and build the folder again
 """
 import math
 import os
@@ -15,6 +15,7 @@ import shutil
 import signal
 import socket
 import subprocess
+import json
 import sys
 import threading
 import time
@@ -105,16 +106,52 @@ def dlss_args(dlss):
     return ["--fetch-ngx-sdk", "--accept-nvidia-license"] if dlss else []
 
 
+def folder_has_fsr(folder):
+    """Whether a game folder was built with AMD FSR 4: make_game.py's mark in it (FSR_MARK)."""
+    return bool(folder) and os.path.isfile(os.path.join(folder, make_game.FSR_MARK))
+
+
+def fsr_args(fsr, toggled=True):
+    """make_game.py's AMD FSR 4 arguments: --fsr when ticked; an update whose tick was not changed here says nothing, and the
+    folder's mark keeps what it was built with (make_game.py fsr_wanted); one unticked here builds it without (--no-fsr).
+    Nothing is downloaded on Linux: AMD's library, amd_fidelityfx_upscaler_vk.so, is the player's, in the game folder"""
+    if not toggled:
+        return []
+    return ["--fsr"] if fsr else ["--no-fsr"]
+
+
 def make_game_env(dlss, environ=None):
     """The environment make_game.py runs in. HOOKSHOT_NGX_SDK is set only when DLSS is chosen (one set in the shell is not
-    passed on when unticked, as on Windows), and HOOKSHOT_VK_PREBUILT is dropped so build.py compiles hookshot_vk.so with NGX."""
+    passed on when unticked, as on Windows). Every build compiles ocarina_reborn_vk.so (the AppImage carries no built one)."""
     env = dict(os.environ if environ is None else environ)
     if dlss:
         env["HOOKSHOT_NGX_SDK"] = ngx_sdk_dir()
-        env.pop("HOOKSHOT_VK_PREBUILT", None)
     else:
         env.pop("HOOKSHOT_NGX_SDK", None)
     return env
+
+
+# (the game's own countdown, every 10 s while it builds pipelines: gpu/vk/vk_draw.cpp prepare_progress_log,
+# "vk: noted pipelines: 18009 of 32713 pipelines in 2447 s, about 1998 s left")
+PIPELINES_LEFT = re.compile(r"vk: [a-z]+ pipelines: \d+ of \d+ pipelines in \d+ s, about (\d+) s left")
+
+
+def pipelines_left_in(line):
+    """The seconds the game's line says are left, or -1 when the line is not one of its countdowns"""
+    m = PIPELINES_LEFT.search(line)
+    return float(m.group(1)) if m else -1.0
+
+
+def shader_left(said, since, fraction, elapsed):
+    """The shaders' time left in seconds, or -1 while it cannot be told yet. (A slow PC took 58 minutes and more here while the
+    window said "Usually about 45 minutes" for the whole build: a player took it for stuck.) The game's own countdown while it
+    is fresh (said: what it said; since: seconds since, under 40), less the time since; else the step's bar so far (fraction
+    done after elapsed seconds), once it has moved enough to go by. As the Windows Builder's ShaderStep.Left"""
+    if said >= 0 and 0 <= since < 40:
+        return max(said - since, 0.0)
+    if 0.03 < fraction < 1 and elapsed >= 20:
+        return elapsed / fraction * (1 - fraction)
+    return -1.0
 
 
 def left_text(seconds):
@@ -128,6 +165,7 @@ def left_text(seconds):
 
 
 TRACK_NAMES = {"release": "Release", "rc": "Release candidate", "nightly": "Nightly"}
+NEWEST = "Newest on the update track"   # (the Version menu's first choice)
 
 
 def load_config():
@@ -245,7 +283,7 @@ def play(folder):
         with open(os.path.join(HERE, "play-diagnostics.sh"), encoding="utf-8") as script:
             command = ["/bin/sh", "-c", script.read(), "hookshot-play", exe]
         # (stderr a socket, not a pipe: the game takes a socket, as the journal's where a desktop launcher sends it, for nowhere to
-        # log, and writes hookshot_log.txt; a pipe it takes for a reader and writes no log file (host/posix/win32_posix.c GetFileType).
+        # log, and writes ocarina_reborn_log.txt; a pipe it takes for a reader and writes no log file (host/posix/win32_posix.c GetFileType).
         # The script reads the other end: what the game prints before its log opens)
         reading, writing = socket.socketpair()
         with reading, writing:
@@ -307,8 +345,8 @@ def add_to_menu(folder):
     """an entry in the applications menu that starts the game"""
     if any(ch in folder for ch in "\r\n\0"):   # (a line break would start another key of the entry)
         raise ValueError("the game folder's name has a line break")
-    icon = os.path.join(folder, "hookshot.png")
-    src = os.path.join(ROOT, "assets", "hookshot.png")
+    icon = os.path.join(folder, "ocarina_reborn.png")
+    src = os.path.join(ROOT, "assets", "ocarina_reborn.png")
     if os.path.exists(src):
         shutil.copyfile(src, icon)
     apps = os.path.join(os.environ.get("XDG_DATA_HOME") or os.path.expanduser("~/.local/share"), "applications")
@@ -498,7 +536,7 @@ class Builder(tk.Tk):
         self.title("Hookshot Builder")
         self.apply_scale()
         self.apply_theme()
-        self.minsize(self.px(760), self.px(520))
+        self.minsize(self.px(760), min(self.px(520), self.winfo_screenheight() * 2 // 3))   # (scaled up, no taller than the screen)
         move_old_ngx_sdk()   # (before the settings are read: it may record the license in them)
         self.cfg = load_config()
         self.proc = None
@@ -514,13 +552,19 @@ class Builder(tk.Tk):
         self.latest = None
         self.source_picked = False
         self.dlss_toggled = False
+        self.fsr_toggled = False
         self.tools = linux_update.tools_tag(linux_update.running_root() or ROOT)
         # (the update track: the one chosen in the Track menu, saved; by default these tools' own)
         own = linux_update.track_of(self.tools)
         self.track = tk.StringVar(value=TRACK_NAMES[self.cfg.get("track") if self.cfg.get("track") in linux_update.TRACKS else own])
+        # (the Version menu: the track's newest, or a release chosen there, saved; its list read when it is first opened)
+        self.pinned = self.cfg.get("version") or None
+        self.version = tk.StringVar(value=self.pinned or NEWEST)
+        self.version_tags, self.versions_asked = {}, False
         self.status = tk.StringVar()
         self.kind = tk.StringVar(value=self.cfg.get("kind", "nup"))
         self.nup = tk.StringVar(value=self.cfg.get("nup", ""))
+        self.save_choice = tk.StringVar(value="")   # (Bring in a save: "" a new game, else "<program>|<profile>")
         self.romfs = tk.StringVar(value=self.cfg.get("romfs", ""))
         self.exefs = tk.StringVar(value=self.cfg.get("exefs", ""))
         self.out = tk.StringVar(value=self.cfg.get("out", os.path.expanduser("~/Games/Hookshot")))
@@ -529,6 +573,7 @@ class Builder(tk.Tk):
         self.language = tk.StringVar(value=dict(make_game.LANGUAGES).get(code, names[0]))
         self.prepare = tk.BooleanVar(value=self.cfg.get("prepare", "1") != "0")   # (make_game.py's last step: off, at the first start)
         self.dlss = tk.BooleanVar(value=self.cfg.get("dlss", "0") == "1")
+        self.fsr = tk.BooleanVar(value=self.cfg.get("fsr", "0") == "1")   # (AMD FSR 4: make_game.py --fsr)
         self.check_text = tk.StringVar()
         self.space_text = tk.StringVar()
         self.stage_text = tk.StringVar()
@@ -701,13 +746,14 @@ class Builder(tk.Tk):
                 ("Hs%s.pbar" % style, {"side": "left", "sticky": "ns"})]})])
             s.configure(style + ".Horizontal.TProgressbar", thickness=h, background=GLASS)
 
-        # the log's scroll bar: a thumb on the log, no arrows
-        s.layout("Log.Vertical.TScrollbar", [("Vertical.Scrollbar.trough", {"sticky": "ns", "children": [
-            ("Vertical.Scrollbar.thumb", {"expand": "1", "sticky": "nsew"})]})])
-        s.configure("Log.Vertical.TScrollbar", troughcolor=LOG, background=RAISED_HOVER, bordercolor=LOG, lightcolor=RAISED_HOVER,
-                    darkcolor=RAISED_HOVER, gripcount=0, arrowsize=px(10))
-        s.map("Log.Vertical.TScrollbar", background=[("active", LINE_STRONG)], lightcolor=[("active", LINE_STRONG)],
-              darkcolor=[("active", LINE_STRONG)])
+        # the scroll bars: a thumb, no arrows, on the log and on a page that scrolls
+        for name, trough in (("Log", LOG), ("Page", PAGE)):
+            s.layout(name + ".Vertical.TScrollbar", [("Vertical.Scrollbar.trough", {"sticky": "ns", "children": [
+                ("Vertical.Scrollbar.thumb", {"expand": "1", "sticky": "nsew"})]})])
+            s.configure(name + ".Vertical.TScrollbar", troughcolor=trough, background=RAISED_HOVER, bordercolor=trough,
+                        lightcolor=RAISED_HOVER, darkcolor=RAISED_HOVER, gripcount=0, arrowsize=px(10))
+            s.map(name + ".Vertical.TScrollbar", background=[("active", LINE_STRONG)], lightcolor=[("active", LINE_STRONG)],
+                  darkcolor=[("active", LINE_STRONG)])
 
         # Play's triangle, and the hookshot of the window's head
         self.photo("play", px(11) + px(10), px(14), GO,
@@ -721,10 +767,10 @@ class Builder(tk.Tk):
         return image
 
     def load_logo(self, size):
-        """assets/hookshot.png (the Windows head's and the game's icon), size pixels wide over the page: averaged down with its
+        """assets/ocarina_reborn.png (the Windows head's and the game's icon), size pixels wide over the page: averaged down with its
         alpha on Tk 9, every nth pixel on an older Tk"""
         self.images["logo"] = None
-        path = os.path.join(ROOT, "assets", "hookshot.png")
+        path = os.path.join(ROOT, "assets", "ocarina_reborn.png")
         try:
             full = tk.PhotoImage(master=self, file=path)
         except (tk.TclError, OSError):
@@ -844,8 +890,12 @@ class Builder(tk.Tk):
         page = self.page = ttk.Frame(self)
         page.pack(fill="both", expand=True)
         self.header(page, step=0)
-        f = ttk.Frame(page, padding=(px(48), px(6), px(48), px(28)))
-        f.pack(fill="both", expand=True)
+        # (the page scrolls and the row with Build stays in view, as on Windows since #750: on a short screen, the Steam
+        # Deck's 800 px or a scaled one, the rows above pushed the button out of the window)
+        bottom = ttk.Frame(page, padding=(px(48), 0, px(48), px(28)))
+        bottom.pack(side="bottom", fill="x")
+        bottom.columnconfigure(0, weight=1)
+        f, scrolls = self.scrolled(page, padding=(px(48), px(6), px(48), px(18)))
         f.columnconfigure(0, weight=1, minsize=px(580))   # (every page px(800) wide: the window keeps its width, as on Windows)
         f.columnconfigure(1, minsize=px(20))
         f.columnconfigure(2, minsize=px(200))
@@ -875,8 +925,16 @@ class Builder(tk.Tk):
         else:
             self.path_row(paths, 0, "romfs", self.romfs, lambda: self.pick_dir(self.romfs))
             self.path_row(paths, 1, "exefs", self.exefs, lambda: self.pick_dir(self.exefs))
-        ttk.Label(f, textvariable=self.check_text, style="Small.TLabel", wraplength=px(800)).grid(
-            row=6, column=0, columnspan=3, sticky="w", pady=(px(6), 0))
+        under = ttk.Frame(f)
+        under.grid(row=6, column=0, columnspan=3, sticky="we")
+        under.columnconfigure(0, weight=1)
+        ttk.Label(under, textvariable=self.check_text, style="Small.TLabel", wraplength=px(800)).grid(
+            row=0, column=0, sticky="w", pady=(px(6), 0))
+        if not hasattr(self, "found_saves"):
+            self.find_saves()
+        if self.found_saves:
+            self.save_rows(under).grid(row=1, column=0, sticky="we")
+        self.form_page = self.page
 
         self.section(f, "Install the game to", 7, top=18)
         self.section(f, "Game language", 7, column=2, top=18)
@@ -899,6 +957,12 @@ class Builder(tk.Tk):
                              cursor="hand2")
         track.grid(row=1, column=0, sticky="we")
         track.bind("<<ComboboxSelected>>", self.on_track_changed)
+        # (the Version menu: Newest, the track's newest as before, or any release on git.notrexed.dev, older ones too)
+        self.section(tracks, "Version", 2, top=12)
+        self.version_box = ttk.Combobox(tracks, textvariable=self.version, values=[NEWEST] + ([self.pinned] if self.pinned else []),
+                                        state="readonly", font="HsNote", cursor="hand2", postcommand=self.load_versions)
+        self.version_box.grid(row=3, column=0, sticky="we")
+        self.version_box.bind("<<ComboboxSelected>>", self.on_version_changed)
         ttk.Checkbutton(options, text="Prepare shaders now", variable=self.prepare, cursor="hand2").pack(anchor="w")
         ttk.Label(options, text="A few minutes at the end of the build. Unticked, the game prepares them at its first start, "
                   "behind a black window.", style="Small.TLabel", wraplength=px(540)).pack(anchor="w", padx=(px(26), 0), pady=(px(2), 0))
@@ -906,12 +970,16 @@ class Builder(tk.Tk):
                         command=self.on_dlss_changed, cursor="hand2").pack(anchor="w", pady=(px(12), 0))
         ttk.Label(options, text="For NVIDIA RTX graphics cards. NVIDIA's files stay on this PC: never share a game folder built with them.",
                   style="Small.TLabel", wraplength=px(540)).pack(anchor="w", padx=(px(26), 0), pady=(px(2), 0))
+        ttk.Checkbutton(options, text="AMD FSR 4", variable=self.fsr, command=self.on_fsr_changed,
+                        cursor="hand2").pack(anchor="w", pady=(px(12), 0))
+        ttk.Label(options, text="For AMD Radeon RX 9000 graphics cards. AMD's FSR 4 library is not included: put "
+                  "amd_fidelityfx_upscaler_vk.so in the game folder, then choose AMD FSR 4 as the Upscaler in the game's menu.",
+                  style="Small.TLabel", wraplength=px(540)).pack(anchor="w", padx=(px(26), 0), pady=(px(2), 0))
 
-        f.rowconfigure(10, weight=1, minsize=px(18))
-        ttk.Label(f, textvariable=self.status, style="Status.TLabel", wraplength=px(800)).grid(
-            row=11, column=0, columnspan=3, sticky="w", pady=(0, px(12)))
-        foot = ttk.Frame(f)
-        foot.grid(row=12, column=0, columnspan=3, sticky="we")
+        ttk.Label(bottom, textvariable=self.status, style="Status.TLabel", wraplength=px(800)).grid(
+            row=0, column=0, sticky="w", pady=(0, px(12)))
+        foot = ttk.Frame(bottom)
+        foot.grid(row=1, column=0, sticky="we")
         foot.columnconfigure(1, weight=1)
         self.space_bar = ttk.Progressbar(foot, maximum=1.0, length=px(160), style="Go.Horizontal.TProgressbar")
         self.space_bar.grid(row=0, column=0)
@@ -923,6 +991,137 @@ class Builder(tk.Tk):
         self.out.trace_add("write", lambda *a: self.update_space())
         self.update_space()
         self.apply_mode()
+        scrolls()
+
+    def scrolled(self, parent, padding):
+        """a page's body that scrolls when the window is shorter than it: by the wheel or trackpad, the scroll bar (shown only
+        then), or dragging the page by touch. It asks for its height, but no more than the screen has room for. Returns the
+        body and what to call once it is filled"""
+        px = self.px
+        canvas = tk.Canvas(parent, background=PAGE, highlightthickness=0, borderwidth=0, yscrollincrement=px(16))
+        canvas.pack(fill="both", expand=True)
+        body = ttk.Frame(canvas, padding=padding)
+        item = canvas.create_window(0, 0, window=body, anchor="nw")
+        bar = ttk.Scrollbar(parent, orient="vertical", command=canvas.yview, style="Page.Vertical.TScrollbar")
+
+        def moved(first, last):
+            bar.set(first, last)
+            if float(first) <= 0 and float(last) >= 1:
+                bar.place_forget()
+            else:   # (over the page's right margin: the body keeps its width)
+                bar.place(in_=canvas, relx=1, x=-px(8), rely=0, relheight=1, anchor="ne")
+
+        def fit(event=None):
+            room = self.winfo_screenheight() - (parent.winfo_reqheight() - canvas.winfo_reqheight()) - px(80)
+            canvas.configure(width=body.winfo_reqwidth(), height=max(px(120), min(body.winfo_reqheight(), room)),
+                             scrollregion=(0, 0, body.winfo_reqwidth(), body.winfo_reqheight()))
+
+        def wheel(event):
+            w = event.widget
+            if isinstance(w, str) or not (str(w) + ".").startswith(str(canvas) + ".") or w.winfo_class() == "TCombobox":
+                return
+            canvas.yview_scroll(-3 if event.num == 4 or (event.num != 5 and event.delta > 0) else 3, "units")
+
+        def drag(w):
+            w.bind("<ButtonPress-1>", lambda e: canvas.scan_mark(0, e.y_root), add="+")
+            w.bind("<B1-Motion>", lambda e: canvas.scan_dragto(0, e.y_root, gain=1), add="+")
+
+        def done():
+            drag(canvas)
+            todo = [body]
+            while todo:
+                w = todo.pop()
+                if w.winfo_class() in ("TFrame", "TLabel"):
+                    drag(w)
+                todo += w.winfo_children()
+            self.update_idletasks()
+            fit()
+
+        canvas.configure(yscrollcommand=moved)
+        canvas.bind("<Configure>", lambda e: canvas.itemconfigure(item, width=e.width))
+        body.bind("<Configure>", fit)
+        for sequence in ("<MouseWheel>", "<Button-4>", "<Button-5>"):
+            self.bind_all(sequence, wheel)
+        canvas.bind("<Destroy>", lambda e: [self.unbind_all(s) for s in ("<MouseWheel>", "<Button-4>", "<Button-5>")])
+        return body, done
+
+    def saves_tool(self, *args):
+        """scripts/oot_saves.py with these arguments and --json: its answer, or {"error": why}"""
+        try:
+            out = subprocess.run([sys.executable, "-I", os.path.join(ROOT, "scripts", "oot_saves.py")] + list(args) + ["--json"],
+                                 capture_output=True, text=True, timeout=120).stdout.strip().splitlines()
+            return json.loads(out[-1]) if out and out[-1].startswith("{") else {"error": "the save tool gave no answer"}
+        except (OSError, ValueError, subprocess.SubprocessError) as e:
+            return {"error": str(e)}
+
+    def find_saves(self):
+        """The saves on this PC a build can start from (an emulator's or another port's), found once in the background;
+        the form is drawn again when they are known"""
+        def look():
+            doc = self.saves_tool("list")
+            found = []
+            for source in doc.get("sources", []):
+                programs = [n for n in source["display"].split(" / ") if n != "NX2navi"]
+                # (emulators that share one save folder, Eden's forks: one row, its programs said under it; one port unnamed)
+                shown = ("another PC port" if source["name"] == "nx2navi" else "your emulator's save" if len(programs) > 1
+                         else programs[0])
+                who = "%s and %s keep their saves here · " % (", ".join(programs[:-1]), programs[-1]) if len(programs) > 1 else ""
+                for save in source["saves"]:
+                    slots = ["%s, saved %s" % (x["slot"].replace("slot_", "Slot "), x["saved"].replace("T", " ")[:16]) if x["saved"]
+                             else x["slot"].replace("slot_", "Slot ") for x in save["slots"]]
+                    found.append({"name": source["name"], "shown": shown, "profile": save["profile"], "path": save["path"],
+                                  "about": who + " · ".join(slots), "waiting": bool(save.get("pending"))})
+            self.found_saves = found
+
+        def wait():   # (Tk is the main thread's alone: the form is drawn again from here, not from the thread)
+            if worker.is_alive():
+                self.after(150, wait)
+            elif self.found_saves and self.on_form():
+                self.show_form()
+        self.found_saves = []
+        worker = threading.Thread(target=look, daemon=True)
+        worker.start()
+        self.after(150, wait)
+
+    def on_form(self):
+        """the form is the page shown (a redraw then cannot take the place of a build or the launcher)"""
+        return self.page is not None and self.page is getattr(self, "form_page", None) and bool(self.page.winfo_exists())
+
+    def save_rows(self, parent):
+        """Bring in a save: Start a new game, then each save found; one of them is copied into the game folder after the build"""
+        px = self.px
+        box = ttk.Frame(parent)
+        self.section(box, "Bring in a save", 0, top=18)
+        card = ttk.Frame(box, style="Card.TFrame", padding=px(5))
+        card.grid(row=1, column=0, sticky="we")
+        box.columnconfigure(0, weight=1)
+        card.columnconfigure(0, weight=1)
+        ttk.Radiobutton(card, text="Start a new game", value="", variable=self.save_choice, style="Row.TRadiobutton",
+                        cursor="hand2").grid(row=0, column=0, sticky="we")
+        for i, save in enumerate(self.found_saves):
+            tk.Frame(card, height=max(1, px(1)), background=GLASS_LINE).grid(row=2 * i + 1, column=0, sticky="we", padx=px(12))
+            text = "Continue from %s\n%s" % (save["shown"], save["about"])
+            if save["waiting"]:
+                text += "\nStart that game and quit it from its menu once first: it still has a save waiting."
+            b = ttk.Radiobutton(card, text=text, value="%s|%s" % (save["name"], save["profile"]), variable=self.save_choice,
+                                style="Row.TRadiobutton", cursor="hand2")
+            b.grid(row=2 * i + 2, column=0, sticky="we")
+            if save["waiting"]:
+                b.state(["disabled"])
+        return box
+
+    def bring_in_save(self):
+        """After a build: the chosen save copied into Hookshot's save folder (its own save backed up first). What to say"""
+        choice = self.save_choice.get()
+        if not choice:
+            return ""
+        name, profile = choice.split("|", 1)
+        shown = next((x["shown"] for x in self.found_saves if x["name"] == name and x["profile"] == profile), name)
+        doc = self.saves_tool("import", name, "--profile", profile)
+        if "error" in doc:
+            return "your save from %s was not brought in: %s" % (shown, doc["error"])
+        self.save_choice.set("")   # (once: a later update keeps the game's own save)
+        return "your save from %s is in the game (%d slot(s))" % (shown, len(doc["slots"]))
 
     def share_row(self, parent, folder, wrap=None):
         """Save my pipeline list (share_pipeline_list), and under it what it did"""
@@ -996,6 +1195,12 @@ class Builder(tk.Tk):
         save_config(self.cfg)
         self.apply_mode()
 
+    def on_fsr_changed(self):
+        self.fsr_toggled = True
+        self.cfg["fsr"] = "1" if self.fsr.get() else "0"
+        save_config(self.cfg)
+        self.apply_mode()
+
     def check_version(self):
         args = ["--nup", self.nup.get()] if self.kind.get() == "nup" else ["--exefs", self.exefs.get()]
         self.check_text.set("Checking the game version...")
@@ -1014,6 +1219,10 @@ class Builder(tk.Tk):
         threading.Thread(target=run, daemon=True).start()
 
     def lookup_latest(self):
+        if self.pinned:   # (a version chosen in the Version menu: that one)
+            self.lines.put(("latest", self.pinned))
+            return
+
         def run():
             forced = os.environ.get("HOOKSHOT_LATEST_TAG")
             tag = None if forced == "none" else (forced or linux_update.latest_tag(track=track))
@@ -1031,7 +1240,9 @@ class Builder(tk.Tk):
         self.mode = linux_update.choose_mode(game, self.tools, self.latest, self.source_picked, kept, self.switching())
         dlss_changed = bool(kept and game and not self.source_picked and getattr(self, "dlss_toggled", False) and
                             hasattr(self, "dlss") and bool(self.dlss.get()) != folder_has_dlss(expanded))
-        if self.mode == "up-to-date" and dlss_changed:
+        fsr_changed = bool(kept and game and not self.source_picked and getattr(self, "fsr_toggled", False) and
+                           hasattr(self, "fsr") and bool(self.fsr.get()) != folder_has_fsr(expanded))
+        if self.mode == "up-to-date" and (dlss_changed or fsr_changed):
             self.mode = "update-game"
         button = self.build_button
         if button is None:
@@ -1050,9 +1261,10 @@ class Builder(tk.Tk):
         except tk.TclError:
             pass
         target = linux_update.update_target(self.latest, self.tools, self.switching())
-        if self.mode == "update-game" and dlss_changed and game == target:
-            self.status.set("Update builds your game again %s NVIDIA DLSS."
-                            % ("with" if self.dlss.get() else "without"))
+        if self.mode == "update-game" and (dlss_changed or fsr_changed) and game == target:
+            what = [("with" if self.dlss.get() else "without") + " NVIDIA DLSS"] if dlss_changed else []
+            what += [("with" if self.fsr.get() else "without") + " AMD FSR 4"] if fsr_changed else []
+            self.status.set("Update builds your game again %s." % " and ".join(what))
         elif self.mode == "update-game":
             self.status.set("Hookshot %s is available. Your game is %s. Update downloads only what changed, then compiles what changed."
                             % (target, game))
@@ -1123,11 +1335,61 @@ class Builder(tk.Tk):
         return next((k for k, v in TRACK_NAMES.items() if v == self.track.get()), "release")
 
     def switching(self):
-        """(a Track other than these tools' own: its newest is installed, even an older version)"""
-        return self.track_id() != linux_update.track_of(self.tools)
+        """(a Track other than these tools' own: its newest is installed, even an older version; or a version chosen in the
+        Version menu: that one, older or newer)"""
+        return bool(getattr(self, "pinned", None)) or self.track_id() != linux_update.track_of(self.tools)
+
+    def load_versions(self):
+        """The Version menu opened: every release, read once in the background (again after a failure)"""
+        if self.versions_asked:
+            return
+        self.versions_asked = True
+        self.version_box.configure(values=[NEWEST, "Reading the releases from git.notrexed.dev…"])
+
+        def run():
+            self.lines.put(("versions", linux_update.all_releases()))
+        threading.Thread(target=run, daemon=True).start()
+
+    def fill_versions(self, releases):
+        if releases is None:
+            self.versions_asked = False
+            values = [NEWEST, "git.notrexed.dev did not answer: open the menu again to retry"]
+            self.version_tags = {}
+        else:
+            self.version_tags = {linux_update.release_label(r): r for r in releases}
+            values = [NEWEST] + list(self.version_tags)
+        if self.pinned and not any(r["tag"] == self.pinned for r in self.version_tags.values()):
+            values.insert(1, self.pinned)
+        try:
+            self.version_box.configure(values=values)
+            shown = next((k for k, r in self.version_tags.items() if r["tag"] == self.pinned), self.pinned or NEWEST)
+            self.version.set(shown)
+        except tk.TclError:
+            pass
+
+    def on_version_changed(self, _event=None):
+        label = self.version.get()
+        r = self.version_tags.get(label)
+        tag = None if label == NEWEST else r["tag"] if r else (label if label == self.pinned else "")
+        if tag == "" or (r and not r["installable"]):
+            if r and not r["installable"]:
+                messagebox.showinfo("Hookshot", "%s has no Linux list (%s) to install from." % (r["tag"], linux_update.LIST_NAME))
+            self.version.set(next((k for k, v in self.version_tags.items() if v["tag"] == self.pinned), self.pinned or NEWEST))
+            return
+        if tag == self.pinned:
+            return
+        self.pinned = tag
+        self.cfg["version"] = tag
+        save_config(self.cfg)
+        self.latest = None
+        self.apply_mode()
+        self.lookup_latest()
 
     def on_track_changed(self, _event=None):
         self.cfg["track"] = self.track_id()
+        self.pinned = self.cfg["version"] = None   # (a track chosen: its newest, not a version chosen before)
+        if hasattr(self, "version"):
+            self.version.set(NEWEST)
         save_config(self.cfg)
         self.latest = None
         self.apply_mode()
@@ -1205,7 +1467,7 @@ class Builder(tk.Tk):
             return
         dlss = bool(self.dlss.get()) if getattr(self, "dlss_toggled", False) else folder_has_dlss(folder)
         cmd = [sys.executable, "-I", os.path.join(ROOT, "nx2", "make_game.py"), "--update", folder] + \
-            ([] if self.prepare.get() else ["--no-prepare-shaders"]) + dlss_args(dlss)   # (as the last build chose)
+            ([] if self.prepare.get() else ["--no-prepare-shaders"]) + dlss_args(dlss) +             fsr_args(bool(self.fsr.get()), getattr(self, "fsr_toggled", False))   # (as the last build chose)
         self.heading.configure(text="Updating your game")
         self.stage_text.set("Compiling what changed")
         self.started = time.time()
@@ -1260,7 +1522,7 @@ class Builder(tk.Tk):
         # fewer, 80% of the total memory at 3.5 GB each, and the CPU sat at 29%
         cmd = [sys.executable, "-I", os.path.join(ROOT, "nx2", "make_game.py")] + src + ["--out", out, "--language", code] + \
             ([] if jobs is None else ["--jobs", str(jobs)]) + ([] if self.prepare.get() else ["--no-prepare-shaders"]) + \
-            (dlss_args(True) if dlss else [])
+            (dlss_args(True) if dlss else []) + (fsr_args(True) if getattr(self, "fsr", None) and self.fsr.get() else [])
         slow = slow_disk_warning(out)   # (a warning, not a stop: a hard drive still builds, only much slower)
         if slow is not None and not messagebox.askokcancel("Hookshot", slow):
             return
@@ -1283,6 +1545,7 @@ class Builder(tk.Tk):
         self.changed, self.compiled_files = -1, 0
         self.eta = None
         self.compile_started = None
+        self.shader_started, self.shader_fraction, self.shader_said, self.shader_said_at = None, 0.0, -1.0, 0.0
         self.times = None
         self.shaders_later = False
         self.built = self.error = None   # (this run's own: what make_game.py says, or Cancel)
@@ -1334,6 +1597,13 @@ class Builder(tk.Tk):
                 text += " · compiling %d:%02d" % (c // 60, c % 60)
             if self.eta is not None:
                 text += " · " + left_text(self.eta)
+            if self.shader_started:
+                # (the shaders' own countdown: on a slow PC this step alone can take an hour)
+                now = time.time()
+                c = int(now - self.shader_started)
+                left = shader_left(self.shader_said, now - self.shader_said_at if self.shader_said >= 0 else -1,
+                                   self.shader_fraction, now - self.shader_started)
+                text += " · preparing shaders %d:%02d · %s" % (c // 60, c % 60, left_text(left) if left >= 0 else "estimating…")
             self.time_text.set(text)
             self.after(1000, self.tick)
 
@@ -1343,6 +1613,9 @@ class Builder(tk.Tk):
                 kind, v = self.lines.get_nowait()
                 if kind == "check":
                     self.check_text.set(v)
+                elif kind == "versions":
+                    if hasattr(self, "version_box"):
+                        self.fill_versions(v)
                 elif kind == "latest":
                     self.latest = v or None
                     self.apply_mode()
@@ -1378,10 +1651,14 @@ class Builder(tk.Tk):
             self.bar.configure(mode="determinate", value=0)
             # (the compile's clock and countdown are the compile's: a later step, the minutes-long shaders one, without them)
             self.compile_started = time.time() if stage == "compile" else None
+            self.shader_started = time.time() if stage == "shaders" else None   # (its countdown: shader_left)
+            self.shader_fraction, self.shader_said = 0.0, -1.0
             self.eta = None
         elif line.startswith("@@progress "):
             try:
                 self.bar.configure(value=float(line.split()[1]))
+                if self.shader_started:
+                    self.shader_fraction = float(line.split()[1])
             except ValueError:
                 pass
         elif line.startswith("@@plan "):
@@ -1421,8 +1698,11 @@ class Builder(tk.Tk):
             self.built = line[7:]
         elif line.startswith("@@error "):
             self.error = line[8:]
+        elif pipelines_left_in(line) >= 0:
+            self.shader_said, self.shader_said_at = pipelines_left_in(line), time.time()
         elif line.startswith(make_game.NOT_PREPARED):
-            self.shaders_later = True
+            # (left to the first start; or, the GPU driver having stopped responding, each shader to when it is first drawn)
+            self.shaders_later = "first start" if line.endswith(make_game.FIRST_START) else "first drawn"
         if hasattr(self, "log"):
             self.add_log(line + "\n")
             self.log.see("end")
@@ -1441,8 +1721,13 @@ class Builder(tk.Tk):
                 text += ", compiled in %d:%02d" % (int(compiled) // 60, int(compiled) % 60)
                 if previous > 0:
                     text += " · last time %d:%02d" % (int(previous) // 3600, int(previous) // 60 % 60)
-            if self.shaders_later:
+            if self.shaders_later == "first start":
                 text += " · the shaders are prepared at its first start"
+            elif self.shaders_later:
+                text += " · the shaders were not prepared: each is built when the game first draws it"
+            said = self.bring_in_save()
+            if said:
+                text += " · " + said
             self.stage_text.set(text)
             self.bar.configure(value=1.0)
             try:

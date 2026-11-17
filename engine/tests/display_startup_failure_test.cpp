@@ -11,6 +11,7 @@
 
 #define HOS_APP_ID "authored.app"
 #define HOS_GAME_TITLE "authored window"
+static const char* hos_game_title(const char* fallback) { return fallback; } // (host/hos_paths.h: no game folder here)
 using HANDLE = void*;
 constexpr int TRUE = 1, FALSE = 0;
 constexpr unsigned INFINITE = ~0u;
@@ -28,6 +29,7 @@ static std::string mode;
 static unsigned loads, inits, windows, threads, offscreen, signals, sleeps, flushes, waited, prepares;
 static std::vector<std::string> logs;
 void hos_discord_start() {} // Inert optional IPC startup; the fixture exercises display startup only.
+int hos_crash_helper_main(int, char**) { return -1; } // (host/hos_crash_dialog.c: not a crash window's helper, the game itself)
 
 static void require(bool condition, const char* message) {
     if (!condition) throw std::runtime_error(message);
@@ -41,6 +43,7 @@ static void hos_log(const char* format, ...) {
     logs.emplace_back(text);
 }
 [[maybe_unused]] static void hos_log_flush() { ++flushes; }
+void hos_crash_clean_end(void) { require(flushes != 0, "clean-end mark before log flush"); }
 static const char* hos_sdl_error() { return "authored missing Vulkan loader"; }
 static int hos_sdl_load() { ++loads; return mode == "load_failure" || mode.starts_with("prepare_") ? 0 : 3; }
 static void hos_sdl_identity(const char*, const char*) {}
@@ -99,6 +102,7 @@ static void WaitForSingleObject(HANDLE h, unsigned timeout) {
     ++waited;
 }
 static void load_ocarina_reborn_env() {}
+static void hos_options_choose(int, char**) {}   // (host/options_path.c: the settings file, in the user folder)
 static void driver_cache_room() {}   // (host/hos_main.c: the drivers' shader caches' size, #2033)
 static void driver_cache_folder() {}   // (host/hos_main.c: the folder __GL_SHADER_DISK_CACHE_PATH names, made)
 

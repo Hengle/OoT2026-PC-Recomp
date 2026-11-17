@@ -199,7 +199,7 @@ int main(){
         ready=function(cache,'bool stage_modules_ready(const Program& p)')
         self.assertIn('std::lock_guard lk(light_mu)',ready)
 
-    def test_fresh_and_repeat_staging_match_checked_source(self):
+    def test_historical_staging_matches_pinned_release(self):
         import re as _re
         perf=(ALPHA/'engine-perf.patch').read_text(encoding='utf-8',errors='replace')
         touched={m for m in _re.findall(r'^diff --git a/(\S+) b/',perf,_re.M)}
@@ -219,7 +219,7 @@ int main(){
             engine_tester_fixes.apply_perf(root)
             names=names|{r for r in touched if (root/r).exists()}
             for rel in names:
-                actual, expected = (root/rel).read_bytes(), (ROOT/'engine'/rel).read_bytes()
+                actual, expected = (root/rel).read_bytes(), engine_tester_fixes.historical_engine_bytes(rel)
                 try:
                     actual, expected = actual.decode('utf-8').replace('\r\n','\n'), expected.decode('utf-8').replace('\r\n','\n')
                 except UnicodeDecodeError:
@@ -232,6 +232,6 @@ int main(){
             for rel in ('host/ocr_instance.h','host/ocr_input_state.h','gpu/vk/ocr_intel_compute.h','gpu/vk/ocr_prepare_policy.h','gpu/vk/ocr_fault_policy.h'):
                 # Source headers can be checked out with CRLF on Windows.
                 self.assertEqual((root/rel).read_text(encoding='utf-8'),
-                                 (ROOT/'engine'/rel).read_text(encoding='utf-8'), rel)
+                                 engine_tester_fixes.historical_engine_bytes(rel).decode('utf-8').replace('\r\n','\n'), rel)
 
 if __name__=='__main__':unittest.main()

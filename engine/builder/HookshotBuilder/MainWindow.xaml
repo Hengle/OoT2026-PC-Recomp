@@ -32,7 +32,7 @@
             </Ellipse.Fill>
             <Ellipse.RenderTransform><ScaleTransform x:Name="HaloScale"/></Ellipse.RenderTransform>
           </Ellipse>
-          <Image Source="pack://application:,,,/Images/hookshot.png" Width="178" RenderTransformOrigin="0.5,0.5" RenderOptions.BitmapScalingMode="HighQuality">
+          <Image Source="pack://application:,,,/Images/ocarina_reborn.png" Width="178" RenderTransformOrigin="0.5,0.5" RenderOptions.BitmapScalingMode="HighQuality">
             <Image.RenderTransform>
               <TransformGroup>
                 <RotateTransform x:Name="BobTurn"/>
@@ -69,7 +69,7 @@
 
       <!-- the head: the hookshot, and the steps (or the update's versions) -->
       <StackPanel Orientation="Horizontal" Margin="28,0,0,0" VerticalAlignment="Center">
-        <Image Source="pack://application:,,,/Images/hookshot.png" Width="28" RenderOptions.BitmapScalingMode="HighQuality">
+        <Image Source="pack://application:,,,/Images/ocarina_reborn.png" Width="28" RenderOptions.BitmapScalingMode="HighQuality">
           <Image.Effect><DropShadowEffect BlurRadius="6" ShadowDepth="2" Direction="270" Opacity="0.5" Color="Black"/></Image.Effect>
         </Image>
         <TextBlock Text="Hookshot" FontSize="15" FontWeight="Bold" Margin="10,0,0,0" VerticalAlignment="Center"/>
@@ -102,6 +102,7 @@
             <RowDefinition Height="Auto"/>
             <RowDefinition Height="Auto"/>
             <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
           </Grid.RowDefinitions>
           <StackPanel>
             <TextBlock x:Name="FilesTitle" Style="{StaticResource Heading}" Text="Build your game"/>
@@ -124,7 +125,18 @@
             <Button x:Name="OtherWays" Style="{StaticResource LinkButton}" Foreground="{StaticResource InkSoft}" Content="romfs and exefs folders" Click="BrowseFolders"/>
           </WrapPanel>
 
-          <Grid Grid.Row="3">
+          <!-- Bring in a save: the saves found on this PC (an emulator's or another port's, Saves.cs), one of them copied into the
+               game folder once the build is done. Shown only when there is one -->
+          <StackPanel x:Name="SaveSection" Grid.Row="3" Margin="0,16,0,0" Visibility="Collapsed">
+            <TextBlock x:Name="SaveLabel" Style="{StaticResource Label}" Text="BRING IN A SAVE"/>
+            <Border Style="{StaticResource Card}">
+              <ScrollViewer MaxHeight="128" VerticalScrollBarVisibility="Auto">
+                <StackPanel x:Name="SaveList"/>
+              </ScrollViewer>
+            </Border>
+          </StackPanel>
+
+          <Grid Grid.Row="4" Margin="0,16,0,0">
             <Grid.ColumnDefinitions><ColumnDefinition/><ColumnDefinition Width="20"/><ColumnDefinition Width="200"/></Grid.ColumnDefinitions>
             <StackPanel>
               <TextBlock x:Name="InstallLabel" Style="{StaticResource Label}" Text="INSTALL THE GAME TO"/>
@@ -149,9 +161,9 @@
             </StackPanel>
           </Grid>
 
-          <Grid Grid.Row="4" Margin="0,12,0,0">
+          <Grid Grid.Row="5" Margin="0,12,0,0">
             <Grid.ColumnDefinitions><ColumnDefinition/><ColumnDefinition Width="20"/><ColumnDefinition Width="160"/><ColumnDefinition Width="20"/><ColumnDefinition Width="160"/></Grid.ColumnDefinitions>
-            <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
+            <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
             <Grid VerticalAlignment="Center">
               <Grid.ColumnDefinitions><ColumnDefinition Width="16"/><ColumnDefinition/></Grid.ColumnDefinitions>
               <Border Width="16" Height="16" CornerRadius="8" Background="{StaticResource BrandSoft}" VerticalAlignment="Center">
@@ -198,11 +210,18 @@
             <CheckBox x:Name="PrepareTick" Grid.Row="1" Grid.Column="2" Grid.ColumnSpan="3" Style="{StaticResource Tick}" Content="Prepare shaders now"
                       IsChecked="True" Margin="0,12,0,0"
                       ToolTip="Prepares the game's shaders at the end of the build, a few minutes (longer on some GPUs). Unticked, the game prepares them at its first start, behind a black window."/>
+            <StackPanel Grid.Row="2" Orientation="Horizontal" Margin="0,12,0,0" VerticalAlignment="Center">
+              <!-- (the Version menu, ReleaseList.cs: the track's newest, or any release on git.notrexed.dev, read when it opens; saved) -->
+              <TextBlock x:Name="VersionLabel" Style="{StaticResource Label}" Text="VERSION" VerticalAlignment="Center" Margin="0,0,12,0"/>
+              <ComboBox x:Name="VersionBox" Width="240" Style="{StaticResource Choice}" IsEditable="False"
+                        AutomationProperties.Name="Version" AutomationProperties.LabeledBy="{Binding ElementName=VersionLabel}"
+                        ToolTip="Newest: the update track's newest version, as before. Or pick any release of Hookshot, older ones too: the builder installs it and your game is built with it, until you pick another one."/>
+            </StackPanel>
           </Grid>
 
           <!-- NVIDIA DLSS: off unless ticked. Ticking it shows NVIDIA's license; the build downloads NVIDIA's SDK under it
                (make_game.py, scripts/ngx_sdk.py). Nothing of NVIDIA's comes with the builder -->
-          <StackPanel Grid.Row="5" Margin="0,14,0,0">
+          <StackPanel Grid.Row="6" Margin="0,14,0,0">
             <CheckBox x:Name="DlssTick" Style="{StaticResource Tick}" IsChecked="False" Click="DlssChanged"
                       Content="NVIDIA DLSS (downloads NVIDIA's SDK under NVIDIA's license)"/>
             <TextBlock Style="{StaticResource Note}" FontSize="12" Margin="26,4,0,0" TextWrapping="Wrap"
@@ -278,6 +297,8 @@
           </Grid>
           <TextBlock x:Name="ReadyTitle" Style="{StaticResource Heading}" Text="Your game is ready" HorizontalAlignment="Center" Margin="0,24,0,0"/>
           <TextBlock x:Name="ReadyNote" Style="{StaticResource Sub}" HorizontalAlignment="Center" TextAlignment="Center"/>
+          <TextBlock x:Name="SaveNote" Style="{StaticResource Note}" HorizontalAlignment="Center" TextAlignment="Center" TextWrapping="Wrap"
+                     MaxWidth="560" Margin="0,8,0,0" Visibility="Collapsed"/>
           <StackPanel Orientation="Horizontal" HorizontalAlignment="Center" Margin="0,28,0,0">
             <Button x:Name="PlayButton" Style="{StaticResource GoButton}" Click="Play">
               <StackPanel Orientation="Horizontal">

@@ -54,8 +54,7 @@ def appdir(path):
         folder = path / dest
         folder.mkdir(parents=True)
         (folder / "kept").write_text(dest + "\n", encoding="utf-8")
-    lib = path / "usr" / "lib" / "ocarina_reborn"
-    (lib / "ocarina_reborn_vk.so").write_bytes(b"vk")
+    lib = path / "usr" / "lib" / "hookshot"
     (lib / "libSDL2-2.0.so.0").write_bytes(b"sdl")
     (path / "AppRun").write_text("#!/bin/sh\n", encoding="utf-8")
     (path / "AppRun").chmod(0o755)
@@ -568,10 +567,10 @@ class UpdateTests(unittest.TestCase):
             linux_update.install(nxt, str(installed), manifest, get=get2)
             self.assertEqual(len(downloaded), 1)
             self.assertIn("usr-share-ocarina_reborn", downloaded[0])
-            built = home / "ocarina_reborn" / "builder" / "versions" / "v2"
-            self.assertEqual((built / "usr" / "share" / "ocarina_reborn" / "nx2" / "marker.py").read_text(encoding="utf-8"), "print('two')\n")
-            self.assertEqual((built / "usr" / "lib" / "ocarina_reborn" / "ocarina_reborn_vk.so").read_bytes(), b"vk")
-            self.assertFalse((home / "ocarina_reborn" / "builder" / "versions" / "v1").exists())
+            built = home / "hookshot" / "builder" / "versions" / "v2"
+            self.assertEqual((built / "usr" / "share" / "hookshot" / "nx2" / "marker.py").read_text(encoding="utf-8"), "print('two')\n")
+            self.assertEqual((built / "usr" / "lib" / "hookshot" / "libSDL2-2.0.so.0").read_bytes(), b"sdl")
+            self.assertFalse((home / "hookshot" / "builder" / "versions" / "v1").exists())
 
     def test_an_installed_builder_finds_its_own_root(self):
         with tempfile.TemporaryDirectory(prefix="ocarina_reborn-root-") as tmp:
@@ -618,9 +617,10 @@ class UpdateTests(unittest.TestCase):
             with mock.patch.dict(os.environ, {"HOOKSHOT_TOOLS": str(ROOT)}):
                 exec(finish, make_game.__dict__, {"built": str(built), "out": str(out), "work": str(work),
                                                    "a": SimpleNamespace(fsr=False, no_fsr=False, update=None, fetch_fsr_runtime=False)})
-            self.assertEqual((out / "ocarina_reborn").read_bytes(), (ROOT / "builder" / "linux" / "ocarina_reborn-folder").read_bytes())
-            self.assertTrue((out / "ocarina_reborn").stat().st_mode & stat.S_IXUSR)
-            self.assertEqual(sorted(p.name for p in out.iterdir()), ["bin", "ocarina_reborn", "image.bin"])
+            self.assertEqual((out / "hookshot").read_bytes(), (ROOT / "builder" / "linux" / "ocarina_reborn-folder").read_bytes())
+            self.assertTrue((out / "hookshot").stat().st_mode & stat.S_IXUSR)
+            self.assertEqual(sorted(p.name for p in out.iterdir() if p.name != make_game.INSTALLED_NOTE),   # (what the finish put in)
+                             ["bin", "hookshot", "image.bin"])
             self.assertEqual(sorted(p.name for p in (out / "bin").iterdir()), sorted(make_game.BESIDE))
             self.assertEqual((out / "bin" / "ocarina_reborn").read_bytes(), b"new ocarina_reborn")
 
@@ -660,7 +660,7 @@ class UpdateTests(unittest.TestCase):
 
     def test_the_folder_launcher_finds_the_builder_under_the_builder_home(self):
         # HOOKSHOT_BUILDER_HOME is the data directory, as XDG_DATA_HOME is: linux_update installs to
-        # <home>/ocarina_reborn/builder and host/hos_update.c looks there, so the launcher must too
+        # <home>/hookshot/builder, so the launcher must look there
         with tempfile.TemporaryDirectory(prefix="ocarina_reborn-folder-") as tmp:
             root = Path(tmp)
             game = root / "game"

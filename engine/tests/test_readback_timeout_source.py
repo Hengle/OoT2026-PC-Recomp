@@ -23,7 +23,6 @@ RUN_ALL_ARGS = ["--cxx", "{cxx}"]
 ROOT = Path(__file__).resolve().parents[1]
 
 FIXTURE = r"""
-#include "ocr_streaming_policy.h"
 #include <algorithm>
 #include <atomic>
 #include <chrono>
@@ -80,6 +79,8 @@ VkResult vkCreateCommandPool(VkDevice, const VkCommandPoolCreateInfo*, const voi
 VkResult vkAllocateCommandBuffers(VkDevice, const VkCommandBufferAllocateInfo*, VkCommandBuffer* c) { *c = &the_cmd; return VK_SUCCESS; }
 VkResult vkCreateFence(VkDevice, const VkFenceCreateInfo*, const void*, VkFence* f) { *f = &the_fence; return VK_SUCCESS; }
 VkResult vkResetCommandPool(VkDevice, VkCommandPool, uint32_t) { return VK_SUCCESS; }
+void vkDestroyCommandPool(VkDevice, VkCommandPool, const void*) {}   // (readback_begin lets a half-made pool go: not here)
+template <class F> void reap(F&& f) { f(); }   // (the reaper thread's queue: at once here)
 VkResult vkBeginCommandBuffer(VkCommandBuffer, const VkCommandBufferBeginInfo*) { return VK_SUCCESS; }
 void vkCmdPipelineBarrier2(VkCommandBuffer, const VkDependencyInfo*) {}
 VkResult vkEndCommandBuffer(VkCommandBuffer) { return VK_SUCCESS; }
@@ -108,6 +109,8 @@ static uint64_t pool_cap() { return 256ull << 20; }
 static std::set<VkImage> freed, pooled;
 static void destroy_image(VkImage i, VmaAllocation) { if (i) freed.insert(i); }
 struct { bool in_pass = false; } compact;
+// (Ocarina Reborn: the spread-out cleanup's policy, gpu/vk/ocr_streaming_policy.h: never defers here)
+namespace ocr_streaming { template <class... A> bool defer_cleanup(A...) { return false; } inline int mode() { return 0; } }
 
 namespace {
 /* DEAD */
@@ -120,11 +123,10 @@ bool flush_finish(Flush& f, bool gpu_ok) { f.buf = VK_NULL_HANDLE; return f.ok &
 /* FLUSH_TEXTURES */
 /* DESTROY_LATER */
 void dead_list(uint64_t completed) {
-const auto cleanup_start = std::chrono::steady_clock::now();
-unsigned cleanup_retired = 0;
-uint64_t cleanup_pending_bytes = 0;
-for (const auto& entry : dead) cleanup_pending_bytes += entry.bytes;
-const bool cleanup_pressure = false;
+    const auto cleanup_start = std::chrono::steady_clock::now();
+    unsigned cleanup_retired = 0;
+    uint64_t cleanup_pending_bytes = 0;
+    const bool cleanup_pressure = false;
 /* DEAD_LOOP */
 }
 }
@@ -201,7 +203,7 @@ def main():
         cpp, exe = Path(temp) / "fixture.cpp", Path(temp) / "fixture.exe"
         cpp.write_text(fixture, encoding="utf-8")
         subprocess.run([a.cxx, "-std=c++20", "-O1", "-Wall", "-Wextra", "-Werror", "-Wno-missing-field-initializers",
-                        "-Wno-unused-function", "-Wno-unused-variable", "-I" + str(ROOT / "gpu/vk"), str(cpp), "-o", str(exe)], check=True)
+                        "-Wno-unused-function", "-Wno-unused-variable", str(cpp), "-o", str(exe)], check=True)
         failed = [case for case in ("texture", "target") if subprocess.run([str(exe), case], timeout=30).returncode]
         if failed:
             raise SystemExit("timed-out read-back's source image: failed: " + ", ".join(failed))

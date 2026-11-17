@@ -3,6 +3,7 @@ child process, what the builder keeps on the PC, the game files found on it, and
 import ctypes
 import json
 import os
+import re
 import shutil
 import string
 import subprocess
@@ -69,16 +70,14 @@ def build_env(tools, workers=None, ngx_sdk=None):
     env["PYTHONIOENCODING"] = "utf-8"
     if workers:
         env["HOOKSHOT_JOBS"] = str(int(workers))
-    # (written into the game folder's hookshot_version.txt: the game starts this app again to update, host/hos_update.c)
-    exe, args = paths.launcher_command()
-    env["HOOKSHOT_BUILDER_EXE"] = exe
-    env["HOOKSHOT_BUILDER_ARGS"] = subprocess.list2cmdline(args)
+    # (written into the game folder's hookshot_version.txt: which builder made the folder)
+    env["HOOKSHOT_BUILDER_EXE"] = paths.launcher_command()[0]
     # (NVIDIA DLSS: only when ticked. Without it, one set on the PC is not passed on either)
     if ngx_sdk:
         env["HOOKSHOT_NGX_SDK"] = ngx_sdk
     else:
         env.pop("HOOKSHOT_NGX_SDK", None)
-    for name, folder in (("EMSDK", "emsdk"), ("RX_CPM", "cpm"), ("WGPU_NATIVE", "wgpu-native")):
+    for name, folder in (("EMSDK", "emsdk"), ("RX_CPM", "cpm")):   # (no WebGPU renderer any more: no wgpu-native)
         p = os.path.join(tools.root, folder)
         if os.path.isdir(p):
             env[name] = p
@@ -199,7 +198,7 @@ def ngx_sdk():
 
 
 WORK_PARTS = ("objcache", "sa", "exefs", "probe", "image", "system_headers.txt", "hot_funcs.txt", "hot_order.txt",
-              "hookshot_pieces.prof", "hookshot.res")
+              "ocarina_reborn_pieces.prof", "ocarina_reborn.res")
 
 
 def _delete(p):
@@ -385,8 +384,13 @@ FOLDER_DOWNLOADS = _guid("374DE290-123F-4565-9164-39C4925E467B")
 FOLDER_PROGRAMS = _guid("A77F5D77-2E2B-44C3-A6A2-ABA601054A51")
 
 
+DUMP_SEARCH_BUDGET = 8.0   # (seconds: DumpSearch.Budget. Long enough for a sleeping USB drive to spin up)
+
+
 def find_dumps():
-    """.nup files in Downloads, Desktop, Documents, the home folder and the top of each drive, one folder level down too, newest first"""
+    """.nup files in Downloads, Desktop, Documents, the home folder and the top of each drive, one folder level down too, newest
+    first: every place searched at once, and what was found after DUMP_SEARCH_BUDGET (DumpSearch.cs). One drive that did not
+    answer held the start-up page on "Looking for your game files…" for good"""
     home = os.path.expanduser("~")
     places = [(_known_folder(FOLDER_DOWNLOADS) or os.path.join(home, "Downloads"), "Downloads"),
               (_known_folder(FOLDER_DESKTOP) or os.path.join(home, "Desktop"), "Desktop"),
@@ -397,30 +401,59 @@ def find_dumps():
             root = letter + ":\\"
             if ctypes.windll.kernel32.GetDriveTypeW(root) in (2, 3):   # (removable, fixed)
                 places.append((root, letter + ":"))
-    seen, found = set(), []
+    return search_dumps(places, DUMP_SEARCH_BUDGET, look_for_dumps)
+
+
+def search_dumps(places, budget, look):
+    """look(folder, name) for every place at once; the dumps of the places that answered within <budget> seconds, newest first.
+    A place still searched then is left out (its daemon thread ends with the app). A file in two places keeps the first's name"""
+    seen, unique = set(), []
     for d, name in places:
-        if not d or not os.path.isdir(d) or os.path.normcase(os.path.abspath(d)) in seen:
-            continue
-        seen.add(os.path.normcase(os.path.abspath(d)))
-        dirs = [d]
+        if d and os.path.normcase(os.path.abspath(d)) not in seen:
+            seen.add(os.path.normcase(os.path.abspath(d)))
+            unique.append((d, name))
+    results = [None] * len(unique)
+
+    def one(i, d, name):
         try:
-            subs = [e.path for e in os.scandir(d) if e.is_dir() and not e.name.startswith((".", "$"))
-                    and e.name.lower() != "windows" and not e.name.lower().startswith("program")]
-            dirs += subs[:200]
+            results[i] = look(d, name)
+        except Exception:
+            results[i] = []
+    threads = [threading.Thread(target=one, args=(i, d, name), daemon=True) for i, (d, name) in enumerate(unique)]
+    for t in threads:
+        t.start()
+    deadline = time.monotonic() + budget
+    for t in threads:
+        t.join(max(0, deadline - time.monotonic()))
+    files, found = set(), []
+    for r in results:
+        for x in list(r or []):
+            if os.path.normcase(x.path) not in files:
+                files.add(os.path.normcase(x.path))
+                found.append(x)
+    return sorted(found, key=lambda x: -x.modified)
+
+
+def look_for_dumps(d, name):
+    """The .nup files in <d> and the folders just inside it (not hidden ones, Windows or Program Files), up to 200 folders"""
+    if not os.path.isdir(d):
+        return []
+    dirs, found = [d], []
+    try:
+        subs = [e.path for e in os.scandir(d) if e.is_dir() and not e.name.startswith((".", "$"))
+                and e.name.lower() != "windows" and not e.name.lower().startswith("program")]
+        dirs += subs[:200]
+    except OSError:
+        pass
+    for sub in dirs:
+        try:
+            for e in os.scandir(sub):
+                if e.is_file() and e.name.lower().endswith(".nup"):
+                    st = e.stat()
+                    found.append(Dump(os.path.abspath(e.path), name, st.st_size, st.st_mtime))
         except OSError:
             pass
-        for sub in dirs:
-            try:
-                for e in os.scandir(sub):
-                    if e.is_file() and e.name.lower().endswith(".nup"):
-                        full = os.path.abspath(e.path)
-                        if os.path.normcase(full) not in seen:
-                            seen.add(os.path.normcase(full))
-                            st = e.stat()
-                            found.append(Dump(full, name, st.st_size, st.st_mtime))
-            except OSError:
-                pass
-    return sorted(found, key=lambda x: -x.modified)
+    return found
 
 
 def ago(t):
@@ -453,7 +486,7 @@ def _version_line(folder):
 
 def game_version(folder):
     """The release a game folder was built with, when it keeps its game files for updates"""
-    if not os.path.isdir(os.path.join(folder, ".hookshot_exefs")) or not os.path.isdir(os.path.join(folder, "romfs")):
+    if not os.path.isdir(os.path.join(folder, ".ocarina_reborn_exefs")) or not os.path.isdir(os.path.join(folder, "romfs")):
         return None
     return _version_line(folder)
 
@@ -464,8 +497,8 @@ def read_version(folder):
 
 
 def game_exe(folder):
-    g = os.path.join(folder, "bin", "hookshot.exe")
-    return g if os.path.isfile(g) else os.path.join(folder, "hookshot.exe")
+    g = os.path.join(folder, "bin", "ocarina_reborn.exe")
+    return g if os.path.isfile(g) else os.path.join(folder, "ocarina_reborn.exe")
 
 
 def start_game(folder):
@@ -536,9 +569,9 @@ def shortcuts(game_folder, desktop, start, folder=True):
     global shortcut_error
     exe, args = paths.launcher_command()
     args = subprocess.list2cmdline(args + ["--launch", game_folder])
-    icon = os.path.join(game_folder, "bin", "hookshot.exe")
+    icon = os.path.join(game_folder, "bin", "ocarina_reborn.exe")
     if not os.path.isfile(icon):
-        icon = os.path.join(game_folder, "hookshot.exe")
+        icon = os.path.join(game_folder, "ocarina_reborn.exe")
     for link, want in ((desktop_link(), desktop), (start_link(), start), (folder_link(game_folder), folder)):
         try:
             if not want:
@@ -577,3 +610,26 @@ def save_settings(s):
             json.dump(s, f)
     except OSError:
         pass
+
+
+# (the game's own countdown, every 10 s while it builds pipelines: gpu/vk/vk_draw.cpp prepare_progress_log,
+# "vk: noted pipelines: 18009 of 32713 pipelines in 2447 s, about 1998 s left")
+PIPELINES_LEFT = re.compile(r"vk: [a-z]+ pipelines: \d+ of \d+ pipelines in \d+ s, about (\d+) s left")
+
+
+def pipelines_left_in(line):
+    """The seconds the game's line says are left, or -1 when the line is not one of its countdowns"""
+    m = PIPELINES_LEFT.search(line)
+    return float(m.group(1)) if m else -1.0
+
+
+def shader_left(said, since, fraction, elapsed):
+    """The shaders' time left in seconds, or -1 while it cannot be told yet. (A slow PC took 58 minutes and more here while the
+    window said "Usually about 45 minutes" for the whole build: a player took it for stuck.) The game's own countdown while it
+    is fresh (said: what it said; since: seconds since, under 40), less the time since; else the step's bar so far (fraction
+    done after elapsed seconds), once it has moved enough to go by. As the Windows Builder's ShaderStep.Left"""
+    if said >= 0 and 0 <= since < 40:
+        return max(said - since, 0.0)
+    if 0.03 < fraction < 1 and elapsed >= 20:
+        return elapsed / fraction * (1 - fraction)
+    return -1.0

@@ -13,16 +13,20 @@ with the prompts' entries merged into it. On made-up tables, no game data:
   merged table), and, with the zstandard package, a table compressed as Clawshot writes it and one whose frame does not give
   its size.
 
+The documented, authored file-mod example in docs/mods.md also goes through the same Linux filesystem fixture:
+discovery, whole-path order, disabling and restart, default/HOS_MODS roots, case/slash lookup and ignored ExeFS.
+
 python -I -B tests/test_mods_size_table.py [--cc gcc]
 """
 import argparse
+import json
 import os
 import re
 import struct
 import subprocess
 import sys
 import tempfile
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 RUN_ALL_ARGS = ["--cc", "gcc"]
 
@@ -184,6 +188,67 @@ POSIX_PIECES = ["static DWORD error_of(int e) {", "static void slashes(char *dst
                 "BOOL DeleteFileA(LPCSTR name) {", "BOOL MoveFileExA(LPCSTR from, LPCSTR to, DWORD flags) {"]   # (and moves its files in)
 
 
+def documented_example_checks(exe, tmp):
+    """Use the documentation's actual files, not a second loader or a separately maintained example."""
+    doc = (ROOT / "docs/mods.md").read_text(encoding="utf-8")
+    blocks = re.findall(r"<!-- romfs-example -->\s*```json\n(.*?)\n```\s*<!-- /romfs-example -->", doc, re.S)
+    check(len(blocks) == 1, "docs/mods.md must contain one runnable RomFS example")
+    files = json.loads(blocks[0])
+    tmp.mkdir()
+    for rel, text in files.items():
+        path = PurePosixPath(rel)
+        check(not path.is_absolute() and path.parts and path.parts[0] == "mods" and ".." not in path.parts
+              and "\\" not in rel and ":" not in rel, "example path must stay below its temporary mods root: " + rel)
+        dest = tmp.joinpath(*path.parts)
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_text(text, encoding="utf-8")
+    mods = tmp / "mods"
+    (tmp / "romfs").mkdir()
+    env = dict(os.environ, TEST_GAME_EXE=str(tmp / "hookshot"), TEST_ROMFS=str(tmp / "romfs"))
+    expected = {
+        "Example/message.txt": "nested mod wins by its full path\n",
+        "Example/only-first.txt": "kept from the first mod\n",
+        "Example/nested.txt": "nested mod\n",
+        "Example/off.txt": None,
+        "ignored.txt": None,
+        "example\\MESSAGE.TXT": "nested mod wins by its full path\n",
+        "Example": None,
+        "Example/missing.txt": None,
+    }
+
+    def run(label, root, want):
+        settings = dict(env)
+        if root is None:
+            settings.pop("HOS_MODS", None)
+        else:
+            settings["HOS_MODS"] = str(root)
+        out = subprocess.run([str(exe), *want], cwd=tmp, env=settings, check=True,
+                             capture_output=True, text=True, timeout=60).stdout
+        got = {}
+        for line in out.splitlines():
+            if line.startswith("open "):
+                rel, _, target = line[5:].partition(": ")
+                got[rel] = None if target == "(the game's)" else Path(target.replace("\\", "/")).read_text(encoding="utf-8")
+        check(got == want, "documented example, %s: %r != %r\n%s" % (label, got, want, out))
+        print("ok: documented RomFS example: " + label)
+        return out
+
+    log = run("HOS_MODS root, discovery, full-path order and lookup", mods, expected)
+    check("03-code-only: exefs patches are left out" in log, "the example's ExeFS warning is missing")
+    run("default root beside the executable", None, expected)
+    # Every invocation is a new process: the loader deliberately indexes once per start.
+    (mods / "contents").rename(mods / "-contents")
+    expected["Example/message.txt"] = expected["example\\MESSAGE.TXT"] = "second mod\n"
+    expected["Example/nested.txt"] = None
+    run("disabled parent hides nested mods after restart", mods, expected)
+    (mods / "02-override").rename(mods / "_02-override")
+    expected["Example/message.txt"] = expected["example\\MESSAGE.TXT"] = "first mod\n"
+    run("disabled winner reveals the earlier mod after restart", mods, expected)
+    (mods / "01-example").rename(mods / "_01-example")
+    expected = dict.fromkeys(expected)
+    run("all file mods disabled: no replacements", mods, expected)
+    run("a single mod is not the collection root", mods / "_01-example", expected)
+
 
 def routing_checks(cc, tmp, zstandard, host):
     """mods.c and prompts.c as they are, over folders: what the game is served"""
@@ -234,6 +299,7 @@ int rx_option(int id, int otherwise) { (void)id; return otherwise; }
 void hos_mods_init(const char *image_path);
 int hos_mods_romfs(const char *rel, char *out, size_t cap);
 const char *hos_romfs_dir;
+const char *hos_options_file(void) { return ""; }   /* (prompts.c reads the settings file: none here) */
 int main(int argc, char **argv) {
     hos_romfs_dir = getenv("TEST_ROMFS");
     hos_mods_init(NULL);
@@ -250,6 +316,8 @@ int main(int argc, char **argv) {
                     "-I", str(ROOT / "host"), "-I", str(ROOT / "host/posix"), "-I", str(ZSTD), str(src / "mods.c"),
                     str(src / "prompts.c"), str(tmp / "posix.c"), str(tmp / "main.c"),
                     *(str(ZSTD / f) for f in ZSTD_SOURCES), "-o", str(exe)], check=True)
+
+    documented_example_checks(exe, tmp / "documented-example")
 
     def case(name, mods, ours=OURS, opens=(TABLE, FONT)):
         """a game folder with the prompts (the faces' font, ours as their table unless None) and mods {folder: {path: bytes}};
@@ -277,17 +345,17 @@ int main(int argc, char **argv) {
                 what = what.replace("\\", "/")
                 served[rel] = what if what == "(the game's)" else os.path.relpath(what, top).replace("\\", "/")
         table = served.get(TABLE, "")
-        content = unframe((top / table).read_bytes()) if table == "game/prompts/rsizetable.mod.zs" else None
+        content = unframe((top / table).read_bytes()) if table == "game/cache/prompts/rsizetable.mod.zs" else None
         return served, content, out
 
     mod_file = "mods/%s/romfs/" + TABLE
     # no mod: our table and the font
     served, _, log = case("none", {})
-    check(served == {TABLE: "game/prompts/rsizetable.zs", FONT: "game/prompts/External.bfotf.zs"}, "no mod: %s" % served)
+    check(served == {TABLE: "game/prompts/rsizetable.zs", FONT: "game/cache/prompts/External.bfotf.zs"}, "no mod: %s" % served)
     # a mod with a table: the mod's with ours merged in, and the font; in either order of opening
     for i, opens in enumerate(((TABLE, FONT), (FONT, TABLE))):
         served, content, log = case("one-%d" % i, {"seed": {TABLE: frame(MOD_B)}}, opens=opens)
-        check(served == {TABLE: "game/prompts/rsizetable.mod.zs", FONT: "game/prompts/External.bfotf.zs"},
+        check(served == {TABLE: "game/cache/prompts/rsizetable.mod.zs", FONT: "game/cache/prompts/External.bfotf.zs"},
               "a mod with a table: %s\n%s" % (served, log))
         check(content == merged(MOD_B, OURS), "a mod with a table: the merged table's entries")
         check("with the button prompts' sizes merged in" in log and "1 entries raised or added" in log, "its log:\n" + log)
@@ -295,7 +363,7 @@ int main(int argc, char **argv) {
     version_errors = []
     for i, opens in enumerate(((TABLE, FONT), (FONT, TABLE))):
         served, content, log = case("versions-%d" % i, {"seed": {TABLE: frame(MOD_B), OTHER: frame(MOD_A)}}, opens=opens)
-        if served != {TABLE: "game/prompts/rsizetable.mod.zs", FONT: "game/prompts/External.bfotf.zs"}:
+        if served != {TABLE: "game/cache/prompts/rsizetable.mod.zs", FONT: "game/cache/prompts/External.bfotf.zs"}:
             version_errors.append("two table versions, %s first: %s\n%s" % ("table" if i == 0 else "font", served, log))
         if content != merged(MOD_B, OURS):
             version_errors.append("two table versions, %s first: the merge is not the opened table's" % ("table" if i == 0 else "font"))
@@ -305,22 +373,22 @@ int main(int argc, char **argv) {
     # a mod without a table that grows a file: our table (its entry is still the game's), its file, the font
     served, _, log = case("grows", {"grown": {GROWN: frame(b"x" * 4096)}}, opens=(TABLE, GROWN, FONT))
     check(served == {TABLE: "game/prompts/rsizetable.zs", GROWN: mod_file.replace(TABLE, GROWN) % "grown",
-                     FONT: "game/prompts/External.bfotf.zs"}, "a mod without a table: %s" % served)
+                     FONT: "game/cache/prompts/External.bfotf.zs"}, "a mod without a table: %s" % served)
     # two mods with tables: the one that sorts last is the base (its entries; the other's raise is not in it)
     served, content, log = case("two", {"01-a": {TABLE: frame(MOD_A)}, "02-b": {TABLE: frame(MOD_B)}})
-    check(served[TABLE] == "game/prompts/rsizetable.mod.zs" and content == merged(MOD_B, OURS), "two mods: %s" % served)
+    check(served[TABLE] == "game/cache/prompts/rsizetable.mod.zs" and content == merged(MOD_B, OURS), "two mods: %s" % served)
     check(("02-b" in log.split("with the button prompts' sizes")[0].splitlines()[-1]), "two mods: 02-b's table:\n" + log)
-    check(served[FONT] == "game/prompts/External.bfotf.zs", "two mods: the font")
+    check(served[FONT] == "game/cache/prompts/External.bfotf.zs", "two mods: the font")
     # a mod table that cannot take ours: as it is, and the game's own icons
     served, _, log = case("bad", {"bad": {TABLE: frame(b"NOT A TABLE" * 4)}})
     check(served == {TABLE: mod_file % "bad", FONT: "(the game's)"}, "a table that cannot be merged: %s" % served)
     check("not a resource size table as the game's" in log and "the game's own icons in texts" in log, "its log:\n" + log)
     # no table of ours (the faces' fonts fit the game's entry): the mod's as it is, and the font
     served, _, log = case("no-ours", {"seed": {TABLE: frame(MOD_B)}}, ours=None)
-    check(served == {TABLE: mod_file % "seed", FONT: "game/prompts/External.bfotf.zs"}, "no table of ours: %s" % served)
+    check(served == {TABLE: mod_file % "seed", FONT: "game/cache/prompts/External.bfotf.zs"}, "no table of ours: %s" % served)
     # a mod with a table and the font of its own: its font wins, its table still gets ours
     served, content, log = case("own-font", {"seed": {TABLE: frame(MOD_B), FONT: b"a mod's own font"}})
-    check(served == {TABLE: "game/prompts/rsizetable.mod.zs", FONT: mod_file.replace(TABLE, FONT) % "seed"}
+    check(served == {TABLE: "game/cache/prompts/rsizetable.mod.zs", FONT: mod_file.replace(TABLE, FONT) % "seed"}
           and content == merged(MOD_B, OURS), "a mod with its own font: %s" % served)
     n = 10
     if zstandard:   # (Clawshot writes its table at level 19, with the frame's size: zstandard's default)

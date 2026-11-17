@@ -1,6 +1,6 @@
 /* The native NVN layer's API (HOS_NVN_NATIVE=1): TOTK's NVN calls are answered here instead of by the lifted NVN
    driver over an emulated Switch GPU (hos/gpu.c). See gpu/render/rx_nvn.h for the design; the replay of what is
-   recorded here is gpu/render/rx_nvn.cpp.
+   recorded here is the Vulkan back end's (gpu/vk/vk_replay.cpp).
 
    - Objects with semantics (device, memory pools, buffers, textures, samplers, descriptor pools, queue, window, sync,
      events, command buffer memory) are implemented as NVN defines them, in place in the game's object memory.
@@ -1149,8 +1149,7 @@ NV(nvnEventGetValue) {
            polled (profiled; removed). Answered at once, the
            presenting thread goes on to its present, where the render thread holds it while the present before is not
            replayed (RX_VK_PRESENTS_AHEAD), and holds the present itself until the main thread's signal for the frame. The
-           idea of answering the poll from the present's hand-over is Hookshot PR 2910's (rx_release_due):
-           https://git.notrexed.dev/Hookshot/Hookshot/pulls/2910. HOS_PRESENT_NOWAIT=0 with the render thread (a test): polled, as before */
+           idea of answering the poll from the present's hand-over is rx_release_due's. HOS_PRESENT_NOWAIT=0 with the render thread (a test): polled, as before */
         /* (hookshot) whether the render thread runs is the renderer's to say, once (HOS_OPT_RENDER_THREAD: vk_replay.cpp
            async_on), not RX_VK_ASYNC read here: the Insert menu's Threaded rendering turns it on too, with the switch
            unset, and the poll must then be answered exactly as with RX_VK_ASYNC=1. Kept once the renderer has answered
@@ -1598,7 +1597,7 @@ static void sweep_overwritten_copies(void) {   /* (copy_lock held) */
         }
     }
     static int logged;
-    if (swept && logged++ < 12) hos_log("nvn: %zu copies of recordings whose control memory was reused let go (%zu live)", swept, ncopies);
+    if (swept && logged++ < 12) hos_log_at(HOS_LOG_DEBUG, "nvn: %zu copies of recordings whose control memory was reused let go (%zu live)", swept, ncopies);
 }
 NV(nvnCommandBufferAddControlMemory) {
     nvn_cmd *o = CB(P(0));
@@ -3265,13 +3264,17 @@ int nvn_native_on(void) { return 1; }   /* (mkw-recomp: there is no emulated GPU
 
 /* An NVN function the SDK exports, called directly (gen/nvn2_exports.c: lift.py --standalone hooks every one, so
    the console driver in the SDK never runs): the same function the proc table hands out */
+static void nvn2_counted(Ctx *c, void *addr) {   /* (HOS_HLE_STATS: through a64_call_miss, which counts host calls) */
+    int a64_call_miss(Ctx *c, uint64_t target);
+    a64_call_miss(c, (uint64_t)(uintptr_t)addr);
+}
 void nvn2_dispatch(Ctx *c, const char *name, void **cache) {
     if (!cache[0]) {
         uint64_t a = nvn_native_proc(name);
         uint64_t hos_hostcall_target(uint64_t addr, void (**fn)(Ctx *, void *), void **user);   /* hos_hostcall.c */
         void (*fn)(Ctx *, void *) = NULL;
         void *user = NULL;
-        hos_hostcall_target(a, &fn, &user);
+        if (hos_hostcall_target(a, &fn, &user) && hos_hle_stats) fn = nvn2_counted, user = (void *)(uintptr_t)a;
         cache[1] = user;
         __atomic_store_n(&cache[0], (void *)fn, __ATOMIC_RELEASE);
     }

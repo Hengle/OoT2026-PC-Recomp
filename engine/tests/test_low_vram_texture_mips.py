@@ -8,20 +8,13 @@ import os
 from pathlib import Path
 import subprocess
 import tempfile
+import sys
+sys.path.insert(0, str(Path(__file__).resolve().parent))   # (tests/srccut.py: python -I leaves this folder off the path)
+from srccut import block   # noqa: E402
 
 RUN_ALL_ARGS = ["--cxx", "{cxx}", "--headers", "{vulkan_headers}"]
 
 ROOT = Path(__file__).resolve().parents[1]
-
-
-def block(text, marker):
-    start = text.index(marker)
-    end = text.index("{", start) + 1
-    depth = 1
-    while depth:
-        depth += (text[end] == "{") - (text[end] == "}")
-        end += 1
-    return text[start:end]
 
 
 def main():
@@ -35,6 +28,9 @@ def main():
     policy = block(source, "bool low_vram_texture_mips(") if "bool low_vram_texture_mips(" in source else ""
     helpers = "\n".join(block(source, marker) for marker in (
         "bool is_bc(VkFormat f)", "bool is_astc(VkFormat f)", "uint64_t texture_level_units("))
+    # (the Texture detail row's sizes, texture_detail_dims, and their struct)
+    policy = ("struct DetailDims { uint32_t max_dim; uint64_t skip_from_mb; };\n" + block(source, "DetailDims texture_detail_dims(") +
+              "\n" + policy)
     fixture = r'''
 #include <algorithm>
 #include <cstdint>
@@ -52,7 +48,7 @@ struct Texture {
     VkImageType type = VK_IMAGE_TYPE_2D;
 };
 struct { bool sparse_images = false; VkPhysicalDevice physical{}; VkPhysicalDeviceProperties props{}; } dev;
-struct { int preset = 1, budget = 1; } opts;
+struct { int preset = 1, budget = 1, texture_detail = 0; } opts;
 constexpr int kAutoPreset = 6;   // (gpu/vk/vk_menu.h: the Quality preset Auto (this PC), its tier's budgets in budget)
 uint64_t allowed, ram;
 bool query_ok;
@@ -80,6 +76,7 @@ int main(int argc, char** argv) {
     CHECK(argc == 15);
     opts.preset = std::atoi(argv[1]);
     opts.budget = std::atoi(argv[12]);
+    if (const char* e = std::getenv("TEST_TEXTURE_DETAIL")) opts.texture_detail = std::atoi(e);
     dev.props.deviceType = std::atoi(argv[13]) ? VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU : VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU;
     ram = std::strtoull(argv[14], nullptr, 10) << 20;
     allowed = std::strtoull(argv[2], nullptr, 10) << 20;
@@ -97,9 +94,9 @@ int main(int argc, char** argv) {
     if (std::atoi(argv[10])) {
         // The budget is cached, but choosing Minimum in the menu must still
         // change defaults for textures made afterwards, and switching back too.
-        opts.preset = 1;
+        opts.preset = 1, opts.budget = 1;
         Texture minimum{3072,3072,1,12}; trim(minimum,&t); check_image(minimum,2,768,10);
-        opts.preset = 2;
+        opts.preset = 2, opts.budget = 2;
         Texture low{3072,3072,1,12}; trim(low,&t); check_image(low,0,3072,12);
     }
     std::printf("PASS %s\n",argv[11]);
@@ -136,6 +133,15 @@ int main(int argc, char** argv) {
          {"RX_VK_TEX_MAX_DIM": "512", "RX_VK_TEX_SKIP_MB": "2"}, (3, 384, 9, 2, 341, 9), 0),
         ("threshold-without-dimension-override", 2, 3674, 1,
          {"RX_VK_TEX_SKIP_MB": "2"}, (1, 1536, 11, 0, 1365, 11), 0),
+    ]
+    # (the Texture detail row: Full keeps the game's size on a small card, Medium and Low trim on any card)
+    cases += [
+        ("detail-full-small-budget", 1, 3674, 1, {"TEST_TEXTURE_DETAIL": "1"}, original, 0),
+        ("detail-medium-large-budget", 2, 7500, 1, {"TEST_TEXTURE_DETAIL": "2"}, minimum, 0),
+        ("detail-low-large-budget", 2, 7500, 1, {"TEST_TEXTURE_DETAIL": "3"}, (2, 768, 10, 2, 341, 9), 0),   # (768: under 8 MB, kept)
+        ("detail-auto-large-budget", 2, 7500, 1, {"TEST_TEXTURE_DETAIL": "0"}, original, 0),
+        ("detail-medium-dimension-override", 2, 7500, 1, {"TEST_TEXTURE_DETAIL": "2", "RX_VK_TEX_MAX_DIM": "2048"},
+         (1, 1536, 11, 0, 1365, 11), 0),
     ]
     # Integrated GPUs: (name, preset, driver budget, query, overrides, expected, switch, integrated, RAM in MB). An i3-1115G4's
     # UHD Graphics with 16 GB of RAM reported 16122 MB and was allowed 7402 MB.

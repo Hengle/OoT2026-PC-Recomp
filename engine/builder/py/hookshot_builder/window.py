@@ -31,7 +31,16 @@ WITHOUT_SHADERS = {"download": (0, 0.04), "read": (0.04, 0.04), "lift": (0.08, 0
 WITH_SHADERS = {"download": (0, 0.04), "read": (0.04, 0.04), "lift": (0.08, 0.14), "compile": (0.22, 0.68), "finish": (0.90, 0.02),
                 "shaders": (0.92, 0.08)}
 SHADERS_LATER = "--no-prepare-shaders"
-NOT_PREPARED = re.compile(r"^the shaders were not prepared now \((.*)\): ")   # (make_game.py NOT_PREPARED)
+NOT_PREPARED = re.compile(r"^the shaders were not prepared now \((.*)\): (.*)$")   # (make_game.py NOT_PREPARED)
+FIRST_START = "the game prepares them at its first start"   # (make_game.py FIRST_START)
+
+
+def shaders_note(m):
+    """The shaders row's line for make_game's not-prepared line: left to the first start and why, or (the GPU driver stopped
+    responding) why and what happens instead"""
+    why, then = m.groups()
+    return ("Left to the game's first start: %s" % why if then == FIRST_START
+            else "Not prepared: %s. %s" % (why, then[:1].upper() + then[1:]))
 
 DLSS_LICENSE = (
     "NVIDIA DLSS is NVIDIA's, not Hookshot's. With it ticked, the build downloads NVIDIA's DLSS SDK (release v310.9.16) from "
@@ -570,11 +579,11 @@ class Window(QWidget):
         self.prepare_now, self.shaders_began, self.shaders_later, self.built_in = True, False, None, None
         self.weight = WITHOUT_SHADERS
         self.setWindowTitle("Hookshot")
-        self.setWindowIcon(QIcon(os.path.join(paths.ASSETS, "hookshot.ico")))
+        self.setWindowIcon(QIcon(os.path.join(paths.ASSETS, "ocarina_reborn.ico")))
         self.setFixedSize(960, 600)
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         self.setAcceptDrops(True)
-        self.hook = QPixmap(os.path.join(paths.ASSETS, "hookshot.png"))
+        self.hook = QPixmap(os.path.join(paths.ASSETS, "ocarina_reborn.png"))
         self.clock = QTimer(self, interval=1000, timeout=self.tick)
         self._build_ui()
         self.out_path.setText(os.path.join(os.path.expanduser("~"), "Games", "Hookshot"))
@@ -903,7 +912,10 @@ class Window(QWidget):
         import threading
 
         def run():
-            found = core.find_dumps()
+            try:
+                found = core.find_dumps()
+            except Exception:   # (the page goes on without them: the file can still be picked or dropped)
+                found = []
             self.post(self.found_files, found)
         threading.Thread(target=run, daemon=True).start()
 
@@ -1411,6 +1423,7 @@ class Window(QWidget):
         self.files_changed, self.files_compiled, self.compile_eta = -1, 0, -1.0
         self.this_compile, self.previous_total = 0, -1
         self.shaders_began, self.shaders_later, self.built_in = False, None, None
+        self.shader0, self.shader_fraction, self.shader_said, self.shader_said_at = None, 0.0, -1.0, 0.0
         self.show_page(self.build_page)
         self.cancel_button.show()
         self.set_progress(self.weight["read"][0] if self.updating else 0)
@@ -1440,6 +1453,7 @@ class Window(QWidget):
                 self.compile0 = time.monotonic()
             if sid == "shaders":
                 self.shaders_began = True
+                self.shader0 = time.monotonic()   # (its countdown: core.shader_left)
             if sid in self.weight:
                 self.set_progress(self.weight[sid][0])
         elif line.startswith("@@progress "):
@@ -1450,6 +1464,8 @@ class Window(QWidget):
             if self.current in self.weight:
                 if self.current == "compile":
                     self.compiled = f
+                if self.current == "shaders":
+                    self.shader_fraction = f
                 w = self.weight[self.current]
                 self.set_progress(w[0] + w[1] * max(0.0, min(1.0, f)))
             return
@@ -1459,7 +1475,9 @@ class Window(QWidget):
         elif line.startswith("@@done "):
             self.finished = line[7:]
         elif NOT_PREPARED.match(line):
-            self.shaders_later = NOT_PREPARED.match(line).group(1)
+            self.shaders_later = shaders_note(NOT_PREPARED.match(line))
+        elif core.pipelines_left_in(line) >= 0:
+            self.shader_said, self.shader_said_at = core.pipelines_left_in(line), time.monotonic()
         elif self.FILES_LINE.match(line):
             self.files_of = int(self.FILES_LINE.match(line).group(1))
         elif self.FILE_LINE.match(line):
@@ -1519,14 +1537,22 @@ class Window(QWidget):
                     time_left(el / self.compiled * (1 - self.compiled) + 60) if self.compiled > 0.03 else "Estimating…")
             self.build_note.setText("Compiling %s · %s%s" % (clock(el), left, tail))
             return
-        self.build_note.setText(("Working…" if self.updating else "Usually about 45 minutes") + tail)
+        if self.current == "shaders" and getattr(self, "shader0", None):
+            # (the shaders' own countdown: on a slow PC this step alone can take an hour, and the line said "about 45 minutes")
+            now = time.monotonic()
+            s = core.shader_left(self.shader_said, now - self.shader_said_at if self.shader_said >= 0 else -1,
+                                 self.shader_fraction, now - self.shader0)
+            self.build_note.setText("Preparing shaders %s · %s%s" % (clock(now - self.shader0),
+                                                                     time_left(s) if s >= 0 else "Estimating…", tail))
+            return
+        self.build_note.setText(("Working…" if self.updating else "About 45 minutes on a fast PC, longer on a slower one") + tail)
 
     def ended(self, failure):
         self.clock.stop()
         self.runner = None
         if self.finished:
             for sid, r in self.rows.items():
-                why = None if sid != "shaders" else ("Left to the game's first start: %s" % self.shaders_later if self.shaders_later else
+                why = None if sid != "shaders" else (self.shaders_later if self.shaders_later else
                                                     None if self.shaders_began else "Left to the game's first start")
                 if why:
                     r.skipped()

@@ -99,15 +99,35 @@ inline std::string left_text(double secs) {
     return b;
 }
 
-/// The version line from the build's name (nx2/version.py, "v2.0.5 (source 1a2b3c4d)"): the release alone, "v2.0.5"; a build
-/// between releases ("v2.0.5-2-g619c897-dirty", git describe) shows as "v2.0.5 dev"; anything else as it is
+/// The version as players see it, from the build's name (nx2/version.py: "<release> (source 1a2b3c4d)"), without the source
+/// fingerprint (the log's first line and bug reports keep it): a release as its tag, "v3.0.0" or "v3.0.0-rc.1"; a nightly
+/// ("nightly-46-434712bb") as the launcher names it, "Nightly 46 · 434712bb"; a build between tags ("v3.0.0-rc.1-2-g619c897-dirty",
+/// git describe) as its tag and "dev"; anything else as it is
 inline std::string version_text(std::string name) {
     if (const size_t at = name.find(" ("); at != std::string::npos) name.resize(at);
-    size_t i = 0;
-    if (name.size() > 1 && name[0] == 'v') {
-        int dots = 0;
-        for (i = 1; i < name.size() && ((name[i] >= '0' && name[i] <= '9') || name[i] == '.'); i++) dots += name[i] == '.';
-        if (dots == 2 && i < name.size() && name[i] == '-') return name.substr(0, i) + " dev";
+    const auto digits = [&](size_t i) { size_t j = i; while (j < name.size() && name[j] >= '0' && name[j] <= '9') j++; return j; };
+    if (name.rfind("nightly-", 0) == 0) {   // (nightly-<count>-<8 hex>[-dirty])
+        const size_t n = digits(8);
+        if (n > 8 && n + 9 <= name.size() && name[n] == '-') {
+            const std::string hash = name.substr(n + 1, 8);
+            bool hex = true;
+            for (char ch : hash) hex = hex && ((ch >= '0' && ch <= '9') || (ch >= 'a' && ch <= 'f'));
+            const std::string rest = name.substr(n + 9);
+            if (hex && (rest.empty() || rest == "-dirty"))
+                return "Nightly " + name.substr(8, n - 8) + " \xc2\xb7 " + hash + (rest.empty() ? "" : " dev");
+        }
+        return name;
+    }
+    if (name.size() > 1 && name[0] == 'v') {   // (vX.Y.Z, then -rc.N, then git describe's -<commits>-g<hash>[-dirty])
+        size_t i = 1;
+        for (int part = 0; part < 3; part++) {
+            const size_t j = digits(i);
+            if (j == i || (part < 2 && (j >= name.size() || name[j] != '.'))) return name;
+            i = part < 2 ? j + 1 : j;
+        }
+        if (name.compare(i, 4, "-rc.") == 0 && digits(i + 4) > i + 4) i = digits(i + 4);
+        if (i == name.size()) return name;
+        if (name[i] == '-') return name.substr(0, i) + " dev";
     }
     return name;
 }
@@ -146,8 +166,17 @@ struct StartupState {
     size_t done = 0, total = 0;
     double left = -1, secs = 0;
     bool prepared = false, finished = false, stopping = false;
+    bool saving = false;   // (the pipeline cache written out, every pipeline counted: prepare_saving)
     double whole = -1;   // (the bar over every part, PrepareBar::fraction; negative: the bar is this part's done of total)
 };
+
+/// What goes under the bar on the right: the time left while there is work counted, and once all of it is (the bar full, the
+/// start not finished) what the start still does, not "a few seconds left" for as long as that takes (#714)
+inline std::string waiting_text(const StartupState& s) {
+    if (s.saving) return "Saving the pipeline cache";
+    const bool counted = s.whole >= 0 ? s.whole >= 1 : s.total && s.done >= s.total;
+    return counted ? "Getting the game ready" : left_text(s.left);
+}
 
 /// (hookshot) The whole preparation on one bar: its parts, 0 the shader programs, 1 the pipelines the notes predict, 2 the noted
 /// pipelines, each counted in what one of it costs (kCost, in shader programs' time) and each in the total from the start. The
@@ -223,13 +252,13 @@ inline StartupView startup_view(const StartupState& s) {
     if (s.prepared) v.hint = ocr_tr("This happens once after an update. Closing the window keeps what is done.");
     if (!s.total) {
         v.left = ocr_tr(!pipelines ? "Reading the game's shaders" : s.stage == 1 ? "Reading the pipeline notes" : "Loading the shader cache");
-        if (s.whole >= 0) v.fraction = s.whole, v.pct = percent_of(s.whole), v.right = left_text(s.left);
+        if (s.whole >= 0) v.fraction = s.whole, v.pct = percent_of(s.whole), v.right = waiting_text(s);
         return v;
     }
     v.fraction = s.whole >= 0 ? s.whole : (double)std::min(s.done, s.total) / (double)s.total;
     v.pct = s.whole >= 0 ? percent_of(s.whole) : percent_text(s.done, s.total);
     v.left = with_commas(s.done) + " / " + with_commas(s.total) + ocr_tr(pipelines ? " pipelines" : " shaders");
-    v.right = left_text(s.left);
+    v.right = waiting_text(s);
     return v;
 }
 

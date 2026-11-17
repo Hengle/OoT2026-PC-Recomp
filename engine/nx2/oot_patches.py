@@ -84,17 +84,22 @@ def patch_life(source):
     end = source.find("\n}", start)
     if end < 0 or source[start:end].count(LIFE_CAS) != 2:
         return None
-    # x19 is the actor. Confirm its type and life pointer before protecting this write.
-    guard = ("    if ((uint32_t)c->x[12] != (uint32_t)c->x[11] && hos_oot_is_player(c, c->x[19]) &&\n"
-             "        c->x[13] == recomp_load64(c,c->x[19] + 7184) + 8)\n"
-             "        c->x[12] = hos_oot_life_change((uint32_t)c->x[11], (uint32_t)c->x[12]);   /* (Ocarina Reborn) */\n"
-             "    if ((uint32_t)c->x[12] < (uint32_t)c->x[11] && hos_oot_hearts_enabled() &&\n"
+    if "hos_oot_damage(" in source[start:end]:
+        return source
+    # x19 is the actor. Confirm its type and life pointer before scaling this write. (Ocarina Reborn: every change, both
+    # ways, then goes through hos_oot_life_change: Enemy damage, one-hit mode and the Death counter, after Damage taken)
+    guard = ("    if ((uint32_t)c->x[12] != (uint32_t)c->x[11] &&\n"
              "        hos_oot_is_player(c, c->x[19]) &&\n"
              "        c->x[13] == recomp_load64(c,c->x[19] + 7184) + 8)\n"
-             "        c->x[12] = c->x[11];\n")
-    body = source[start:end].replace(LIFE_CAS, guard + LIFE_CAS)
+             "        c->x[12] = hos_oot_life_change((uint32_t)c->x[11],\n"
+             "                                       hos_oot_damage((uint32_t)c->x[11], (uint32_t)c->x[12], {hit}));\n")
+    # The first CAS is damage: x9 still holds the full hit, before life was clamped.
+    # The second is healing: x9 has another meaning there; keep its guarded delta.
+    sites = source[start:end].split(LIFE_CAS)
+    body = (sites[0] + guard.replace("{hit}", "(uint32_t)c->x[9]") + LIFE_CAS + sites[1] +
+            guard.replace("{hit}", "(uint32_t)c->x[11] - (uint32_t)c->x[12]") + LIFE_CAS + sites[2])
     return (source[:start] + body + source[end:]).replace(
-        '#include "a64.h"\n', '#include "a64.h"\nextern int hos_oot_hearts_enabled(void);\n'
+        '#include "a64.h"\n', '#include "a64.h"\nextern uint32_t hos_oot_damage(uint32_t old, uint32_t next, uint32_t hit);\n'
         'extern int hos_oot_is_player(Ctx *c, uint64_t actor);\n'
         'extern uint64_t hos_oot_life_change(uint32_t before, uint32_t after);\n', 1)
 
@@ -326,6 +331,23 @@ def patch_glyph(source):
     return _hook_head(source, GLYPH_HEAD,
                       "    hos_prompts_glyph(c->x[1]);   /* (nx2/oot_patches.py: where the button prompts' font is) */\n",
                       "extern void hos_prompts_glyph(uint64_t slot);\n")
+
+
+# (hookshot, after ProjectReLink, 2026-11-15) The game's zstd sequence loop (f_801102e0, ZSTD_decompressSequences_body of its
+# zstd 1.4) natively: most of the loading threads' time arriving in Hyrule Castle (host/zstd_native.c says what was measured:
+# 720 MB/s against 340 lifted). At the head of the lifted function, inside it (split_hot cuts the file at function heads: the
+# call travels with the function): the host runs the loop and the function returns, or (HOS_ZSTD_NATIVE=0) the lifted body
+# runs as before. The stream hook below (HOS_NATIVE_ZSTD=1, the host's libzstd for the whole stream) never reaches it
+ZSTD_SEQ_HEAD = "void f_801102e0(Ctx *__restrict A64_NOESC c) {\n"
+ZSTD_SEQ_CALL = ("    { extern int hos_zstd_seq(Ctx *, void (*)(Ctx *));   /* (nx2/oot_patches.py: host/zstd_native.c) */\n"
+                 "      if (hos_zstd_seq(c, f_801102e0)) return; }\n")
+
+
+def patch_zstd_seq(s):
+    """The native zstd sequence loop's call at the head of f_801102e0 (the supported build's: its address is that build's)"""
+    if ZSTD_SEQ_HEAD not in s or ZSTD_SEQ_CALL in s:
+        return None
+    return s.replace(ZSTD_SEQ_HEAD, ZSTD_SEQ_HEAD + ZSTD_SEQ_CALL, 1)
 
 
 ZSTD_HEAD = "void f_80115c80(Ctx *__restrict A64_NOESC c) {\n"
@@ -887,6 +909,16 @@ def patch_file(s, name, protect_hearts=False):
             lines.append("oot_patches: the zstd whole-buffer decode's host hook in " + name)
         out = zf
         counts["zstd frames hook"] += 1
+    seq = patch_zstd_seq(out) if protect_hearts else None
+    if seq is not None:
+        out = seq
+        counts["zstd sequence loop"] += 1
+        lines.append("oot_patches: the native zstd sequence loop in " + name)
+    names = patch_names(out) if protect_hearts else None   # (host/names_native.c: f_805aeea0's name searches natively)
+    if names is not None:
+        out = names
+        counts["name searches"] += 1
+        lines.append("oot_patches: the native name searches in " + name)
     layout = patch_text_layout(out) if protect_hearts else None
     if layout is not None:
         out = layout
@@ -992,6 +1024,43 @@ def patch_file(s, name, protect_hearts=False):
     return out, counts, lines
 
 
+# (hookshot, 15/11) The two name searches of f_805aeea0 (the lookup in the game's sorted containers) natively: host/names_native.c
+# says what was measured. At each loop's head the host runs the iterations it can and the loop goes on or out; at each exit,
+# the check of HOS_NAMES_NATIVE=2. Inside the function only (split_hot cuts the file at function heads, and a label of the
+# same address could be another function's)
+NAMES_HEAD = "void f_805aeea0(Ctx *__restrict A64_NOESC c) {\n"
+NAMES_EDITS = [
+    ("L_805afbd4:;\n", "    { extern int hos_names_lower(Ctx *); if (hos_names_lower(c)) goto L_805afe30; }   /* (nx2/oot_patches.py: "
+                       "host/names_native.c) */\n"),
+    ("L_805afe30:;\n", "    { extern volatile int hos_names_checking; extern void hos_names_exit(Ctx *, int); "
+                       "if (hos_names_checking) hos_names_exit(c, 0); }\n"),
+    ("L_805b1d8c:;\n", "    { extern int hos_names_upper(Ctx *, int); if (hos_names_upper(c, 1)) goto L_805b0200; }\n"),
+    ("L_805b1d98:;\n", "    { extern int hos_names_upper(Ctx *, int); if (hos_names_upper(c, 0)) goto L_805b0200; }\n"),
+    ("L_805b0200:;\n", "    { extern volatile int hos_names_checking; extern void hos_names_exit(Ctx *, int); "
+                       "if (hos_names_checking) hos_names_exit(c, 1); }\n"),
+]
+
+
+def patch_names(s):
+    """The native name searches' calls in f_805aeea0 (the supported build's: these addresses are that build's). None when the
+    function is not in this file or is patched already; a SystemExit when one of its places is not there once"""
+    at = s.find(NAMES_HEAD)
+    if at < 0:
+        return None
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))   # (python -I leaves the script folder off)
+    import lifted_c
+    m = lifted_c.HEAD.search(s, at + len(NAMES_HEAD))
+    end = m.start() if m else len(s)
+    body = s[at:end]
+    if NAMES_EDITS[0][1] in body:
+        return None
+    for anchor, call in NAMES_EDITS:
+        if body.count(anchor) != 1:
+            raise SystemExit("oot_patches: f_805aeea0's %r found %d times" % (anchor.strip(), body.count(anchor)))
+        body = body.replace(anchor, anchor + call, 1)
+    return s[:at] + body + s[end:]
+
+
 def report(paths, counts, protect_hearts=False):
     """The warnings from the files' counts (each file's patch_file counts, in the order of paths), and the step divides' rule:
     both or neither, so a file of paths that has the hook is put back"""
@@ -1012,6 +1081,7 @@ def report(paths, counts, protect_hearts=False):
         done["scene format"] = 0
         done["zstd stream hook"] = 0
         done["zstd frames hook"] = 0
+        done["name searches"] = 0
     total = collections.Counter()
     for c in counts:
         total.update(c)

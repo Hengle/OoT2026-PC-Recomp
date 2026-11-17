@@ -11,6 +11,8 @@ import subprocess
 import tempfile
 from pathlib import Path
 
+RUN_ALL_ARGS = ["--cxx", "{cxx}"]
+
 ROOT = Path(__file__).resolve().parents[1]
 
 
@@ -133,7 +135,8 @@ def main():
     if "return !fsr3_on_chain() && fsr3_chosen();" not in function(fsr3, "bool fsr3_wanted() {"):
         raise SystemExit("fsr3_wanted: FSR 3.1 would upscale with its own inputs while it draws on the chain (two upscales)")
     on_chain = "if (fsr3_on_chain() && fsr3_chosen()) return ur::FSR3;"
-    if on_chain not in mode or mode.index(on_chain) > mode.index("if (!ur::is_dlss(v) && !ur::is_fsr4(v)) return ur::GAME;"):
+    fallback = "if (!ur::is_dlss(v) && !ur::is_fsr4(v) && !ur::is_xess(v) && v != ur::FSR316) return ur::GAME;"
+    if on_chain not in mode or fallback not in mode or mode.index(on_chain) > mode.index(fallback):
         raise SystemExit("temporal_mode does not run the row's FSR 3.1 on the chain before falling back to the game's own")
     if "fsr3_engine()" not in function(temporal, "Engine& engine_of("):
         raise SystemExit("engine_of has no slot for FSR 3.1's engine")
@@ -165,7 +168,8 @@ def main():
     if "temporal_off() && stretch(" not in upscale:
         raise SystemExit("temporal_upscale: the Upscaler's Off does not stretch in place of the game's network")
     stretch = function(temporal, "bool stretch(")
-    for need in ("s.linear, in_view", "s.out_layout", "c.valid", "in->width != c.width", "VK_FORMAT_B10G11R11_UFLOAT_PACK32"):
+    for need in ("s.linear, in_view", "s.out_layout", "c.valid", "in->width != c.width",
+                 "!temporal_colour_pair(in->format, out->format)", "rgba ? s.stretch_rgba : s.out"):
         if need not in stretch:
             raise SystemExit("stretch: %s is missing (Off's linear stretch of the scene only, into the picture)" % need)
     if "!temporal_wanted() && !temporal_off()" not in function(temporal, "void temporal_note_scene_draw("):

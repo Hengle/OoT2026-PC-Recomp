@@ -41,6 +41,7 @@ def need(cond, why):
 
 def check_source():
     replay = (ROOT / "gpu/vk/vk_replay.cpp").read_text(encoding="utf-8")
+    docs = (ROOT / "docs/development.md").read_text(encoding="utf-8")
     need('#include "hold_gpu.h"' in replay, "vk_replay.cpp no longer includes hold_gpu.h")
 
     waiter = block(replay, "struct GpuWaiter {")
@@ -65,6 +66,7 @@ def check_source():
     need('getenv("RX_VK_HOLD_GPU_WAIT")' in watch and 'getenv("RX_VK_HOLD_GPU_MS")' in watch, "the switches are read in sync_watch")
     need("(double)hold_ms()" in watch, "the bound is never under hold_ms")
 
+    need("`RX_VK_HOLD_GPU_WAIT=0`" in docs and "`RX_VK_HOLD_GPU_MS=<ms>`" in docs, "docs/development.md has no rows for the hold's switches")
 
 
 def main():

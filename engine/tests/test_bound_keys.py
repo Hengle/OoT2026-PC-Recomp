@@ -39,12 +39,14 @@ def between(text, first, last):
 
 
 PRELUDE = r"""
+#define _CRT_SECURE_NO_WARNINGS
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <stdint.h>
 #include "vk_api.h"
+#include "../../host/hold_toggle.h"
 typedef long LONG;
 typedef unsigned long DWORD;
 typedef int SRWLOCK;
@@ -63,6 +65,7 @@ static void ReleaseSRWLockShared(SRWLOCK *p) { (void)p; }
 #define VK_SHIFT 0x10
 #define VK_CONTROL 0x11
 #define VK_MENU 0x12
+#define VK_CAPITAL 0x14
 #define VK_SPACE 0x20
 #define VK_NUMPAD0 0x60
 #define VK_NUMPAD2 0x62
@@ -88,8 +91,16 @@ static const char *ini_dir;
 #endif
 static DWORD GetModuleFileNameA(void *m, char *b, DWORD n) { (void)m; return (DWORD)snprintf(b, n, "%s" EXE_SEP "ocarina_reborn.exe", ini_dir); }
 #define hos_game_path_a(b,n) GetModuleFileNameA(0,b,n)
+static const char *hos_options_file(void) {   /* (host/options_path.c: here, beside the exe) */
+    static char p[600];
+    DWORD n = GetModuleFileNameA(0, p, 560);
+    while (n && p[n - 1] != 92 && p[n - 1] != 47) n--;
+    snprintf(p + n, sizeof p - n, "ocarina_reborn_options.ini");
+    return p;
+}
 static int held[256];
 static int key(int vk) { return held[vk & 255]; }
+static int kpos(int us) { return key(us); }   /* (nn_hid.c: a key by its place; here the US key itself) */
 """
 
 MAIN = r"""
@@ -131,9 +142,26 @@ int main(int argc, char **argv) {
     CHECK(hos_binding(HOS_BIND_PAD, HOS_SW_B, 1) == -1);   /* old one-value entry */
     CHECK(hos_binding(HOS_BIND_PAD, HOS_SW_X, 1) == -1);   /* invalid second value */
     CHECK(bound_pad_buttons(face) == a && bound_pad_buttons(paddle) == a && bound_pad_buttons(face | paddle) == a);
+    /* Both gamepad slots and a keyboard key share the same logical button latch. */
+    HoldToggle toggle = {0};
+    CHECK(hold_toggle_apply(&toggle, bound_pad_buttons(face), a, 0) == a);
+    CHECK(hold_toggle_apply(&toggle, 0, a, 0) == a);
+    CHECK(hold_toggle_apply(&toggle, bound_pad_buttons(paddle), a, 0) == 0);
+    CHECK(hold_toggle_apply(&toggle, 0, a, 0) == 0);
+    /* E was moved to camera-up above; use A's new key to verify remapping. */
+    toggle_reset = 0;
+    hos_bind(HOS_BIND_KEY, HOS_SW_A, 0, 'T');
+    CHECK(toggle_reset);
+    release(), held['T'] = 1;
+    CHECK(hold_toggle_apply(&toggle, bound_down(HOS_SW_A, 0) ? a : 0, a, 0) == a);
+    CHECK(hold_toggle_apply(&toggle, 0, a, 0) == a);
     CHECK(bound_pad_buttons(1ULL << HOS_PAD_RTRIGGER) == 1ULL << HOS_SW_ZR);
-    CHECK(bound_pad_buttons(1ULL << HOS_PAD_TOUCHPAD) == 0);
+    /* the touchpad click, saved as Minus's input (the map, as players ask): read back, and it presses Minus */
+    CHECK(hos_binding(HOS_BIND_PAD, HOS_SW_MINUS, 0) == HOS_PAD_TOUCHPAD);
+    CHECK(bound_pad_buttons(1ULL << HOS_PAD_TOUCHPAD) == 1ULL << HOS_SW_MINUS);
+    toggle_reset = 0;
     hos_bind(HOS_BIND_PAD, HOS_SW_B, 1, HOS_PAD_RPADDLE1);
+    CHECK(toggle_reset);
     CHECK(hos_binding(HOS_BIND_PAD, HOS_SW_A, 1) == -1);
     CHECK(bound_pad_buttons(paddle) == 1ULL << HOS_SW_B && bound_pad_buttons(face) == a);
     hos_bind(HOS_BIND_PAD, HOS_SW_B, 1, -1);
@@ -150,6 +178,7 @@ int main(int argc, char **argv) {
     hos_bind(HOS_BIND_KEY, -1, 0, 0);
     CHECK(hos_binding(HOS_BIND_KEY, HOS_KEY_MOVE_UP, 0) == 'W' && hos_binding(HOS_BIND_KEY, HOS_SW_A, 0) == 'E');
     CHECK(hos_binding(HOS_BIND_PAD, HOS_SW_A, 1) == -1 && bound_pad_buttons(face) == a);
+    CHECK(toggle_reset);
     if (!fails) printf("PASS\n");
     return fails != 0;
 }
@@ -174,7 +203,7 @@ class BoundKeysTests(unittest.TestCase):
         with tempfile.TemporaryDirectory(prefix="ocarina_reborn-bound-keys-") as tmp:
             tmp = Path(tmp)
             (tmp / "ocarina_reborn_options.ini").write_text(
-                "key_move_up=90,0\npad_move_up=0\npad_a=1,17\npad_b=0\npad_x=3,99\n", encoding="utf-8"
+                "key_move_up=90,0\npad_move_up=0\npad_a=1,17\npad_b=0\npad_x=3,99\npad_minus=21\n"   # (21: the touchpad), encoding="utf-8"
             )
             (tmp / "t.c").write_text(PRELUDE + code + MAIN, encoding="utf-8")
             binary = tmp / ("t.exe" if sys.platform == "win32" else "t")

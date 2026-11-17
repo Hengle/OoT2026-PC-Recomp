@@ -20,6 +20,7 @@ ROOT = Path(__file__).resolve().parents[1]
 VK = ROOT / "gpu" / "vk"
 
 STUBS = r'''
+#include <array>
 #include <cstdarg>
 #include <cstdint>
 #include <cstdio>
@@ -239,10 +240,11 @@ def harness():
     draw = (VK / "vk_draw.cpp").read_text(encoding="utf-8")
     shader = (VK / "vk_shader.cpp").read_text(encoding="utf-8")
     hits = cut(draw, "struct HandleHit {", "\n// (hookshot) RX_VK_TRACE_TEX")
-    tls = re.search(r"TLS_OBJECT\(handle_hits, (.+)\)\s*$", hits, re.M)
-    if not tls:
+    if not re.search(r"TLS_OBJECT\(handle_hits, (.+)\)\s*$", hits, re.M):
         raise SystemExit("handle_hits is no longer a TLS_OBJECT: update this check")
-    hits = hits[:tls.start()] + "inline %s& handle_hits() { static %s m; return m; }\n" % (tls.group(1), tls.group(1))
+    # (each thread's objects as plain ones here: handle_hits, and Hookshot's direct-mapped front for it, view_fast)
+    hits = re.sub(r"^TLS_OBJECT\((\w+), (.+)\)\s*$",
+                  lambda m: "inline %s& %s() { static %s o; return o; }" % (m.group(2), m.group(1), m.group(2)), hits, flags=re.M)
     view_of = cut(draw, "VkImageView texture_view_of(", "/// A uniform buffer's descriptor range")
     for name, text in (("vk_draw.cpp", draw), ("vk_shader.cpp", shader)):
         if '#include "flat_map.h"' not in text:

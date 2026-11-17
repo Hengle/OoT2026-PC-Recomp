@@ -12,7 +12,7 @@ follow.
 
 | Source | What lands there |
 |---|---|
-| GitHub issues (game problem, build problem, idea) | the record: version, hardware, place in the game, `hookshot_log.txt` |
+| GitHub issues (game problem, build problem, idea) | the record: version, hardware, place in the game, `ocarina_reborn_log.txt` |
 | Tracking issues (`[Tracking] ...`) | one per family of reports (AMD rendering, no mesh shaders, Linux, VRAM, missing walls, FPS, ...) |
 | Discord #bug-reporting (forum) | first reports, often without a log; turn the reproducible ones into issues |
 | Discord #dev-work | claims, progress, review requests |
@@ -76,13 +76,14 @@ problem with a log outranks an NVIDIA one of the same severity.
 1. **Triage.** Reproduce if you can. Find the tracking issue it belongs to, or open the issue (with the log). Score it
    (section 2).
 2. **Claim.** Before starting, say so in Discord #dev-work and on the issue: what, why (the score), and on what
-   hardware you can test. Search open PRs first: two people fixing the same thing is the most common waste here. Drop
-   a claim out loud when you stop.
+   hardware you can test. Search open PRs first (agents: the [prior-work skill](../.claude/skills/prior-work/SKILL.md)):
+   two people fixing the same thing is the most common waste here. Drop a claim out loud when you stop.
 3. **Fix.** A branch from current `main`, one topic. Find the cause before the fix: a log, a trace, a measurement.
 4. **Test.**
-   - A game-free test that fails without the change (see AGENTS.md: tests read the source).
+   - A game-free test that fails without the change (see AGENTS.md: tests read the source; agents: the
+     [fix-with-test skill](../.claude/skills/fix-with-test/SKILL.md)).
    - `python -I -B tests/run_all.py`, all of it.
-   - In the game, on your hardware: what you did and what you saw, with numbers from `hookshot_log.txt` for performance.
+   - In the game, on your hardware: what you did and what you saw, with numbers from `ocarina_reborn_log.txt` for performance.
    - Add a row to [tested configurations](tested-configurations.md) for each run you measured.
    - Say what you could not test (another OS, another vendor, real input devices).
 5. **Pull request.** Open the description with why the PR is needed; then what changed, how it was tested, what was

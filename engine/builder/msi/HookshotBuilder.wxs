@@ -10,9 +10,9 @@
     <SummaryInformation Description="Hookshot Builder installer" />
     <MajorUpgrade DowngradeErrorMessage="A newer Hookshot Builder installer is already installed." />
     <MediaTemplate EmbedCab="yes" />
-    <Icon Id="HookshotIcon" SourceFile="../setup/hookshot.ico" />
+    <Icon Id="HookshotIcon" SourceFile="../setup/ocarina_reborn.ico" />
     <Property Id="ARPPRODUCTICON" Value="HookshotIcon" />
-    <Property Id="ARPURLINFOABOUT" Value="https://github.com/NotRexed/Hookshot" />
+    <Property Id="ARPURLINFOABOUT" Value="https://git.notrexed.dev/Hookshot/Hookshot" />
 
     <StandardDirectory Id="LocalAppDataFolder">
       <Directory Id="ProgramsDir" Name="Programs">

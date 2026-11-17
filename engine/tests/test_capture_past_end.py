@@ -27,8 +27,7 @@ over packages (control section and code area) built here:
   each branch lands on its target, and the address map finds both;
 - 12.8 MB programs whose branches and call are more than 8 MiB of lowered code apart: JMP and JCAL, each holding its
   target's address, the predicate kept.
-Then the four other copies of the capture loop (the WebGPU renderer, the bake tools, shadertool) end before the word
-too, not at it.
+Then the three other copies of the capture loop (the bake tools, shadertool) end before the word too, not at it.
 
 python -I -B tests/test_capture_past_end.py [--cxx clang++] [--source <checkout>]
 """
@@ -266,8 +265,7 @@ int main() {
 }
 """
 
-CALLERS = ("gpu/render/rx_shader.cpp", "gpu/shaderbatch.cpp", "nx2/bake_ds/bake_ds.cpp", "gpu/shadertool.cpp",
-           "gpu/vk/vk_shader.cpp")
+CALLERS = ("gpu/shaderbatch.cpp", "nx2/bake_ds/bake_ds.cpp", "gpu/shadertool.cpp", "gpu/vk/vk_shader.cpp")
 
 
 def callers(root):

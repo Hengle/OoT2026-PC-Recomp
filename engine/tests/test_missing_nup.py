@@ -30,6 +30,12 @@ class MissingNupTests(unittest.TestCase):
         self.out, self.work = self.root / "output", self.root / "work"
         (self.out / "romfs").mkdir(parents=True)
         (self.out / "romfs/asset").write_bytes(b"authored asset")
+        # (what make_game.py's ROMFS_NEEDED asks of a dump: the romfs check before the build)
+        (self.out / "romfs/Pack").mkdir()
+        (self.out / "romfs/Pack/ZsDic.pack.zs").write_bytes(b"dictionary")
+        (self.out / "romfs/System/Resource").mkdir(parents=True)
+        (self.out / "romfs/System/HeapSize").mkdir()
+        (self.out / "romfs/System/HeapSize/Product.Nin_Ounce_NVN2.HeapDef.byml.zs").write_bytes(b"heaps")
         (self.out / ".ocarina_reborn_exefs").mkdir()
         (self.out / ".ocarina_reborn_exefs/main").write_bytes(b"authored code sentinel")
         (self.out / "user/save").mkdir(parents=True)
@@ -62,7 +68,7 @@ class MissingNupTests(unittest.TestCase):
         argv = [str(SOURCE), "--jobs", "1", "--nup", str(self.package), "--out", str(self.out), "--work", str(self.work)]
         output = io.StringIO()
         with contextlib.ExitStack() as stack:
-            for name in ("check_windows_sdk", "check_cpu", "stop_stray_compilers", "drop_stale_objects", "no_throttle"):
+            for name in ("check_windows_sdk", "stop_stray_compilers", "drop_stale_objects", "no_throttle"):
                 stack.enter_context(mock.patch.object(make_game, name))
             stack.enter_context(mock.patch("ctypes.WinDLL", create=True))   # No Windows power-state change.
             blocked = [stack.enter_context(mock.patch.object(make_game.subprocess, "Popen", side_effect=AssertionError("process launched"))),

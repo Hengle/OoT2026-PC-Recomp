@@ -35,7 +35,7 @@
 #else
 #include "hos_sdl.h"
 #endif
-#include "hos_paths.h"   /* (the game folder: ocarina_reborn_options.ini, au_menu_output) */
+#include "options_path.h"   /* (ocarina_reborn_options.ini, au_menu_output) */
 #ifndef HOOKSHOT_ENV_H   /* (env_on: the switches' one rule) */
 #include "../gpu/vk/compat/ocarina_reborn_env.h"
 #endif
@@ -764,6 +764,17 @@ static void au_opened(HWAVEOUT w) {
 /* The default output's channels (its shared-mode mix format on Windows, SDL's default device on Linux); 2 when
    unknown. */
 #ifdef _WIN32
+/* (hookshot) The channels of a mix format that are 5.1 speakers: its channel count when its mask names a centre and a
+   pair behind or beside the player (5.1 back or side, 7.1), else 2. A device with more channels than speakers (an
+   audio interface's outputs, a Scarlett's 8 with mask 0; quad without a centre; no mask at all) was counted by its
+   channels: the game mixed 5.1, and what it puts in the centre (voices, the ocarina, Link's own sounds) and behind went
+   to outputs nothing listens to, silent (issue 2182). As stereo, the game's own mix down keeps every sound. */
+static int au_layout_channels(int channels, int extensible, unsigned long mask) {
+    if (channels <= 2 || !extensible) return 2;
+    const unsigned long front = 0x7, back = 0x30, side = 0x600;   /* FL FR FC; BL BR; SL SR (ksmedia.h SPEAKER_) */
+    if ((mask & front) == front && ((mask & back) == back || (mask & side) == side)) return channels;
+    return 2;
+}
 static int au_device_channels(void) {
     static const GUID clsid_enumerator = {0xbcde0395, 0xe52f, 0x467c, {0x8e, 0x3d, 0xc4, 0x57, 0x92, 0x91, 0x69, 0x2e}};
     static const GUID iid_enumerator = {0xa95664d2, 0x9614, 0x4f35, {0xa7, 0x46, 0xde, 0x8d, 0xb6, 0x36, 0x17, 0xe6}};
@@ -778,7 +789,13 @@ static int au_device_channels(void) {
             if (SUCCEEDED(d->lpVtbl->Activate(d, &iid_audio_client, CLSCTX_ALL, NULL, (void **)&a)) && a) {
                 WAVEFORMATEX *mix = NULL;
                 if (SUCCEEDED(a->lpVtbl->GetMixFormat(a, &mix)) && mix) {
-                    n = mix->nChannels;
+                    const int extensible = mix->wFormatTag == WAVE_FORMAT_EXTENSIBLE &&
+                                           (size_t)mix->cbSize >= sizeof(WAVEFORMATEXTENSIBLE) - sizeof(WAVEFORMATEX);
+                    const unsigned long mask = extensible ? (unsigned long)((WAVEFORMATEXTENSIBLE *)mix)->dwChannelMask : 0;
+                    n = au_layout_channels(mix->nChannels, extensible, mask);
+                    if (n != mix->nChannels)
+                        hos_log("audio: the default output has %d channels but not 5.1 speakers (channel mask %#lx): "
+                                "counted as stereo", mix->nChannels, mask);
                     CoTaskMemFree(mix);
                 }
                 a->lpVtbl->Release(a);
@@ -793,25 +810,21 @@ static int au_device_channels(void) {
 #else
 static int au_device_channels(void) { return hos_sdl_audio_channels(); }
 #endif
-/* (hookshot) The Insert menu's Audio output (gpu/vk/vk_menu.cpp): audio_output= in ocarina_reborn_options.ini beside the game,
-   0 Auto, 1 Stereo, 2 5.1 (a number past them is the nearest, as the menu reads it). Read from the file, as
-   host/nn_applet.c reads the Handheld profile: the game asks for its speakers only once, at its start */
+/* (hookshot) The Insert menu's Audio output (gpu/vk/vk_menu.cpp): audio_output= in ocarina_reborn_options.ini (host/options_path.c),
+   0 Auto, 1 Stereo, 2 5.1, 3 Mono (stereo with a live final average). A number past them is the nearest, as the menu reads
+   it. Read from the file, as host/nn_applet.c reads the Handheld profile: the game asks for its speakers only once,
+   at its start */
 static int au_menu_output(void) {
-    char path[MAX_PATH];
-    const DWORD len = hos_game_path_a(path, MAX_PATH);
-    char *slash = len ? (strrchr(path, 92) ? strrchr(path, 92) : strrchr(path, 47)) : NULL;   /* (linux: '/') */
-    if (!slash) return 0;
-    snprintf(slash + 1, (size_t)(path + MAX_PATH - slash - 1), "ocarina_reborn_options.ini");
-    FILE *f = fopen(path, "r");
+    FILE *f = fopen(hos_options_file(), "r");
     if (!f) return 0;
     char line[80];
     int v = 0;
     while (fgets(line, sizeof line, f))
         if (!strncmp(line, "audio_output=", 13)) v = atoi(line + 13);
     fclose(f);
-    return v < 1 ? 0 : v > 2 ? 2 : v;
+    return v < 1 ? 0 : v > 3 ? 3 : v;
 }
-/* The speakers the game mixes for: the Insert menu's Audio output, Stereo 2 or 5.1 6, HOS_AUDIO_CHANNELS=2 or 6 over it;
+/* The speakers the game mixes for: the Insert menu's Audio output, Stereo/Mono 2 or 5.1 6, HOS_AUDIO_CHANNELS=2 or 6 over it;
    Auto: 6 when the default output has 5.1 or more, else 2. The game asks once, at its start
    (GetActiveAudioDeviceChannelCountForOutput), and pans for that many, so a change takes a restart. Told 2 (always,
    before), it put nothing behind the player, and a 5.1 system played the whole game from the front speakers (issue
@@ -1012,6 +1025,7 @@ static void dump_finish(void) {
     fflush(dump);
 }
 static void output_frame(const int16_t *pcm) {
+    const int mixed = out_channels;   /* (renderer_main mixed this frame for the device open now) */
     if (dump) {
         fwrite(pcm, (size_t)(2 * out_channels), FRAME, dump);
         dump_bytes += (uint32_t)(FRAME * 2 * out_channels);
@@ -1035,6 +1049,7 @@ static void output_frame(const int16_t *pcm) {
             if (!wout) return;
         }
     }
+    if (out_channels != mixed) return;   /* (another channel count opened: this frame is dropped, the next is mixed for it) */
     for (int i = 0; i < FRAME * out_channels; i++) {
         const unsigned a = (unsigned)(pcm[i] < 0 ? -pcm[i] : pcm[i]);
         if (a > out_peak) out_peak = a;
@@ -1370,7 +1385,7 @@ static float audio_volume_curve(int percent) {
     const float v = (float)(percent < 0 ? 0 : percent > 100 ? 100 : percent) / 100.0f;
     return v * v;
 }
-/* The gain the menu asks for: Volume and Mute in background. With no menu (the WebGPU renderer) the game plays at full
+/* The gain the menu asks for: Volume and Mute in background. With no menu (no renderer) the game plays at full
    volume. */
 static float audio_player_gain(void) {
     int rx_option(int id, int otherwise);
@@ -1379,6 +1394,15 @@ static float audio_player_gain(void) {
     if (volume > 100) volume = 100;
     if (volume && rx_option(HOS_OPT_MUTE_BACKGROUND, 0) && !audio_window_in_front()) volume = 0;
     return audio_volume_curve(volume);
+}
+
+/* Average in 32 bits so full-scale samples cannot overflow. Surround stays untouched. */
+static void audio_mono(int16_t *pcm, int frames, int channels, int enabled) {
+    if (!enabled || channels != 2) return;
+    for (int i = 0; i < frames; i++) {
+        const int16_t mono = (int16_t)(((int32_t)pcm[2 * i] + pcm[2 * i + 1]) / 2);
+        pcm[2 * i] = pcm[2 * i + 1] = mono;
+    }
 }
 
 /* ---- the renderer thread --------------------------------------------------------------------------------------- */
@@ -1406,6 +1430,8 @@ static DWORD WINAPI renderer_main(void *p) {
         au_unlock();
         if (gain_frames-- <= 0) gain_want = audio_player_gain(), gain_frames = 20;   /* (the menu read every 100 ms) */
         gain = audio_apply_gain(pcm, FRAME, out_channels, gain, gain_want);
+        int rx_option(int id, int otherwise);
+        audio_mono(pcm, FRAME, out_channels, rx_option(HOS_OPT_AUDIO_OUTPUT, 0) == 3);
         output_frame(pcm);
         elapsed_frames++;
         if (renderer_event) hos_system_event_signal(renderer_event);

@@ -1,8 +1,9 @@
-/* Which renderer the rx_* calls go to (gpu/vk/vk_api.h): the WebGPU one in the executable (gpu/render, its
-   functions renamed wgr_* by rx_wgpu_names.h) or, unset or RX_BACKEND=vulkan, the Vulkan one in ocarina_reborn_vk.dll
-   (ocarina_reborn_vk.so) beside the executable. Decided at rx_start, before any other rx_* call; a DLL that is missing or finds no usable Vulkan
-   device leaves the WebGPU renderer in place (logged). */
+/* Where the rx_* calls go (gpu/vk/vk_api.h): the Vulkan back end in ocarina_reborn_vk.dll (ocarina_reborn_vk.so) beside the
+   executable, the only renderer. Loaded at rx_start, before any other rx_* call; a DLL that is missing or finds no usable
+   Vulkan device leaves the wgr_* stand-ins in place (host/rx_nowgpu.c, host/posix/linux_stubs.c: once the WebGPU
+   renderer's functions, gpu/render, which is built no more), and nothing is drawn (logged). */
 #include "hos.h"
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #define WIN32_LEAN_AND_MEAN
@@ -12,8 +13,11 @@
 #include "../gpu/vk/dlss_math.h"
 #include "control.h"
 #include "ocr_diagnostics.h"
+#ifndef HOOKSHOT_ENV_H   /* (env_on: the switches' one rule) */
+#include "../gpu/vk/compat/ocarina_reborn_env.h"
+#endif
 
-/* the WebGPU renderer (gpu/render, renamed) */
+/* the stand-ins when there is no Vulkan back end (host/rx_nowgpu.c, host/posix/linux_stubs.c) */
 int wgr_start(void *hwnd);
 void wgr_resize(int width, int height);
 const char *wgr_describe(void);
@@ -72,13 +76,9 @@ int hos_gpu_guest_ranges(uint64_t (*out)[2], int max);
 /* The soft write watch's marks (rt/a64.h A64_MARK, hos_mark_written) over the GPU-visible ranges, read and cleared:
    the Vulkan back end's own collection (gpu/render's rx_collect_written works only with the WebGPU renderer started).
    One consumer: with Vulkan the WebGPU renderer never runs. */
-/* (256 marks, none set? Read as 32 words in one pass the compiler makes four AVX2 loads of: most of the ranges hold no
-   mark at a submit, and at 32 marks a step the walk itself, not the memory, was what a scan cost) */
-static inline int marks_clear_256(const uint8_t *m) {
-    uint64_t w[32], any = 0;
-    memcpy(w, m, sizeof w);
-    for (int i = 0; i < 32; i++) any |= w[i];
-    return !any;
+static int cmp_range_lo(const void *a, const void *b) {
+    const uint64_t x = ((const uint64_t *)a)[0], y = ((const uint64_t *)b)[0];
+    return x < y ? -1 : x > y;
 }
 static int64_t collect_in(const uint64_t (*ranges)[2], int nranges, uint32_t **pages) {
     /* (HOS_COLLECT_WIDE=0: 32 marks a step at most, as before; the pages found are the same either way) */
@@ -89,14 +89,51 @@ static int64_t collect_in(const uint64_t (*ranges)[2], int nranges, uint32_t **p
     }
     size_t n = 0, cap = 4096;
     uint32_t *out = malloc(cap * sizeof *out);
+    /* two changes to the clean-span walk, both measured in Hyrule Field at play (Hyrule Field spin, i9-13900K,
+       paired runs of one binary with HOS_WALK, 2x2): the test in 256-page chunks (8 x 32-byte vector loads, one
+       branch, where the ladder tested 32 pages per load-and-branch: ~25 GB/s of a core), and one pass over the
+       union of the ranges (sorted, cursor) instead of a pass per range: 38.1 us a call -> 31.6, 51 ms/s -> 41 ms/s
+       of a core at 110 fps; fps unchanged (the scene is GPU-bound here: the win is CPU freed for smaller CPUs). */
+    typedef long long v64x4 __attribute__((vector_size(32)));
+    /* the merged GPU ranges (hos_gpu_guest_ranges) arrive sorted; the submit-time list (the renderer's mirrored
+       pools) may not be and may overlap: sort a copy, or the cursor would skip pages the walk owes the GPU. */
+    const uint64_t (*use)[2] = ranges;
+    static uint64_t (*scratch)[2];
+    static int scratch_cap;
+    int sorted = 1;
+    for (int r = 1; r < nranges; r++)
+        if (ranges[r][0] < ranges[r - 1][0]) { sorted = 0; break; }
+    if (!sorted) {
+        if (nranges > scratch_cap) {
+            scratch_cap = nranges + 64;
+            scratch = (uint64_t (*)[2])realloc(scratch, (size_t)scratch_cap * sizeof *scratch);
+        }
+        memcpy(scratch, ranges, (size_t)nranges * sizeof *scratch);
+        qsort(scratch, (size_t)nranges, sizeof *scratch, cmp_range_lo);
+        use = scratch;
+    }
+    uint64_t upto = 0;
     for (int r = 0; r < nranges; r++) {
-        const uint64_t lo = ranges[r][0], hi = ranges[r][1] < hos_guest_size() ? ranges[r][1] : hos_guest_size();
+        const uint64_t lo = use[r][0], hi = use[r][1] < hos_guest_size() ? use[r][1] : hos_guest_size();
         uint64_t p1 = (hi + 4095) >> 12;
         if (p1 > A64_DIRTY_PAGES) p1 = A64_DIRTY_PAGES;
-        for (uint64_t p = lo >> 12; p < p1;) {
-            if (wide && !(p & 255) && p + 256 <= p1 && marks_clear_256(&a64_dirty[p])) {   /* (256 pages at a time while none is marked) */
-                p += 256;
-                continue;
+        if (p1 <= upto) continue;
+        for (uint64_t p = lo >> 12 < upto ? upto : lo >> 12; p < p1;) {
+            if (!(p & 255) && p + 256 <= p1) {   /* (256 pages at a time while none is marked) */
+                v64x4 a, b, c, d, e, f, g, h, o;
+                __builtin_memcpy(&a, &a64_dirty[p], 32);
+                __builtin_memcpy(&b, &a64_dirty[p + 32], 32);
+                __builtin_memcpy(&c, &a64_dirty[p + 64], 32);
+                __builtin_memcpy(&d, &a64_dirty[p + 96], 32);
+                __builtin_memcpy(&e, &a64_dirty[p + 128], 32);
+                __builtin_memcpy(&f, &a64_dirty[p + 160], 32);
+                __builtin_memcpy(&g, &a64_dirty[p + 192], 32);
+                __builtin_memcpy(&h, &a64_dirty[p + 224], 32);
+                o = ((a | b) | (c | d)) | ((e | f) | (g | h));
+                if (!((o[0] | o[1]) | (o[2] | o[3]))) {
+                    p += 256;
+                    continue;
+                }
             }
             if (!(p & 31) && p + 32 <= p1) {   /* (32 pages at a time while none is marked) */
                 uint64_t w[4];
@@ -120,6 +157,7 @@ static int64_t collect_in(const uint64_t (*ranges)[2], int nranges, uint32_t **p
             }
             p++;
         }
+        upto = p1;
     }
     *pages = out;
     return (int64_t)n;
@@ -181,19 +219,33 @@ static float host_wide_menus(uint32_t keep_mask) {   /* (MkwVkHost.wide_menus) *
     static int looked;
     if (!looked) looked = 1, forced = getenv("HOS_WIDE_KEEP");
     hos_wide_keep_mask = forced ? (uint32_t)strtoul(forced, NULL, 16) : keep_mask;
+    extern volatile float hos_wide_ratio;   /* (narrower than 16:9: the menus fit its width whatever the Ultrawide menus row says,
+                                               never stretched up and down; the row is about wider screens) */
+    if (!forced && hos_wide_ratio > 0.0f && hos_wide_ratio < 16.0f / 9.0f * 0.999f) hos_wide_keep_mask &= ~2u;
+    void hos_wide_ui_tick(void);   /* (hos_wide_ui.c: the HUD's layout for the picture's shape, each present) */
+    hos_wide_ui_tick();
     return hos_wide_margin;
 }
+float hos_wide_cover(void);   /* hos_main.c */
 int hos_mouse_pointer(MkwVkPointer *out);   /* display.c, posix/display_sdl.c */
+int hos_key_down(int vk);                   /* display.c, posix/display_sdl.c */
 int hos_sdl_gyro_status(void);   /* pad_sdl.c */
 extern const char *hos_romfs_dir;   /* nn_fs.c, set by hos_main.c */
 static const char *host_romfs_dir(void) { return hos_romfs_dir; }
+const char *hos_options_file(void);   /* options_path.c */
 
 #ifdef _WIN32
 static unsigned char menu_key_press[256];
 void hos_vk_note_key_press(unsigned key) {
     if (key < sizeof menu_key_press) __atomic_store_n(&menu_key_press[key], 1, __ATOMIC_RELAXED);
 }
+/* (hookshot, issue 3) With MKWVK_KEY_HELD added to the key code, the same call answers another question: whether that key is
+   down now (hos_key_down: Windows' state of the keyboard or, on a PC where it says nothing, the window's own key messages).
+   The Insert menu asks it for the key a control is given. A question of its own in the host's table would change vk_api.h,
+   which is part of the program cache's stamp: every player's 7 GB of prepared shaders made again for one more function. */
+#define MKWVK_KEY_HELD 0x10000
 int hos_vk_take_key_press(int key) {
+    if (key & MKWVK_KEY_HELD) return hos_key_down(key & 0xFF);
     return (unsigned)key < sizeof menu_key_press &&
            __atomic_exchange_n(&menu_key_press[key], 0, __ATOMIC_RELAXED);
 }
@@ -213,6 +265,54 @@ static void host_slept_ns(int64_t out[2]) {
 }
 
 extern int hos_oot_story_event_active(void);
+/* (hookshot) typed text for the Insert menu's text fields (MkwVkHost.take_text): the window's thread puts each character and
+   editing key in (host/display.c WM_CHAR and WM_KEYDOWN, host/posix/display_sdl.c SDL's text input and key events), the menu
+   takes them out at its frames, in order. Nothing is kept while no field has the keyboard, and the window then takes no text
+   (SDL's text input stopped: no input method's window over the game) */
+void hos_display_paste(void);   /* display.c, posix/display_sdl.c: the clipboard's first line put in, on the window's thread */
+enum { TEXT_QUEUE = 256 };
+static SRWLOCK text_lock = SRWLOCK_INIT;
+static uint32_t text_queue[TEXT_QUEUE];
+static unsigned text_first, text_n;
+static volatile LONG text_focus;
+/* whether a field has the keyboard (the window's thread: whether to take text and editing keys) */
+int hos_text_focus(void) { return InterlockedCompareExchange(&text_focus, 0, 0); }
+/* a character typed (a Unicode code point) or HOS_TEXT_KEY | an editing key; dropped while no field has the keyboard, or when
+   the menu has not taken the last TEXT_QUEUE (it takes them at every frame) */
+void hos_text_put(uint32_t c) {
+    if (!hos_text_focus()) return;
+    AcquireSRWLockExclusive(&text_lock);
+    if (text_n < TEXT_QUEUE) text_queue[(text_first + text_n++) % TEXT_QUEUE] = c;
+    ReleaseSRWLockExclusive(&text_lock);
+}
+/* UTF-8 typed (SDL's text input) or pasted (first_line: up to its first line break), a character at a time; a broken
+   sequence is left out */
+void hos_text_put_utf8(const char *s, int first_line) {
+    while (s && *s) {
+        const unsigned char b = (unsigned char)*s++;
+        const int more = b < 0x80 ? 0 : (b & 0xe0) == 0xc0 ? 1 : (b & 0xf0) == 0xe0 ? 2 : (b & 0xf8) == 0xf0 ? 3 : -1;
+        uint32_t c = more == 0 ? b : more == 1 ? b & 0x1fu : more == 2 ? b & 0x0fu : b & 0x07u;
+        int got = 0;   /* (continuation bytes taken; the byte that broke a sequence is read again as a character's first) */
+        while (more > 0 && got < more && ((unsigned char)*s & 0xc0) == 0x80) c = c << 6 | ((unsigned char)*s++ & 0x3fu), got++;
+        if (more < 0 || got < more) continue;
+        if (first_line && (c == '\n' || c == '\r')) break;
+        hos_text_put(c);
+    }
+}
+static int host_take_text(int focus, uint32_t *out, int max) {
+    InterlockedExchange(&text_focus, focus != HOS_TEXT_OFF);
+    if (focus == HOS_TEXT_PASTE) hos_display_paste();
+    int n = 0;
+    AcquireSRWLockExclusive(&text_lock);
+    if (focus == HOS_TEXT_OFF) text_n = 0;
+    for (; n < max && text_n; n++, text_n--, text_first = (text_first + 1) % TEXT_QUEUE) out[n] = text_queue[text_first];
+    ReleaseSRWLockExclusive(&text_lock);
+    return n;
+}
+
+
+/* (hookshot) the game's freed address space inside [lo, hi), decommitted (hos_mem.c): the back end's ranges no import holds */
+uint64_t hos_region_release_gaps(uint64_t lo, uint64_t hi);
 static MkwVkHost vk_host = {
     MKWVK_API_VERSION, host_log, hos_guest_base, hos_guest_size, hos_gpu_ptr, nvn_gpu_guest, nvn_gpu_read,
     nvn_gpu_write, host_collect, host_free_pages, host_mark_written, hos_ticks, hos_now_ns, nvn_tex_layout,
@@ -222,6 +322,10 @@ static MkwVkHost vk_host = {
     hos_mouse_pointer, hos_mic_count, hos_mic_name, hos_mic_select, hos_sdl_gyro_status, hos_log_flush, hos_prompts_face,
     host_romfs_dir, host_wide_menus, host_slept_ns, host_fps_timing, hos_prompts_live_parts, host_screen_size,
     ocr_diag_frame, ocr_diag_event, hos_oot_story_event_active,
+    hos_wide_cover,
+    host_take_text,
+    hos_region_release_gaps,
+    hos_options_file,
 };
 
 static const MkwVkRenderer *vk;   /* the Vulkan back end, when it was chosen and started */
@@ -231,7 +335,7 @@ static HMODULE vk_module;   /* (the last back end loaded: rx_close_asked) */
    first): those calls are kept here and given to the renderer rx_start chose, in order. Without that the Vulkan back
    end never knew the first ~0x60 texture slots, and lit geometry sampled them as its black dummy.
    The texels the game writes then (WriteTexels) are kept too, with a copy of their data: without a renderer they went
-   nowhere (Linux has no WebGPU renderer to take them), and a texture filled so at boot kept zeros in its storage. OoT's
+   nowhere (no WebGPU renderer to take them), and a texture filled so at boot kept zeros in its storage. OoT's
    4x4 white placeholder is one: bound in place of the ground fog's depth, it read 0 and hid the ground fog at some camera
    angles. That happened when the window's thread started the renderer after the game had begun (windowed, not headless). */
 typedef struct {
@@ -288,6 +392,7 @@ static void flush_early(void) {
 }
 
 /* dll: ocarina_reborn_vk.dll (ocarina_reborn_vk.so on Linux), the Vulkan back end: one export */
+static int preparing_shaders;   /* (hookshot) rx_prepare_shaders: no window, no box when the renderer is missing */
 static const MkwVkRenderer *load_vulkan(const char *dll) {
     char path[MAX_PATH];
     const DWORD n = GetModuleFileNameA(NULL, path, MAX_PATH);
@@ -296,41 +401,65 @@ static const MkwVkRenderer *load_vulkan(const char *dll) {
     memcpy(slash + 1, dll, strlen(dll) + 1);
     HMODULE m = LoadLibraryA(path);
     if (!m) {
-        hos_log("rx: RX_BACKEND=vulkan, but %s did not load (%lu): WebGPU", path, GetLastError());
+#ifdef _WIN32
+        const DWORD err = GetLastError();
+        hos_log("rx: %s did not load (%lu): nothing is drawn", path, err);
+        /* (hookshot) Two of a player's logs: ocarina_reborn_vk.dll "did not load (126)" and no SDL either, the game started
+           from a folder without them (the libraries are in bin\ since the launcher), and a window that stayed black for good
+           with nothing on screen to say why. Said in plain words, and in a box (not while shaders are prepared) */
+        hos_log("rx: the renderer could not be loaded (%s): nothing will be drawn. Start the game from the Ocarina Reborn launcher, "
+                "or install the game again there", err == ERROR_MOD_NOT_FOUND ? "the file or a library it needs is missing"
+                                                 : err == ERROR_BAD_EXE_FORMAT ? "the file is damaged" : "Windows refused it");
+        if (!preparing_shaders && !env_on("HOS_HEADLESS") && strcmp(dll, "ocarina_reborn_vk.dll") == 0) {
+            char text[MAX_PATH + 512];
+            snprintf(text, sizeof text,
+                     "Ocarina Reborn's renderer could not be loaded:\n\n%s\n(Windows error %lu)\n\nThe window would stay black. Start the "
+                     "game from the Ocarina Reborn launcher, not from a copy of ocarina_reborn.exe elsewhere; if it still happens, use "
+                     "Update in the Ocarina Reborn launcher, or install the game again from it.", path, err);
+            MessageBoxA(NULL, text, "Ocarina Reborn", MB_OK | MB_ICONERROR | MB_SETFOREGROUND);
+        }
+#else   /* (why, as dlerror() said: a missing file, a glibc too old, a wrong ELF class. The line names the file
+           LoadLibraryA opened, ocarina_reborn_vk.so, and drops dlerror()'s leading "<that file>: ", so the path, home folder
+           included, is in it once. wgr_start draws nothing) */
+        char *ext = strrchr(path, '.');
+        if (ext && !strcmp(ext, ".dll")) strcpy(ext, ".so");
+        const char *why = hos_load_error();
+        const size_t n_path = strlen(path);
+        if (!strncmp(why, path, n_path) && !strncmp(why + n_path, ": ", 2)) why += n_path + 2;
+        hos_log("rx: %s did not load (%s): nothing is drawn", path, why);
+#endif
         return NULL;
     }
     vk_module = m;
     mkwvk_init_fn init = (mkwvk_init_fn)(void *)GetProcAddress(m, "mkwvk_init");
     if (!init) {
-        hos_log("rx: %s has no mkwvk_init: WebGPU", path);
+        hos_log("rx: %s has no mkwvk_init: nothing is drawn", path);
         return NULL;
     }
     vk_host.diagnostics_frame = ocr_diag_enabled() ? ocr_diag_frame : NULL;
     const MkwVkRenderer *r = init(&vk_host);
     if (!r) {
-        hos_log("rx: mkwvk_init returned NULL: WebGPU");
+        hos_log("rx: mkwvk_init returned NULL: nothing is drawn");
         return NULL;
     }
     if (r->version != MKWVK_API_VERSION) {
-        hos_log("rx: mkwvk_init version mismatch (%u vs %u): WebGPU", r->version, MKWVK_API_VERSION);
+        hos_log("rx: mkwvk_init version mismatch (%u vs %u): nothing is drawn", r->version, MKWVK_API_VERSION);
         return NULL;
     }
     return r;
 }
 
 int rx_start(void *hwnd) {
-    const char *b = getenv("RX_BACKEND");
-    if (!b || !_stricmp(b, "vulkan")) {   /* (hookshot: Vulkan unless told otherwise; a started game has no RX_BACKEND) */
-        const char *dll = "ocarina_reborn_vk.dll";
-        const MkwVkRenderer *r = load_vulkan(dll);
-        if (r && r->start(hwnd)) {
-            vk = r;
-            hos_log("rx: renderer: Vulkan (%s)", dll);
-            flush_early();
-            return 1;
-        }
-        if (r) hos_log("rx: the Vulkan back end could not start on the window: WebGPU");
+    /* (Vulkan, the only renderer; RX_BACKEND, which once picked the WebGPU one, is not read) */
+    const char *dll = "ocarina_reborn_vk.dll";
+    const MkwVkRenderer *r = load_vulkan(dll);
+    if (r && r->start(hwnd)) {
+        vk = r;
+        hos_log("rx: renderer: Vulkan (%s)", dll);
+        flush_early();
+        return 1;
     }
+    if (r) hos_log("rx: the Vulkan back end could not start on the window: nothing is drawn");
     const int ok = wgr_start(hwnd);
     flush_early();
     return ok;
@@ -338,6 +467,7 @@ int rx_start(void *hwnd) {
 /* (hookshot) ocarina_reborn --prepare-shaders: the Vulkan back end started with no window and no game, which prepares
    every shader in its start (gpu/vk/vk_main.cpp started_up) and is then let go. 0 when there is no usable Vulkan */
 int rx_prepare_shaders(void) {
+    preparing_shaders = 1;
     const MkwVkRenderer *r = load_vulkan("ocarina_reborn_vk.dll");
     return r && r->start(NULL);
 }
@@ -345,6 +475,10 @@ int rx_prepare_shaders(void) {
    seconds at most). One without the export (an older one) has nothing to keep */
 void rx_close_asked(void) {
     ocr_diag_stop();
+    /* (first, before anything that takes time: the player asked to quit, so however the process ends from here (a second
+       close of a window that stopped answering) the crash window says nothing; a crash still counts: host/hos_crash_dialog.h) */
+    void hos_crash_quit_asked(void);
+    hos_crash_quit_asked();
     if (!vk_module) return;
     void (*close_asked)(void) = (void (*)(void))(void *)GetProcAddress(vk_module, "mkwvk_close_asked");
     if (close_asked) close_asked();
@@ -503,10 +637,15 @@ int rx_guest_imported(uint64_t lo, uint64_t hi) {
     if (away) hos_vcore_back();
     return r;
 }
+/* (hookshot, hos_mem.c: the game freed the address region [lo, hi)) the back end takes the range and, at its next
+   submission, has the host decommit what no import holds of it (a short list lock: no wait on the replay) */
+void rx_guest_release(uint64_t lo, uint64_t hi) {
+    if (vk && vk->guest_release) vk->guest_release(lo, hi);
+}
 /* (nvn_native.c: the CPU set an event's value) in order with the submits, for the GPU's waits on it */
 int rx_option(int id, int otherwise) { return vk && vk->option ? vk->option(id) : otherwise; }
 void rx_option_set(int id, int value) { if (vk && vk->option_set) vk->option_set(id, value); }
-/* (hookshot) the control bridge (host/control.c): the Vulkan back end's, none with WebGPU (0) */
+/* (hookshot) the control bridge (host/control.c): the Vulkan back end's, none without it (0) */
 int rx_control_frame_info(int64_t *presents, int64_t *draws, int *width, int *height) {
     if (!vk || !vk->frame_info) return 0;
     vk->frame_info(presents, draws, width, height);

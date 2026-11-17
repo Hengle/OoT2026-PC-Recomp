@@ -27,6 +27,8 @@
 #include "vk_fsr3fi.h"
 #include "vk_menu.h"
 #include "vk_present_rect.h"
+#include "crt_policy.h"
+#include "vk_gprof.h"
 #include "vk_texture.h"
 
 #include "shaders/fg_copy_comp_spv.h"
@@ -37,6 +39,10 @@
 #include "shaders/fg_scale_pq_comp_spv.h"   // (fg_scale.comp with FG_SCALE_PQ: an RGB10A2 destination)
 #include "shaders/fg_synth_comp_spv.h"
 #include "shaders/hdr_encode_comp_spv.h"
+#include "shaders/crt_downsample_comp_spv.h"
+#include "shaders/crt_lottes_comp_spv.h"
+#include "shaders/crt_hyllian_comp_spv.h"
+#include "shaders/crt_zfast_comp_spv.h"
 #ifndef HOOKSHOT_ENV_H   // (env_on: the switches' one rule)
 #include "ocarina_reborn_env.h"
 #endif
@@ -116,6 +122,7 @@ struct ScaleState {
     Img cropped, scaled, small;   // (small: the picture at 1/8, for ultrawide's blurred menu sides)
     uint32_t cropped_w = 0, cropped_h = 0, scaled_w = 0, scaled_h = 0, small_w = 0, small_h = 0;
     bool pq = false;        // (the images above are RGB10A2, for pq, else RGBA8)
+    VkImageView output_view = VK_NULL_HANDLE;   // the final scale/CRT image, also read by HDR expansion
 } scale;
 
 struct HdrState {   // (hookshot) the HDR10 pass (framegen_hdr)
@@ -142,6 +149,17 @@ int auto_cap() {
 }
 int multiplier() {   // (the Insert menu; 1 Auto (its most); the game's frames alone at 0)
     return opts.framegen == 1 ? auto_cap() : std::clamp(opts.framegen, 1, kMaxMult);
+}
+// (hookshot) A fixed multiplier makes as many frames a game frame as the display can show, m at most, so the game keeps its
+// own rate. Each made frame is a full-size pass on the game's queue and a present of its own, and a frame past the display's
+// refresh never reaches the screen: 8x at 60 fps on a 180 Hz display made 7 frames a game frame for 3 refreshes, the display
+// thread got ~220 presents a second out, the game waited on its sets and fell from 60 to ~28 fps (3440x1440, 2026-11-11).
+// Now: the display's refreshes in the game's frame time (60 fps on 180 Hz: 3, two of them made), 1 (the game's frame alone)
+// at the refresh. An unknown refresh or frame time: m. RX_VK_FRAMEGEN_UNCAPPED=1: m always. (tests/test_framegen_auto.py)
+int fixed_frames(int m, int hz, int64_t game_ns) {
+    if (m <= 1 || hz <= 0 || game_ns <= 0) return std::max(m, 1);
+    const int fit = (int)((double)hz * (double)game_ns / 1e9 + 0.2);   // (+0.2: a game a little over 60 fps on 180 Hz keeps its 3)
+    return std::clamp(fit, 1, m);
 }
 /// Auto: the display's refreshes in the game frame's interval (last, now], next the first not given a frame yet (moved
 /// past them). Each one's place between the two game frames in t (1: this one) and its time in at; most of them at the
@@ -237,7 +255,7 @@ bool init() {
     const int radius = getenv("RX_VK_FRAMEGEN_RADIUS") ? std::clamp(atoi(getenv("RX_VK_FRAMEGEN_RADIUS")), 1, 16) : 8;
     const VkSpecializationMapEntry me{0, 0, 4};
     const VkSpecializationInfo spec{1, &me, 4, &radius};
-    if (!make_pipe(fg.copy, FG_COPY_COMP_SPV, sizeof FG_COPY_COMP_SPV, {S, I}, 16) ||
+    if (!make_pipe(fg.copy, FG_COPY_COMP_SPV, sizeof FG_COPY_COMP_SPV, {S, I}, 28) ||
         !make_pipe(fg.luma, FG_LUMA_COMP_SPV, sizeof FG_LUMA_COMP_SPV, {S, I}, 0) ||
         !make_pipe(fg.flow, FG_FLOW_COMP_SPV, sizeof FG_FLOW_COMP_SPV, {S, S, I}, 0, &spec) ||
         !make_pipe(fg.median, FG_MEDIAN_COMP_SPV, sizeof FG_MEDIAN_COMP_SPV, {S, I}, 0) ||
@@ -269,7 +287,7 @@ bool init_scale() {
     scale.init = scale.failed = true;
     if (!dev.push_descriptor || !vkCmdPushDescriptorSetKHR) return false;
     const VkDescriptorType S = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, I = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
-    if (make_pipe(scale.pipe, FG_SCALE_COMP_SPV, sizeof FG_SCALE_COMP_SPV, {S, I, S}, 48)) {
+    if (make_pipe(scale.pipe, FG_SCALE_COMP_SPV, sizeof FG_SCALE_COMP_SPV, {S, I, S}, 52)) {
         VkSamplerCreateInfo si{VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO};
         si.addressModeU = si.addressModeV = si.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
         si.maxLod = 0.25f;
@@ -406,6 +424,103 @@ void pass(VkCommandBuffer cmd, const Pipe& p, std::initializer_list<std::pair<Vk
     full_barrier(cmd);
 }
 
+// The fixed CRT profiles need no history or LUTs. Only the selected pipeline is made, and no CRT
+// resource is touched while Off (including the normal direct-present path).
+struct CrtState {
+    bool init = false, failed = false;
+    bool tried[3] = {};
+    Pipe downsample, filter[3];
+    VkSampler nearest = VK_NULL_HANDLE, linear = VK_NULL_HANDLE;
+    Img raster, output;
+    uint32_t rw = 0, rh = 0, w = 0, h = 0;
+} crt;
+
+bool init_crt(int filter) {
+    const VkDescriptorType S = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, I = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+    if (!crt.init) {
+        crt.init = crt.failed = true;
+        VkSamplerCreateInfo si{VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO};
+        si.addressModeU = si.addressModeV = si.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_BORDER;
+        si.borderColor = VK_BORDER_COLOR_FLOAT_OPAQUE_BLACK;
+        si.maxLod = 0.0f;
+        if (dev.push_descriptor && vkCmdPushDescriptorSetKHR &&
+            make_pipe(crt.downsample, CRT_DOWNSAMPLE_COMP_SPV, sizeof CRT_DOWNSAMPLE_COMP_SPV, {S, I}, 0)) {
+            if (vkCreateSampler(dev.device, &si, nullptr, &crt.nearest) != VK_SUCCESS) {
+                crt.nearest = VK_NULL_HANDLE;
+            } else {
+                si.magFilter = si.minFilter = VK_FILTER_LINEAR;
+                if (vkCreateSampler(dev.device, &si, nullptr, &crt.linear) == VK_SUCCESS) crt.failed = false;
+                else crt.linear = VK_NULL_HANDLE;
+            }
+        }
+        if (crt.failed) {
+            drop_pipe(crt.downsample);
+            if (crt.nearest) vkDestroySampler(dev.device, crt.nearest, nullptr);
+            if (crt.linear) vkDestroySampler(dev.device, crt.linear, nullptr);
+            crt.nearest = crt.linear = VK_NULL_HANDLE;
+            logf("vk: CRT filter unavailable: its pipeline or samplers could not be made; the unfiltered picture is kept");
+        }
+    }
+    if (crt.failed) return false;
+    if (!crt.tried[filter]) {
+        crt.tried[filter] = true;
+        const uint32_t* code[] = {CRT_LOTTES_COMP_SPV, CRT_HYLLIAN_COMP_SPV, CRT_ZFAST_COMP_SPV};
+        const size_t bytes[] = {sizeof CRT_LOTTES_COMP_SPV, sizeof CRT_HYLLIAN_COMP_SPV, sizeof CRT_ZFAST_COMP_SPV};
+        if (!make_pipe(crt.filter[filter], code[filter], bytes[filter], {S, I}, 36))
+            logf("vk: CRT filter unavailable: shader %d could not be made; the unfiltered picture is kept", filter);
+    }
+    return crt.filter[filter].pipe != VK_NULL_HANDLE;
+}
+
+VkImage record_crt(VkCommandBuffer cmd, VkImageView src, uint32_t sw, uint32_t sh, uint32_t dw, uint32_t dh,
+                   VkImageView& output_view) {
+    const int mode = opts.crt_filter;
+    const auto raster = crt_policy::raster(dw, dh, opts.crt_lines);
+    const int filter = mode <= 2 ? 0 : mode - 2;
+    if (!src || !sw || !sh || !raster.w || !raster.h || !init_crt(filter)) return VK_NULL_HANDLE;
+    if (crt.rw != raster.w || crt.rh != raster.h || crt.w != dw || crt.h != dh) {
+        {
+            std::lock_guard qk(dev.present_mu);
+            device_wait_idle_locked();
+        }
+        drop_img(crt.raster);
+        drop_img(crt.output);
+        crt.rw = crt.rh = crt.w = crt.h = 0;
+        const VkImageUsageFlags sampled = VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+        if (!make_img(crt.raster, raster.w, raster.h, VK_FORMAT_R8G8B8A8_UNORM, sampled) ||
+            !make_img(crt.output, dw, dh, VK_FORMAT_R8G8B8A8_UNORM, sampled | VK_IMAGE_USAGE_TRANSFER_SRC_BIT)) {
+            drop_img(crt.raster);
+            drop_img(crt.output);
+            crt.failed = true;
+            logf("vk: CRT filter unavailable: its images could not be made; the unfiltered picture is kept");
+            return VK_NULL_HANDLE;
+        }
+        crt.rw = raster.w, crt.rh = raster.h, crt.w = dw, crt.h = dh;
+        to_general(cmd, crt.raster.image);
+        to_general(cmd, crt.output.image);
+    }
+    const char* labels[] = {"", "crt-lottes-aperture", "crt-lottes-tv", "crt-hyllian", "crt-zfast"};
+    GprofSpan timing(cmd, labels[mode]);   // existing opt-in GPU counters; no timestamp queries unless requested
+    // Reduce the finished picture, not the 3D before its temporal upscaler. Area weights avoid aliasing
+    // high-resolution detail into the deliberately low-resolution tube raster.
+    pass(cmd, crt.downsample, {{src, crt.nearest}, {crt.raster.view, VK_NULL_HANDLE}}, raster.w, raster.h);
+    const struct { float source[4], output[4]; uint32_t style; } pc{
+        {(float)raster.w, (float)raster.h, 1.0f / raster.w, 1.0f / raster.h},
+        {(float)dw, (float)dh, 1.0f / dw, 1.0f / dh}, (uint32_t)mode};
+    static_assert(sizeof pc == 36);
+    pass(cmd, crt.filter[filter], {{crt.raster.view, mode == 4 ? crt.linear : crt.nearest},
+                                  {crt.output.view, VK_NULL_HANDLE}}, dw, dh, &pc, sizeof pc);
+    static int last_mode = 0;
+    static uint32_t last_w = 0, last_h = 0, last_lines = 0;
+    if (last_mode != mode || last_w != dw || last_h != dh || last_lines != raster.h) {
+        logf("vk: CRT %s: %ux%u virtual raster, %ux%u output; after scaling, before the menu overlays",
+             labels[mode], raster.w, raster.h, dw, dh);
+        last_mode = mode, last_w = dw, last_h = dh, last_lines = raster.h;
+    }
+    output_view = crt.output.view;
+    return crt.output.image;
+}
+
 // (hookshot) The display thread's wait for a frame's time, on a high-resolution timer. sleep_for rests on the system timer,
 // whose 1 ms (timeBeginPeriod) Windows 11 does not keep for a process whose window it takes as unseen: with the presents
 // no longer blocking (a present queue of their own) the thread slept before most frames and woke up to 20 ms after their time.
@@ -430,7 +545,10 @@ static bool present_ahead_wanted(bool env_on, bool pace, int shown, uint32_t spa
     return env_on && pace && shown >= 2 && spare >= (uint32_t)shown;
 }
 
+// (the display thread's: the frames it shows have ultrawide's loading cover in their sides already, framegen_record's copy)
+thread_local bool wide_cover_in_frame = false;
 void display_main() {
+    wide_cover_in_frame = true;
     SetThreadDescription(GetCurrentThread(), L"mkw_vk display");
     SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_ABOVE_NORMAL);
     int64_t interval = 16666667, last_at = 0;
@@ -452,8 +570,9 @@ void display_main() {
         last_at = j.at;
         if (!stat.since) stat.since = j.at;
         if (j.at - stat.since > 5000000000LL) {
-            logf("vk: frame interpolation: %d frames shown on time, %d late (over 2 ms); shown apart: <7 ms %d, 7-9 %d, 9-12 %d, "
-                 "12-17 %d, 17-25 %d, over 25 %d", stat.on_time, stat.late, hist[0], hist[1], hist[2], hist[3], hist[4], hist[5]);
+            logf("vk: frame interpolation: %d frames shown on time, %d late (over 2 ms), %d made ones left out (the game's next "
+                 "frame waiting); shown apart: <7 ms %d, 7-9 %d, 9-12 %d, 12-17 %d, 17-25 %d, over 25 %d", stat.on_time, stat.late,
+                 stat.skipped, hist[0], hist[1], hist[2], hist[3], hist[4], hist[5]);
             memset(hist, 0, sizeof hist);
             stat = {0, 0, 0, j.at};
         }
@@ -488,6 +607,20 @@ void display_main() {
             if (pending[0].used) vkWaitForFences(dev.device, 1, &pending[0].done, VK_TRUE, 100000000ull);   // (100 ms at most)
         }
         for (int k = 0; k < shown; k++) {
+            // (hookshot) A made frame is left out when the game's next frame is already waiting: the display thread behind
+            // the game held its sets, and the game waited for them (the game's rate fell, frame generation on). The set's
+            // game frame is always shown. Not with present ahead: its copies are already on their way
+            if (!ahead && (timed ? !j.set->game[k] : k < j.set->made)) {
+                bool newer;
+                {
+                    std::lock_guard lk(fg.mu);
+                    newer = !fg.jobs.empty();
+                }
+                if (newer) {
+                    stat.skipped++;
+                    continue;
+                }
+            }
             int64_t due = timed ? j.set->due[k] : pace ? next_show : 0;
             const int64_t now = now_ns();
             if (due < now) due = now;
@@ -570,12 +703,15 @@ bool framegen_on() {
 // that the frame draws no world (vk_draw.cpp world_drawn_at), as a pause, the map, a loading screen or a movie
 // does not (3 presents' grace for a frame the world skips). The middle is centred: its right edge is 1 - x0. One 8-byte atomic: the
 // frame generation's display thread reads it (framegen_scale) while the replay thread writes it (wide_sides_tick)
-struct WideSides { float x0 = 0.0f; int side = 0; };
+struct WideSides { float x0 = 0.0f; uint16_t side = 0, cover = 0; };   // (cover: of 65535)
+// (KEEP_VTABLES 1 and 3: the pause and map menus. 0, the item wheel's background, and 2, the fades, keep covering the whole picture)
+constexpr uint32_t kMenus = 0xa;
 std::atomic<bool> wide_possible{false};   // (a margin and the setting on: vk_replay.cpp takes the scale pass's path for the sides)
-WideSides wide_sides() {
+WideSides wide_sides(float cover) {
     WideSides w;
     if (!host || !host->wide_menus) return w;
-    // (KEEP_VTABLES 1 and 3: the pause and map menus. 0, the item wheel's background, and 2, the fades, keep covering the whole picture)
+    // (KEEP_VTABLES 1 and 3: the pause / system menus and the loading fade, whose layout host/hos_wide_ui.c then places as the
+    // HUD's. 0, the item wheel's background, and 2, the event fade, keep covering the whole picture)
     constexpr uint32_t kMenus = 0xa;
     const float margin = host->wide_menus(opts.wide_menus ? 0xfu & ~kMenus : 0xfu);
     extern std::atomic<int64_t> world_drawn_at;
@@ -586,7 +722,17 @@ WideSides wide_sides() {
     const bool no_world = presents_now - world_drawn_at.load(std::memory_order_relaxed) > 3 &&
                           presents_now - wheel_drawn_at.load(std::memory_order_relaxed) > 3;
     wide_possible.store(opts.wide_menus && margin > 0.0f, std::memory_order_relaxed);
-    if (opts.wide_menus && margin > 0.0f && no_world) w.x0 = margin, w.side = opts.wide_menus;
+    if (opts.wide_menus && margin > 0.0f && no_world) w.x0 = margin, w.side = (uint16_t)opts.wide_menus;
+    // (the loading cover between two areas is drawn in the middle like the menus, and the world is drawn again under it before
+    // it opens: the sides showed the new area beside a black middle, issue 2220. While it shows, the sides are closed by as
+    // much as the cover is, fg_scale.comp's cover, with the world drawn or not)
+    if (opts.wide_menus && margin > 0.0f && cover > 0.0f) w.x0 = margin, w.cover = (uint16_t)std::lround(std::min(cover, 1.0f) * 65535.0f);
+    static bool covered = false;
+    if ((w.cover != 0) != covered) {
+        covered = w.cover != 0;
+        logf("vk: ultrawide loading cover %s at present %lld (the world last drawn at present %lld)", covered ? "shows" : "gone",
+             (long long)presents_now, (long long)world_drawn_at.load(std::memory_order_relaxed));
+    }
     static int told = 0;
     if (w.side != told) {   // (each change logged: a report of blurred sides in play says when they came and went)
         logf("vk: ultrawide menu sides %s at present %lld (the world last drawn at present %lld)", w.side ? "on" : "off",
@@ -596,11 +742,14 @@ WideSides wide_sides() {
     return w;
 }
 std::atomic<WideSides> wide_now;   // (wide_sides_tick's, each present)
+// (the middle 16:9's left edge while Ultrawide menus has the menus there and the picture is wider, as wide_sides has it; else 0)
+float wide_margin() { return opts.wide_menus && host && host->wide_menus ? host->wide_menus(0xfu & ~kMenus) : 0.0f; }
 bool wide_sides_possible() { return wide_possible.load(std::memory_order_relaxed); }
 
 VkImage framegen_scale(VkCommandBuffer cmd, VkImageView src, VkImage image, uint32_t sw, uint32_t sh, const int crop[4], uint32_t dw, uint32_t dh,
                        bool pq) {
-    const WideSides wide = wide_now.load(std::memory_order_relaxed);   // (wide_sides_tick, each present)
+    WideSides wide = wide_now.load(std::memory_order_relaxed);   // (wide_sides_tick, each present)
+    if (wide_cover_in_frame) wide.cover = 0;
     // (Ocarina Reborn: a look or bloom needs the pass too. Not on the game's own HDR10 picture (pq): its PQ codes are not
     // the colours the grade, the glow and FXAA are made for)
     const int look = pq ? 0 : std::clamp(ocr_look, 0, 5);
@@ -613,15 +762,17 @@ VkImage framegen_scale(VkCommandBuffer cmd, VkImageView src, VkImage image, uint
     // (a picture larger than the window takes the pass even with the filter Off: the blit's linear filter reads 2 x 2 of the
     // picture whatever the shrink, and fine detail shimmered)
     const bool shrink = source.w > dw || source.h > dh;
-    if (!opts.upscale && !opts.sharpness && !wide.side && !shrink && !look && bloom <= 0 && !fxaa) return VK_NULL_HANDLE;
-    if (!init_scale()) return VK_NULL_HANDLE;
+    const bool scaling = opts.upscale || opts.sharpness || wide.side || wide.cover || shrink || look || bloom > 0 || fxaa;
+    const bool tube = crt_policy::enabled(opts.crt_filter, pq);
+    if (!scaling && !tube) return VK_NULL_HANDLE;
+    if (scaling && !init_scale()) return VK_NULL_HANDLE;
     // (pq: the game's own HDR10 picture (Native HDR), PQ codes in RGB10A2. Scaled into RGB10A2 images by fg_scale_pq: through
     // the RGBA8 ones its codes lost two bits, banding in the dark. Without that pass it is shown unscaled. The images made for
     // the other format are made again)
     if (pq && !scale.pq_tried) {
         scale.pq_tried = true;
         const VkDescriptorType S = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, I = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
-        if (!make_pipe(scale.pipe_pq, FG_SCALE_PQ_COMP_SPV, sizeof FG_SCALE_PQ_COMP_SPV, {S, I, S}, 48))
+        if (!make_pipe(scale.pipe_pq, FG_SCALE_PQ_COMP_SPV, sizeof FG_SCALE_PQ_COMP_SPV, {S, I, S}, 52))
             logf("vk: the 10-bit window scaling pass could not be made: Native HDR's picture is shown unscaled");
     }
     if (pq && !scale.pipe_pq.pipe) return VK_NULL_HANDLE;
@@ -667,6 +818,9 @@ VkImage framegen_scale(VkCommandBuffer cmd, VkImageView src, VkImage image, uint
         full_barrier(cmd);
         src = scale.cropped.view;
     }
+    // With no window effect, the CRT itself maps the finished game image to the output pixel grid.
+    // Avoid an otherwise redundant full-size scale image and dispatch.
+    if (!scaling) return record_crt(cmd, src, source.w, source.h, dw, dh, scale.output_view);
     if (scale.scaled_w != dw || scale.scaled_h != dh) {
         {
             std::lock_guard qk(dev.present_mu);   // (the queue is idle only while nothing else submits to it)
@@ -685,9 +839,9 @@ VkImage framegen_scale(VkCommandBuffer cmd, VkImageView src, VkImage image, uint
         to_general(cmd, scale.scaled.image);
     }
     static const float looks[6][4] = {{1.0f, 1.0f, 0.0f, 0.0f}, {1.12f, 1.06f, 0.03f, 0.18f}, {1.25f, 1.10f, 0.0f, 0.0f}, {1.05f, 1.03f, 0.07f, 0.12f}, {1.05f, 1.04f, -0.05f, 0.10f}, {0.92f, 1.12f, 0.02f, 0.30f}};
-    struct { int mode; float sharp; float x0, x1; int side; float sat, contrast, warm, vignette; int look; float bloom; int fxaa; } pc{
+    struct { int mode; float sharp; float x0, x1; int side; float sat, contrast, warm, vignette; int look; float bloom; int fxaa; float cover; } pc{
         opts.upscale, opts.sharpness / 100.0f, wide.x0, 1.0f - wide.x0, wide.side,
-        looks[look][0], looks[look][1], looks[look][2], looks[look][3], look, bloom, fxaa};
+        looks[look][0], looks[look][1], looks[look][2], looks[look][3], look, bloom, fxaa, wide.cover / 65535.0f};
     if (wide.side == 1 || bloom > 0) {   // (the blurred sides, and Ocarina Reborn's Bloom: first the picture at 1/8, each pixel the mean of its 8 x 8, which they blur)
         // (from #1448's checked source rectangle, as the crop above: the picture src now holds)
         const uint32_t smw = std::max(1u, source.w / 8), smh = std::max(1u, source.h / 8);
@@ -721,10 +875,13 @@ VkImage framegen_scale(VkCommandBuffer cmd, VkImageView src, VkImage image, uint
              opts.upscale, opts.sharpness, sw, sh, crop ? crop[0] : 0, crop ? crop[1] : 0,
              crop ? crop[2] : (int)sw, crop ? crop[3] : (int)sh, dw, dh);
     }
+    if (tube)
+        if (const VkImage filtered = record_crt(cmd, scale.scaled.view, dw, dh, dw, dh, scale.output_view)) return filtered;
+    scale.output_view = scale.scaled.view;
     return scale.scaled.image;
 }
 
-VkImageView framegen_scaled_view() { return scale.scaled.view; }
+VkImageView framegen_scaled_view() { return scale.output_view; }
 
 /// (hookshot) The Insert menu's HDR: src's crop to a dw x dh HDR10 image (PQ, Rec. 2020, 10 bits), to be copied into an HDR10
 /// swapchain's image as the SDR picture is (shaders/hdr_encode.comp); null when it cannot be made (then the SDR picture;
@@ -781,7 +938,7 @@ VkImage framegen_made_image(uint32_t* w, uint32_t* h) {
 /// the scene's depth and motion (vk_fsr3_inputs.h): 1 when it made it into set.frame[0], 0 when it did not (no inputs this
 /// present, a reset, anything not made), which leaves the set to the interpolation below. sequence: framegen_record's count
 /// of its presents (one it did not hand over, a gap among them, makes the next one a reset: vk_fsr3fi.h Inputs::sequence)
-int fsr3fi_frame(VkCommandBuffer cmd, OutSet& set, int cur, uint32_t uw, uint32_t uh, uint64_t sequence) {
+int fsr3fi_frame(VkCommandBuffer cmd, OutSet& set, int cur, uint32_t uw, uint32_t uh, uint64_t sequence, bool native_pq) {
     // (every 600 presents asked: how many FSR made, and how many it left to the interpolation below and why)
     static uint64_t asked = 0, made = 0, no_inputs = 0;
     if (++asked % 600 == 0)
@@ -794,6 +951,8 @@ int fsr3fi_frame(VkCommandBuffer cmd, OutSet& set, int cur, uint32_t uw, uint32_
     in.color = fg.frames[cur].view;
     in.color_image = fg.frames[cur].image;
     in.color_format = VK_FORMAT_R8G8B8A8_UNORM;   // (ensure_size, for fg.frames)
+    in.native_pq = native_pq;
+    in.max_luminance = native_pq ? (float)std::clamp(opts.hdr_peak, 400, 10000) : 1.0f;
     in.width = uw, in.height = uh;
     in.depth = f.depth, in.motion = f.motion;
     in.render_width = f.width, in.render_height = f.height;
@@ -816,7 +975,7 @@ int fsr3fi_frame(VkCommandBuffer cmd, OutSet& set, int cur, uint32_t uw, uint32_
     return 1;
 }
 
-bool framegen_record(VkCommandBuffer cmd, VkImageView src, uint32_t sw, uint32_t sh, const int crop[4]) {
+bool framegen_record(VkCommandBuffer cmd, VkImageView src, uint32_t sw, uint32_t sh, const int crop[4], float cover, bool native_pq) {
     const PresentSourceRect source = present_source_rect(sw, sh, crop);
     const int x0 = (int)source.x, y0 = (int)source.y, w = (int)source.w, h = (int)source.h;
     if (!src || w <= 0 || h <= 0 || !init() || !ensure_size(cmd, (uint32_t)w, (uint32_t)h)) return false;
@@ -860,8 +1019,14 @@ bool framegen_record(VkCommandBuffer cmd, VkImageView src, uint32_t sw, uint32_t
     const uint32_t uw = (uint32_t)w, uh = (uint32_t)h;
     const uint32_t qw = (uw + 3) / 4, qh = (uh + 3) / 4, cw = (qw + 3) / 4, ch = (qh + 3) / 4;
     full_barrier(cmd);
-    const int32_t pc[4] = {x0, y0, w, h};
-    pass(cmd, fg.copy, {{src, fg.nearest}, {fg.frames[cur].view, VK_NULL_HANDLE}}, uw, uh, pc, sizeof pc);
+    // (ultrawide's loading cover, wide_sides: the sides closed in the copy, before the frames between are made from it, so
+    // that whichever interpolation makes them treats the sides as it does the middle; the display thread's scale pass then
+    // leaves them as they are, wide_cover_in_frame)
+    const float edge = cover > 0.0f ? wide_margin() : 0.0f;
+    extern std::atomic<bool> present_native_pq;   // (vk_replay.cpp do_present: the game presents its own HDR10 picture, Native)
+    const struct { int32_t rect[4]; float x0, cover; int32_t pq; } pc = {{x0, y0, w, h}, edge, edge > 0.0f ? std::min(cover, 1.0f) : 0.0f,
+                                                                         present_native_pq.load(std::memory_order_relaxed)};
+    pass(cmd, fg.copy, {{src, fg.nearest}, {fg.frames[cur].view, VK_NULL_HANDLE}}, uw, uh, &pc, sizeof pc);
     pass(cmd, fg.luma, {{fg.frames[cur].view, fg.nearest}, {fg.lumas[cur].view, VK_NULL_HANDLE}}, qw, qh);
     set->made = 0;
     set->shown = -1;
@@ -919,19 +1084,35 @@ bool framegen_record(VkCommandBuffer cmd, VkImageView src, uint32_t sw, uint32_t
     FgMaker maker = set->made ? FgMaker::Dlss : FgMaker::None;
     // (hookshot) At 2x, AMD FSR 3.1's frame interpolation where it runs; it makes the midpoint only, so 3x and more (and Auto,
     // above) stay with the interpolation below, as does any present it does not take
-    if (set->made == 0 && blend && m == 2 && fsr3fi::frames_wanted()) set->made = fsr3fi_frame(cmd, *set, cur, uw, uh, sequence);
+    // (hookshot) the frames this game frame gets: as many as the display shows (fixed_frames), DLSS's own above excepted
+    static const bool uncapped = getenv("RX_VK_FRAMEGEN_UNCAPPED") && atoi(getenv("RX_VK_FRAMEGEN_UNCAPPED")) != 0;
+    const int mk = uncapped ? m : fixed_frames(m, (display_refresh_mhz() + 500) / 1000, fg.game_ns);
+    {
+        static int said = -1;
+        static int64_t said_at = 0;
+        if (mk != said && (said < 0 || now - said_at > 5000000000LL)) {
+            if (mk < m)
+                logf("vk: frame interpolation: %dx asked, %dx made: the display's %d Hz over the game's %.0f fps (the game keeps its "
+                     "rate; RX_VK_FRAMEGEN_UNCAPPED=1: all)", m, mk, (display_refresh_mhz() + 500) / 1000,
+                     fg.game_ns > 0 ? 1e9 / (double)fg.game_ns : 0.0);
+            else if (said >= 0)
+                logf("vk: frame interpolation: %dx made", mk);
+            said = mk, said_at = now;
+        }
+    }
+    if (set->made == 0 && blend && mk == 2 && fsr3fi::frames_wanted()) set->made = fsr3fi_frame(cmd, *set, cur, uw, uh, sequence, native_pq);
     if (maker == FgMaker::None && set->made) maker = FgMaker::Fsr3;
-    if (set->made == 0 && blend && m > 1) {
+    if (set->made == 0 && blend && mk > 1) {
         pass(cmd, fg.flow, {{fg.lumas[prev].view, fg.nearest}, {fg.lumas[cur].view, fg.nearest},
                             {fg.flows[0].view, VK_NULL_HANDLE}}, cw, ch);
         pass(cmd, fg.median, {{fg.flows[0].view, fg.nearest}, {fg.flows[1].view, VK_NULL_HANDLE}}, cw, ch);
-        for (int k = 1; k < m; k++) {
-            const float t = (float)k / (float)m;
+        for (int k = 1; k < mk; k++) {
+            const float t = (float)k / (float)mk;
             pass(cmd, fg.synth, {{fg.frames[prev].view, fg.linear}, {fg.frames[cur].view, fg.linear},
                                  {fg.flows[1].view, fg.nearest}, {set->frame[k - 1].view, VK_NULL_HANDLE}},
                  uw, uh, &t, 4);
         }
-        set->made = m - 1;
+        set->made = mk - 1;
         maker = FgMaker::BuiltIn;
     }
     note_maker(maker);
@@ -956,6 +1137,19 @@ void framegen_queue(uint64_t value) {
 }
 
 /// Each present (vk_replay.cpp): ultrawide's menu setting to the game's side, and the sides to treat now
-void wide_sides_tick() { wide_now = wide_sides(); }
+void wide_sides_tick(float cover) { wide_now = wide_sides(cover); }
+// (the reading is of the frame the game works on, which is the presented one or the one after it as its threads fall (measured:
+// an opening cover read a present ahead of the picture through one area's entry, and by none or one through another's). So a
+// frame's sides are closed by the larger of its reading and the one before: never more open than the middle, at most a frame
+// behind it)
+float wide_cover_held(float now) {
+    static float before = 0.0f;   // (the game's presenting thread's alone)
+    const float cover = std::max(now, before);
+    before = now;
+    return cover;
+}
+float wide_cover_sample() {
+    return wide_cover_held(host && host->wide_cover && wide_possible.load(std::memory_order_relaxed) ? host->wide_cover() : 0.0f);
+}
 
 } // namespace mkwvk

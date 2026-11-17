@@ -5,16 +5,19 @@
    guest main thread, run every module's DT_INIT in rtld's order (the SDK crt's _init: TLS registration with musl,
    then the module's constructors), then nninitStartup and nnMain.
 
-   Usage: <game>.exe [image.bin] [--romfs <dir>] [--user <dir>] [--trace] [--prepare-shaders]
+   Usage: <game>.exe [image.bin] [--romfs <dir>] [--user <dir>] [--trace] [--prepare-shaders] [--compile-shaders all|most]
    Environment: HOS_TRACE=1 (log HLE calls), HOS_MEMORY_MB (memory the game is told it has),
                 HOS_NVN_CONTINUE=1 (go on past nvnBootstrapLoader). */
 #include "hos.h"
 #include "ocr_diagnostics.h"
+#include "save_backup.h"
 #ifndef HOOKSHOT_ENV_H   /* (env_on: the switches' one rule) */
 #include "../gpu/vk/compat/ocarina_reborn_env.h"
 #endif
 #include "hos_paths.h"
 #include "ocr_instance.h"
+#include "game_layout.h"
+#include "options_path.h"
 #include "hos_wide_size.h"   /* (the widescreen picture's size, shared with the Insert menu) */
 #include "../gpu/vk/vk_api.h"
 #include "../gpu/vk/oot_cheat_items.h"
@@ -77,6 +80,22 @@ static void no_power_throttling(void) {
 }
 #endif
 
+/* (hookshot) HOS_PROCESS_PRIORITY=0 normal, 1 above normal (default), 2 high: the process's own priority class while it runs (Windows puts
+   it back when it exits). The game's threads run at the normal level, as the foreground window's threads do, and Windows raises
+   those for a while on their window's events: on the terrace the 40-90 ms stalls came with another app's interface busy
+   (its renderer 53 % of a core in the seconds with a stall against 6 % otherwise, hs205), the game's threads waiting, its
+   render thread pinned to one core */
+#ifdef _WIN32
+static void process_priority(void) {
+    const char *e = getenv("HOS_PROCESS_PRIORITY");
+    const int level = e ? atoi(e) : 1;   /* (above normal by default since hs206-hs209, the same route alternated: frames >= 40 ms
+                                             6 and 7 against 17 and 10, gaps >= 28 ms 23 and 21 against 34 and 27, the terrace's
+                                             repeats 0.51 and 0.36 a second against 0.65 and 0.55) */
+    const DWORD cls = level >= 2 ? HIGH_PRIORITY_CLASS : level == 1 ? ABOVE_NORMAL_PRIORITY_CLASS : NORMAL_PRIORITY_CLASS;
+    if (level > 0 && SetPriorityClass(GetCurrentProcess(), cls)) hos_log("process priority class: %s", level >= 2 ? "high" : "above normal");
+}
+#endif
+
 int hos_game_is_mkw(void) { return !strcmp(hos_main_build_id, "d00e4f399e411d0613aa8d26b1c02fef"); }
 
 /* gen/hos_image.c (build.py lift) */
@@ -131,23 +150,17 @@ static int reserve_guest(void) {
     hos_space_end = (uint64_t)(uintptr_t)&__global_base & ~0xFFFFULL;
     return hos_space_end >= (1ULL << 30);
 #elif defined(_WIN32)
-    /* Committed but untouched pages cost no physical memory. Write-watched: the renderer's buffer cache asks which
-       pages changed (GetWriteWatch) so that it uploads only those (soft write watch builds mark pages themselves). */
-#if defined(A64_WRITE_TRACK)
-    const DWORD watch = 0;
+    /* Committed but untouched pages cost no physical memory. Not write-watched: lifted stores and host writes mark
+       their pages themselves (the soft write watch, rt/a64.h A64_MARK), and the renderer reads those marks. */
     if (env_on("HOS_LARGE_PAGES") && reserve_large(GUEST_SPACE) == (void *)A64_HOST_BASE) {
         hos_large_pages = 1;
         hos_log("mem: the guest window is in large pages (%llu MB)", (unsigned long long)(GUEST_SPACE >> 20));
         return 1;
     }
-#else
-    const DWORD watch = MEM_WRITE_WATCH;
-#endif
-    /* mkw-recomp: 512 GB reserved (write-watched: the renderer's change tracking, a 16 MB bitmap), committed as the
-       runtime hands memory out (hos_commit) or on first touch */
+    /* mkw-recomp: 512 GB reserved, committed as the runtime hands memory out (hos_commit) or on first touch */
     void hos_commit_init(void);
     hos_commit_init();
-    return VirtualAlloc((void *)A64_HOST_BASE, GUEST_SPACE, MEM_RESERVE | watch, PAGE_NOACCESS) == (void *)A64_HOST_BASE;
+    return VirtualAlloc((void *)A64_HOST_BASE, GUEST_SPACE, MEM_RESERVE, PAGE_NOACCESS) == (void *)A64_HOST_BASE;
 #else
     /* (linux) the whole window readable and writable at once, its pages made as they are first touched (no commit
        step: MAP_NORESERVE). Decommitting is madvise (host/posix/win32_posix.c VirtualFree): the pages read as zero. */
@@ -236,7 +249,7 @@ int hos_posix_guest_discard(void *p, size_t n) {
 }
 #endif
 
-/* The guest window, for the renderer (gpu/render/rx_buffer.cpp). */
+/* The guest window, for the renderer (MkwVkHost.guest_base and guest_size, host/rx_backend.c). */
 uint8_t *hos_guest_base(void) { return A64_MEM; }
 uint64_t hos_guest_size(void) { return GUEST_SPACE; }
 
@@ -257,7 +270,6 @@ static void call_guest(Ctx *c, uint64_t addr, uint64_t sp, const char *what) {
     call_guest_args(c, addr, sp, what);
 }
 
-void hos_update_check(void);   /* (host/hos_update.c) */
 #ifndef _WIN32
 /* (linux) Saves live in $XDG_DATA_HOME/ocarina_reborn (~/.local/share/hookshot), so a rebuilt game folder still finds them.
    A user/ folder beside the executable from before is moved there the first time, entry by entry. Anything that
@@ -385,23 +397,46 @@ static const char *saves_dir(const char *beside) {
     char real[MAX_PATH];
     move_old = realpath(beside, real), move_from = beside, move_new = dir;
     /* (looked at first, then moved: with an entry the new place has already, the old place is kept, and it keeps them all.
-       The others used to go all the same, and the game then ran here without them) */
+       The others used to go all the same, and the game then ran here without them. So does one that cannot go, a copy that
+       fails (a full disk): the entries that went before it come back, and a copied one's old place goes only once all are
+       there. They used to stay in the new place, and the next start found them there and kept the old place without them) */
+    struct { char *name; int copied; } *went = NULL;
+    size_t n_went = 0;
     for (int move = 0; move < 2 && !kept; move++) {
         WIN32_FIND_DATAA fd;
         HANDLE h = FindFirstFileA(pattern, &fd);
         if (h == INVALID_HANDLE_VALUE) return dir;
         do {
-            if (!strcmp(fd.cFileName, ".") || !strcmp(fd.cFileName, "..")) continue;
+            if (!strcmp(fd.cFileName, ".") || !strcmp(fd.cFileName, "..") || (move && kept)) continue;
             char from[MAX_PATH], to[MAX_PATH];
             snprintf(from, sizeof from, "%s" SEP_S "%s", beside, fd.cFileName);
             snprintf(to, sizeof to, "%s" SEP_S "%s", dir, fd.cFileName);
-            if (!move) kept += GetFileAttributesA(to) != INVALID_FILE_ATTRIBUTES;
-            else if (!has_link(from) && MoveFileExA(from, to, 0)) moved++;
-            else if (copy_tree(from, to)) delete_tree(from), moved++;
-            else delete_tree(to), kept++;
+            if (!move) {
+                kept += GetFileAttributesA(to) != INVALID_FILE_ATTRIBUTES;
+                continue;
+            }
+            void *more = realloc(went, (n_went + 1) * sizeof *went);
+            char *name = more ? strdup(fd.cFileName) : NULL;
+            if (more) went = more;
+            if (!name) kept++;
+            else if (!has_link(from) && MoveFileExA(from, to, 0)) went[n_went].name = name, went[n_went++].copied = 0;
+            else if (copy_tree(from, to)) went[n_went].name = name, went[n_went++].copied = 1;
+            else delete_tree(to), free(name), kept++;
         } while (FindNextFileA(h, &fd));
         FindClose(h);
     }
+    for (size_t i = 0; i < n_went; i++) {
+        char from[MAX_PATH], to[MAX_PATH];
+        snprintf(from, sizeof from, "%s" SEP_S "%s", beside, went[i].name);
+        snprintf(to, sizeof to, "%s" SEP_S "%s", dir, went[i].name);
+        if (!kept) {
+            moved++;
+            if (went[i].copied) delete_tree(from);
+        } else if (went[i].copied) delete_tree(to);
+        else if (!MoveFileExA(to, from, 0)) hos_log("saves: %s could not come back to %s", to, from);
+        free(went[i].name);
+    }
+    free(went);
     if (kept) {
         hos_log("saves: %d of %s's entries could not go to %s: the saves stay in %s", kept, beside, dir, beside);
         return beside;
@@ -428,14 +463,17 @@ static const char *saves_dir(const char *beside) {
    HOS_ENV_FILE=<path> reads that file instead: a scripted or A/B test run brings its own switches and leaves the
    player's ocarina_reborn_env.txt as it is.
    (hookshot) ocarina_reborn_env.txt is a file players pass around, so it sets only the game's own switches (RX_, HOS_,
-   HOOKSHOT_, EDEN_, NVN_ and SDL_ names), never HOS_ENV_FILE or SDL's library override, and no value that is a
-   path but RX_VK_DLSS_DIR's: the system's variables (the Vulkan loader's layers, PATH and the like) can load code, and
-   the dump switches write files where they name. The file HOS_ENV_FILE names sets anything. */
+   HOOKSHOT_, EDEN_, NVN_ and SDL_ names), never HOS_ENV_FILE, HOS_CONTROL_PEER_SID or SDL's library override, and no
+   value that is a path but RX_VK_DLSS_DIR's: the system's variables (the Vulkan loader's layers, PATH and the like) can
+   load code, and the dump switches write files where they name. The file HOS_ENV_FILE names sets anything. */
 static int env_line_allowed(const char *name, const char *value) {
     static const char *const prefixes[] = {"RX_", "HOS_", "HOOKSHOT_", "EDEN_", "NVN_", "SDL_"};
     int ok = 0;
     for (size_t i = 0; i < sizeof prefixes / sizeof *prefixes; i++) ok |= !strncmp(name, prefixes[i], strlen(prefixes[i]));
     if (!ok || !strcmp(name, "HOS_ENV_FILE") || !strcmp(name, "SDL_DYNAMIC_API")) return 0;
+    /* (hookshot) nor HOS_CONTROL_PEER_SID: it lets one more account into the control bridge's pipe (host/control.c), so a
+       shared file would let another user of this PC steer the game and read its memory. The environment still sets it */
+    if (!strcmp(name, "HOS_CONTROL_PEER_SID")) return 0;
     /* (hookshot) nor the libraries SDL loads by name (SDL_VULKAN_LIBRARY, SDL_OPENGL_LIBRARY, SDL_VIDEO_GL_DRIVER,
        SDL_VIDEO_EGL_DRIVER...): a bare file name is looked for beside the game and in the current folder on Windows */
     if (!strncmp(name, "SDL_", 4) && (strstr(name, "_LIB") || strstr(name, "GL_DRIVER"))) return 0;
@@ -451,7 +489,7 @@ static int env_line_allowed(const char *name, const char *value) {
        the file select) */
     static const char *const by_name[] = {
         "HOS_AUDIO_DUMP", "HOS_AUDIO_WB_DUMP", "HOS_SHADER_DUMP", "HOS_FS_OVERLAY", "HOS_MODS", "HOS_INPUT_LIVE",
-        "HOS_INPUT_SCRIPT", "HOS_SAMPLE_ALL", "HOS_CHAIN", "HOS_WATCH", "HOOKSHOT_BUILDER_HOME", "RX_VK_SHOTS", "RX_VK_SHOT_GO",
+        "HOS_INPUT_SCRIPT", "HOS_SAMPLE_ALL", "HOS_CHAIN", "HOS_WATCH", "HOS_CRASH_TEST", "HOOKSHOT_BUILDER_HOME", "RX_VK_SHOTS", "RX_VK_SHOT_GO",
         "RX_VK_FRAMELOG", "RX_VK_HANG_DUMP", "RX_VK_DUMP", "RX_VK_DUMP_SPV", "RX_VK_DUMP_MESH_SPV", "RX_VK_DUMP_STAGES",
         "RX_VK_DUMP_FAILED", "RX_VK_IR", "RX_VK_MENU_SCRIPT", "RX_DUMP_WGSL", "RX_DUMP_SLOW_WGSL", "RX_DUMP_TICS",
         "RX_WGSL_OVERRIDE"};
@@ -463,18 +501,28 @@ static int env_line_allowed(const char *name, const char *value) {
     const int drive = ((value[0] | 0x20) >= 'a' && (value[0] | 0x20) <= 'z' && value[1] == ':');
     return !strpbrk(value, "/\\") && !drive && value[0] != '~' && strcmp(value, ".") && strcmp(value, "..");
 }
+/* (hookshot) what the file gave, for the log's second line: a player could not tell whether the file was read
+   ("idk if it's doing something or not"). Kept here: the log is opened after the file is read */
+static char hookshot_env_note[1024];
 static void load_ocarina_reborn_env(void) {
     char path[MAX_PATH + 32];
     const char *other = getenv("HOS_ENV_FILE");
+    FILE *f = NULL;
     if (other && *other) {
         snprintf(path, sizeof path, "%s", other);
+        f = fopen(path, "r");
     } else {
         DWORD n = hos_game_path_a(path, MAX_PATH);
         while (n && path[n - 1] != 92 && path[n - 1] != 47) n--;
         memcpy(path + n, "ocarina_reborn_env.txt", sizeof "ocarina_reborn_env.txt");
+        f = fopen(path, "r");
+        /* (Notepad with the extensions hidden saves "ocarina_reborn_env.txt" as ocarina_reborn_env.txt.txt: taken too) */
+        if (!f) memcpy(path + n, "ocarina_reborn_env.txt.txt", sizeof "ocarina_reborn_env.txt.txt"), f = fopen(path, "r");
     }
-    FILE *f = fopen(path, "r");
-    if (!f) return;
+    if (!f) {
+        snprintf(hookshot_env_note, sizeof hookshot_env_note, "env: no ocarina_reborn_env.txt beside the game (none read)");
+        return;
+    }
     /* The environment the game was started with wins over the file: a switch set for one launch (HOS_FULLSCREEN=0 in a
        shell, a script's RX_VK_PACE=1) beats the same name saved in the file. The file's own later lines still replace its
        earlier ones: the names it set are kept here (for the whole run: a second read sets them again), so they are not taken
@@ -482,6 +530,9 @@ static void load_ocarina_reborn_env(void) {
     static char from_file[256][128];   /* (names of up to 127 characters; a file with more names than this has its later
                                           lines for the names past it taken as the environment's, logged as left out) */
     static int from_file_n;
+    const char *base = path + strlen(path);
+    while (base > path && base[-1] != 92 && base[-1] != 47) base--;
+    int used = snprintf(hookshot_env_note, sizeof hookshot_env_note, "env: %s read:", base), count = 0;
     char line[512];
     while (fgets(line, sizeof line, f)) {
         char *s = line;
@@ -505,6 +556,9 @@ static void load_ocarina_reborn_env(void) {
         }
         if (!ours && from_file_n < (int)(sizeof from_file / sizeof *from_file) && strlen(s) < sizeof from_file[0])
             strcpy(from_file[from_file_n++], s);
+        if (used > 0 && used < (int)sizeof hookshot_env_note - 1)
+            used += snprintf(hookshot_env_note + used, sizeof hookshot_env_note - (size_t)used, " %s", s);
+        count++;
 #ifdef _WIN32
         *eq = '=';
         _putenv(s);
@@ -513,6 +567,7 @@ static void load_ocarina_reborn_env(void) {
 #endif
     }
     fclose(f);
+    if (!count) snprintf(hookshot_env_note + used, sizeof hookshot_env_note - (size_t)used, " no NAME=VALUE line");
 }
 
 /* Switches this build no longer reads, still set (in the environment or ocarina_reborn_env.txt, as older issues told players):
@@ -743,17 +798,40 @@ static void oot_inventory_refresh(Ctx *c, int64_t now) {
         }
     }
     if (!probed && oot_pouch_count(c, "Item_DekuSeed") >= 0) {
-        probed = 1;   /* (one line naming every count, both spellings: which names the pouch knows) */
+        probed = 1;   /* (each editor value, plus the alternative pouch spellings) */
         static const char *const probes[] = {OOT_CHEAT_ITEM_PROBES};
         const unsigned total = (unsigned)(OOT_ITEM_COUNT + sizeof probes / sizeof probes[0]);
         char line[512];
         size_t used = 0;
         for (unsigned i = 0; i < total; i++) {   /* (several short lines: the log cuts long ones) */
             const char *name = i < OOT_ITEM_COUNT ? oot_item_names[i] : probes[i - OOT_ITEM_COUNT];
-            used += (size_t)snprintf(line + used, sizeof line - used, " %s=%d", name, oot_pouch_count(c, name));
+            const int count = i < OOT_ITEM_COUNT ? oot_item_count(c, name) : oot_pouch_count(c, name);
+            used += (size_t)snprintf(line + used, sizeof line - used, " %s=%d", name, count);
             if (used > 300 || i + 1 == total) hos_log("cheats: inventory probe:%s", line), used = 0;
         }
     }
+}
+
+/* Learned songs use saved IsGet.<actor> Bool flags rather than pouch quantities.
+   These are their MurmurHash3 x86-32 hashes with seed 0. */
+static uint32_t oot_song_flag(const char *name) {
+    static const struct { const char *name; uint32_t hash; } songs[] = {
+        {"Item_Melody_ZeldaLullaby", 0x01c20002u},
+        {"Item_Melody_EponaSong", 0xb492ac33u},
+        {"Item_Melody_SariaSong", 0xd3f8bfccu},
+        {"Item_Melody_SunSong", 0x165dd1adu},
+        {"Item_Melody_TimeSong", 0x03b3450eu},
+        {"Item_Melody_StormSong", 0x2b39dd4fu},
+        {"Item_Melody_ForestMinuet", 0xdc0a0b54u},
+        {"Item_Melody_FireBolero", 0x49041ab9u},
+        {"Item_Melody_WaterSerenade", 0x3fa63986u},
+        {"Item_Melody_ShadowNocturne", 0xc2fb95f4u},
+        {"Item_Melody_SpiritRequiem", 0x802a36a8u},
+        {"Item_Melody_LightPrelude", 0xd6320ba4u},
+    };
+    for (unsigned i = 0; i < sizeof songs / sizeof songs[0]; i++)
+        if (!strcmp(name, songs[i].name)) return songs[i].hash;
+    return 0;
 }
 
 /* Masks share one slot (the Happy Mask Shop lends one at a time). The game takes "Item_Mask_X" when adding one and
@@ -764,6 +842,11 @@ static int oot_mask_alias(const char *name, char *alias, size_t size) {
 }
 
 static int oot_item_count(Ctx *c, const char *name) {
+    const uint32_t song = oot_song_flag(name);
+    if (song) {
+        int learned = 0;
+        return oot_gamedata_bool(c, song, &learned) ? learned : -1;
+    }
     char alias[64];
     const int n = oot_pouch_count(c, name);
     if (!oot_mask_alias(name, alias, sizeof alias)) return n;
@@ -775,9 +858,19 @@ static void oot_inventory_edit(Ctx *c, int action) {
     const unsigned item = (unsigned)(action - OOT_CHEAT_ITEM_ACTION) / 256, op = (unsigned)(action - OOT_CHEAT_ITEM_ACTION) % 256;
     if (item >= OOT_ITEM_COUNT) return;
     const char *name = oot_item_names[item];
+    const int have = oot_item_count(c, name);
+    const uint32_t song = oot_song_flag(name);
+    if (song) {
+        if (op != 200 || have < 0) return;   /* songs have no editable quantity */
+        if (!oot_gamedata_set_bool(c, song, !have)) {
+            hos_log("cheats: song %s: learned flag unavailable", name);
+            return;
+        }
+        hos_log("cheats: song %s %s (had %d, now %d)", name, have ? "relocked" : "unlocked", have, oot_item_count(c, name));
+        return;
+    }
     char alias[64];
     const int is_mask = oot_mask_alias(name, alias, sizeof alias);
-    const int have = oot_item_count(c, name);
     int delta = 0;
     if (op == 200) delta = have > 0 ? -have : 1;   /* unlock / relock */
     else if (op < 128) delta = (int)op - 64;
@@ -1323,6 +1416,7 @@ static _Thread_local uint64_t flight_transform_controller;
 static _Thread_local uint64_t flight_pose_actor;
 static _Thread_local float flight_transform_yaw;
 static int64_t flight_player_seen;
+static int64_t player_free_seen;   /* (Link updated with no event playing: the Auto run row, hos_oot_player_free) */
 
 /* Link's controller (vtable 0x84c54f10, the one OneShotPhysicsCctChangePosition moves) from his components, 0 when the chain
    is not there */
@@ -1510,13 +1604,28 @@ static void oot_update_player_cheats(Ctx *c, uint64_t actor, uint64_t components
 }
 #endif
 
-int hos_oot_flight_shortcut_ready(void) {
+/* (the Insert menu's Auto run, host/auto_run.h) Link is the player's to move: updated within the last 250 ms with no
+   event playing (a cutscene, a talk). A paused game stops his updates */
+int hos_oot_player_free(void) {
+#if defined(_WIN32) || defined(__linux__)
+    const int64_t seen = __atomic_load_n(&player_free_seen, __ATOMIC_RELAXED);
+    return seen && hos_now_ns() - seen < 250000000;
+#else
+    return 0;
+#endif
+}
+
+int hos_oot_player_seen(void) {
 #if defined(_WIN32) || defined(__linux__)   /* (the debug tools: host/posix has what they call) */
     const int64_t seen = __atomic_load_n(&flight_player_seen, __ATOMIC_RELAXED);
     return seen && hos_now_ns() - seen < 250000000;
 #else
     return 0;
 #endif
+}
+
+int hos_oot_flight_shortcut_ready(void) {
+    return hos_oot_player_seen();
 }
 
 #if defined(_WIN32) || defined(__linux__)   /* (the debug tools: host/posix has what they call) */
@@ -1641,11 +1750,14 @@ void hos_oot_lift_player(Ctx *c, uint64_t actor) {
     if (movement < HOS_HEAP_BASE + 0x1d50 || recomp_load64(c, movement + 24) != actor ||
         !hos_oot_is_player(c, movement - 0x1d50)) return;
     if (!oot_event_playing(c)) hos_oot_opening(c, 3);   /* the opening has let Link go: later events keep their own skip */
+    __atomic_store_n(&player_free_seen, oot_event_playing(c) ? 0 : hos_now_ns(), __ATOMIC_RELAXED);
 
     // Link can be updated by different guest workers on successive frames.
     static SRWLOCK cheats_lock = SRWLOCK_INIT;
     if (!TryAcquireSRWLockExclusive(&cheats_lock)) return;
     oot_update_player_cheats(c, actor, components);
+    void hos_oot_state_tap(uint64_t actor);   /* the control bridge's copied snapshot and per-connection samples */
+    hos_oot_state_tap(actor);
     ReleaseSRWLockExclusive(&cheats_lock);
 #else
     (void)c;
@@ -1737,18 +1849,63 @@ float hos_aspect_ratio = 0;   /* (the window's default shape: host/display.c) */
 volatile uint64_t hos_wide_out, hos_wide_scene;
 volatile float hos_wide_ratio, hos_wide_squeeze, hos_wide_margin;
 volatile uint32_t hos_wide_keep_mask = 0xf;   /* (nx2/oot_wide.py KEEP_VTABLES: the screens that keep the whole picture, a bit each; MkwVkHost.wide_menus) */
-/* (nx2/oot_occlusion.py) read by the game's code where it decides to make occlusion queries: 1, none (HOOKSHOT_OCCLUSION_OFF=1) */
-volatile int hos_occlusion_off;
-static void occlusion_switch(void) {
-    const char *e = getenv("HOOKSHOT_OCCLUSION_OFF");
-    hos_occlusion_off = e && e[0] == '1';
-    if (hos_occlusion_off) hos_log("occlusion off: the game makes no occlusion queries (HOOKSHOT_OCCLUSION_OFF=1)");
+/* The loading cover between two areas (the game's UILoadingFadeScreen, KEEP_VTABLES[3]): a black picture over the whole
+   3840 x 2160 UI grid, and an icon. Drawn in the middle 16:9 with the menus, it leaves the sides open, and the game draws
+   the new area under it for some frames before it opens: the sides showed that area, overbright at first, beside a black
+   middle (issue 2220). The renderer closes the sides by as much as the cover is closed (MkwVkHost.wide_cover), which is
+   read here from the screen's layout. The layout ([[screen + 0x28] + 0x80]) has its panes at [+0x100], 0xb0 bytes each
+   (the layout again at +0x18, the size at +0x58, the opacity at +0x74), and their tree at [+0x110], 8 bytes a pane with
+   the parent's index at +2. Pane 2 is the black picture, under pane 1 (the one the fade animates) under the root, and
+   what it is drawn with is the three opacities multiplied. Anything else found there, as another game version would
+   have: 0, the sides as they were. */
+volatile uint64_t hos_wide_cover_screen;   /* (nx2/oot_wide.py's HUD site: the cover's screen, a guest address, noted as its projection is set up) */
+static int wide_cover_read(uint64_t a, void *out, uint64_t n) {
+    /* (the first MB is never mapped: a null pointer in the chain, and what would hang off it, is no layout) */
+    const void *p = a >= 0x100000 ? hos_guest_range(a, n) : NULL;
+    if (p) memcpy(out, p, n);
+    return p != NULL;
 }
-/* (hookshot, issue 1241) The game needs about 10 GB of memory and swap together (the page file on Windows): on 8 GB of RAM
-   and no swap it closed before the title with no word of why, and adding swap let it play. Below that, the log says so and
-   a message says it once at boot; the game starts anyway. The text, or 0 when there is enough */
+float hos_wide_cover(void) {
+    enum { PANE = 0xb0, COVER = 2 };
+    const float squeeze = hos_wide_squeeze;
+    const uint64_t screen = hos_wide_cover_screen;
+    /* (a 16:9 or narrower picture has no sides; with bit 3 kept the cover is drawn over the whole picture) */
+    if (!(squeeze > 0.0f && squeeze < 1.0f) || (hos_wide_keep_mask & 8) || !screen) return 0.0f;
+    uint64_t vtable, holder, layout, panes, tree, owner;
+    float size[2], level = 1.0f;
+    uint16_t parent, grandparent;
+    if (!wide_cover_read(screen, &vtable, 8) || vtable != 0x80020000ULL + 0x4be7b30 || !wide_cover_read(screen + 0x28, &holder, 8) ||
+        !wide_cover_read(holder + 0x80, &layout, 8) || !wide_cover_read(layout + 0x100, &panes, 8) ||
+        !wide_cover_read(layout + 0x110, &tree, 8))
+        return 0.0f;
+    if (!wide_cover_read(panes + COVER * PANE + 0x18, &owner, 8) || owner != layout ||
+        !wide_cover_read(panes + COVER * PANE + 0x58, size, 8) || size[0] != 3840.0f || size[1] != 2160.0f ||
+        !wide_cover_read(tree + COVER * 8 + 2, &parent, 2) || parent != 1 || !wide_cover_read(tree + 1 * 8 + 2, &grandparent, 2) ||
+        grandparent != 0)
+        return 0.0f;
+    for (int k = 0; k <= COVER; k++) {
+        float opacity;
+        if (!wide_cover_read(panes + k * PANE + 0x74, &opacity, 4) || !(opacity >= 0.0f && opacity <= 1.0f)) return 0.0f;
+        level *= opacity;
+    }
+    return level;
+}
+/* (issues 1241, 2838) Swap can keep a small Linux PC from running out of backing storage without keeping it responsive.
+   Warn below the existing 10 GiB floor in physical RAM there too; this is not a promise that 10 GiB is enough.
+   The game starts anyway, and headless runs only log the warning. Windows keeps its commit-limit check. */
 #define HOS_MEMORY_NEEDED_MB 10240ull
 static int memory_notice_text(unsigned long long ram_mb, unsigned long long swap_mb, char *out, size_t cap) {
+#if defined(__linux__) && !defined(_WIN32)
+    if (ram_mb < HOS_MEMORY_NEEDED_MB) {
+        snprintf(out, cap,
+                 "This PC has %.1f GiB of RAM and %.1f GiB of swap. Ocarina Reborn recommends 16 GB of RAM or more; "
+                 "the game alone can use more than 13 GiB.\n\n"
+                 "Swap can prevent an out-of-memory exit, but heavy swapping can make the game and desktop unresponsive. "
+                 "Close other programs before playing. More swap is not a replacement for RAM. The game starts anyway.",
+                 ram_mb / 1024.0, swap_mb / 1024.0);
+        return 1;
+    }
+#endif
     if (ram_mb + swap_mb >= HOS_MEMORY_NEEDED_MB) return 0;
     snprintf(out, cap,
              "This PC has %.1f GB of memory and %.1f GB of swap (the page file on Windows). The game needs about %llu GB of the "
@@ -1777,7 +1934,12 @@ static void memory_notice(void) {
         hos_log("boot: %llu MB of memory, %llu MB of swap", ram, swap);
         return;
     }
+#if defined(__linux__) && !defined(_WIN32)
+    hos_log("boot: LOW MEMORY: %llu MB of memory, %llu MB of swap; below %llu MB of physical RAM: heavy swapping can make "
+            "the game and desktop unresponsive (16 GB RAM or more recommended)", ram, swap, HOS_MEMORY_NEEDED_MB);
+#else
     hos_log("boot: LOW MEMORY: %llu MB of memory, %llu MB of swap, below the ~%llu MB the game needs", ram, swap, HOS_MEMORY_NEEDED_MB);
+#endif
     if (env_on("HOS_HEADLESS")) return;
 #ifndef _WIN32
     int hos_sdl_load(void);
@@ -1826,6 +1988,11 @@ int main(int argc, char **argv) {
 static int game_main(int argc, char **argv) {
 #endif
 #ifdef _WIN32
+    {   /* (hookshot) the crash window's helper of this run (host/hos_crash_dialog.c): first, so it starts nothing of the game */
+        int hos_crash_helper_main(int argc, char **argv);
+        const int helper = hos_crash_helper_main(argc, argv);
+        if (helper >= 0) return helper;
+    }
     if (!narrow_paths_ok(argc, argv)) return 1;
     {
         const int startup = ocr_instance_enter(argc, argv);
@@ -1837,25 +2004,30 @@ static int game_main(int argc, char **argv) {
     }
     load_ocarina_reborn_env();
 #endif
-    occlusion_switch();
+    /* (the settings file, in the user folder: chosen before the crash window's helper, the Discord status and the renderer read
+       it, and after ocarina_reborn_env.txt, which may set HOS_OPTIONS_FILE; Linux's main chose it already: host/options_path.c) */
+    hos_options_choose(argc, argv);
     {
         const char *protect_hearts = getenv("HOS_OOT_PROTECT_HEARTS");
         hos_oot_protect_hearts = protect_hearts && !strcmp(protect_hearts, "1");
     }
 #ifdef _WIN32
     {   // (the whole process, not only the window's thread: the renderer asks the window's size from its own, and on a 4K screen at 150%
-        // Windows answered such a thread 2560 x 1440: the picture was that size, in the corner of the window. Hookshot issues 15, 18, 20)
+        // Windows answered such a thread 2560 x 1440: the picture was that size, in the corner of the window)
         typedef BOOL(WINAPI * SetAware)(void *);
         SetAware set = (SetAware)(void *)GetProcAddress(GetModuleHandleA("user32.dll"), "SetProcessDpiAwarenessContext");
         if (set && !env_on("HOS_DPI_UNAWARE")) set((void *)(intptr_t)-4);
     }
 #endif
-    {   // (started from its icon the game has nowhere to log to: ocarina_reborn_log.txt beside it, last run only, for players to send in)
+    void hos_crash_record_prepare(const char *log_path);
+    {   // (started from its icon the game has nowhere to log to: ocarina_reborn_log.txt in the game folder, for players to send in)
         HANDLE err = GetStdHandle(STD_ERROR_HANDLE);
         if (!err || err == INVALID_HANDLE_VALUE || GetFileType(err) == FILE_TYPE_UNKNOWN) {
             char path[MAX_PATH + 32];
             DWORD n = hos_game_path_a(path, MAX_PATH);
             while (n && path[n - 1] != 92 && path[n - 1] != 47) n--;
+            memcpy(path + n, "ocarina_reborn_log.txt", sizeof "ocarina_reborn_log.txt");   /* (beside the game, as the launcher's report expects) */
+            hos_crash_record_prepare(path);   /* recovery before rotation; keep this run's actual destination */
             /* (the four runs before stay as ocarina_reborn_log.1.txt (the last) to .4.txt: a player who started the game again after a
                crash sent in the new run's log, and the crash was gone) */
             char from[MAX_PATH + 32], to[MAX_PATH + 32];
@@ -1876,16 +2048,38 @@ static int game_main(int argc, char **argv) {
                 fclose(log);
                 if (freopen(path, "w", stderr)) setvbuf(stderr, NULL, _IONBF, 0);
             }
-        }
+        } else hos_crash_record_prepare(NULL);   /* an externally supplied stderr, not the game's log */
     }
     hos_log("ocarina_reborn %s", HOOKSHOT_VERSION);   /* (the log's first line: which build a report comes from) */
     ocr_diag_init();
+    const char *hos_report_run_id(void);
+    hos_log("run_id: %s", hos_report_run_id());
+    void hos_crash_record_log_notes(void);
+    hos_crash_record_log_notes();
     removed_switch_notes();
     void hos_control_start(const char *version);
     hos_control_start(HOOKSHOT_VERSION);   /* (HOS_CONTROL=<socket>: the control bridge, host/control.c) */
+    /* (hookshot) the window after a crash: a helper that waits for this run to end (host/hos_crash_dialog.c), started before
+       the guest, the renderer, the sound and the input; none for --prepare-shaders, HOS_HEADLESS or HOS_CRASH_WATCH=0 */
+    void hos_crash_watch_start(int argc, char **argv);
+    hos_crash_watch_start(argc, argv);
+    if (hookshot_env_note[0]) hos_log("%s", hookshot_env_note);   /* (what ocarina_reborn_env.txt gave) */
     const char *image = NULL;
+    /* (hookshot) --compile-shaders all or most: what a preparation of this run builds (gpu/vk/vk_draw.cpp compile_all), over
+       compile_shaders= in ocarina_reborn_options.ini; as RX_VK_COMPILE_SHADERS, set before --prepare-shaders runs, wherever it stands */
+    for (int i = 1; i + 1 < argc; i++)
+        if (!strcmp(argv[i], "--compile-shaders")) {
+#ifdef _WIN32
+            char set[64];
+            snprintf(set, sizeof set, "RX_VK_COMPILE_SHADERS=%s", argv[i + 1]);
+            _putenv(set);
+#else
+            setenv("RX_VK_COMPILE_SHADERS", argv[i + 1], 1);
+#endif
+        }
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--romfs") && i + 1 < argc) hos_romfs_dir = argv[++i];
+        else if (!strcmp(argv[i], "--compile-shaders") && i + 1 < argc) i++;   /* (taken above) */
         else if (!strcmp(argv[i], "--user") && i + 1 < argc) hos_user_dir = argv[++i];
         else if (!strcmp(argv[i], "--trace")) hos_trace = 1;
         else if (!strcmp(argv[i], "--prepare-shaders")) {   /* (hookshot) a build's last step: no game */
@@ -1930,24 +2124,32 @@ static int game_main(int argc, char **argv) {
 #else
                 if (!hos_user_dir) hos_user_dir = beside_user;
 #endif
-                /* (a game folder from the builder: is a newer release out? host/hos_update.c. After the saves' place is known:
-                   on Linux the check keeps its "Skip this version" there) */
-                hos_update_check();
             }
         }
     }
     if (!image) {
-        fprintf(stderr, "usage: %s [image.bin] [--romfs <dir>] [--user <dir>] [--trace] [--prepare-shaders]\n",
+        fprintf(stderr, "usage: %s [image.bin] [--romfs <dir>] [--user <dir>] [--trace] [--prepare-shaders] [--compile-shaders all|most]\n",
                 argv[0]);
         return 2;
     }
     if (env_on("HOS_TRACE")) hos_trace = 1;
+    if (env_on("HOS_HLE_STATS")) {
+        void hos_hle_stats_start(void);
+        hos_hle_stats_start();
+    }
     if (!hos_user_dir) hos_user_dir = "user";
     CreateDirectoryA(hos_user_dir, NULL);
+    hos_options_carry();   /* (a game folder's settings from before into the user folder, once: host/options_path.c) */
+    /* (host/save_backup.c: an empty save folder takes the newest backup from outside the game folder, before the game reads
+       its saves; then this start's saves are backed up when something is newer than the last backup) */
+    hos_save_restore_if_empty(hos_user_dir);
+    hos_save_backup(hos_user_dir, "at start");
     if (!reserve_guest()) {
         fprintf(stderr, "cannot reserve the guest window\n");
         return 1;
     }
+    void hos_crash_test_arm(void);
+    hos_crash_test_arm();   /* (HOS_CRASH_TEST: a crash on purpose, once the crash handlers are set up: host/hos_crash_dialog.c) */
 #ifdef A64_MEM_ZERO
     web_fs_init(NULL, hos_romfs_dir);
     /* (the whole file, no range: the server sends it brotli-compressed, 85 -> 26 MB) */
@@ -1989,20 +2191,14 @@ static int game_main(int argc, char **argv) {
         float want = e ? (float)atof(e) : 0.0f;
         if (!e) {
             int saved = -1, version = 0;   /* (the Aspect ratio's ultrawide= and options_version=, -1 / 0 without them) */
-            char path[MAX_PATH];
-            const DWORD len = hos_game_path_a(path, MAX_PATH);
-            char *slash = len ? strrchr(path, SEP) : NULL;
-            if (slash) {
-                snprintf(slash + 1, (size_t)(path + MAX_PATH - slash - 1), "ocarina_reborn_options.ini");
-                FILE *o = fopen(path, "r");
-                if (o) {
-                    char line[80];
-                    while (fgets(line, sizeof line, o)) {
-                        if (!strncmp(line, "ultrawide=", 10)) saved = atoi(line + 10) != 0;
-                        if (!strncmp(line, "options_version=", 16)) version = atoi(line + 16);
-                    }
-                    fclose(o);
+            FILE *o = fopen(hos_options_file(), "r");
+            if (o) {
+                char line[80];
+                while (fgets(line, sizeof line, o)) {
+                    if (!strncmp(line, "ultrawide=", 10)) saved = atoi(line + 10) != 0;
+                    if (!strncmp(line, "options_version=", 16)) version = atoi(line + 16);
                 }
+                fclose(o);
             }
             const int sw = GetSystemMetrics(SM_CXSCREEN), sh = GetSystemMetrics(SM_CYSCREEN);
             /* (no line: the monitor's shape; an older file's 16:9 on a screen narrower than 16:9 too: hos_aspect_on) */
@@ -2059,6 +2255,7 @@ static int game_main(int argc, char **argv) {
 #ifdef _WIN32
     timeBeginPeriod(1);   /* 1 ms timer resolution: the 60 Hz vsync and the game's frame pacing sleep in short steps */
     no_power_throttling();
+    process_priority();
 #endif
     void hos_display_start(void);
     hos_display_start();  /* the game's window; HOS_HEADLESS=1 for none */
@@ -2082,6 +2279,8 @@ static int game_main(int argc, char **argv) {
     }
     call_guest(c, hos_entry_nnMain, sp, "nnMain");
     hos_log("nnMain returned");
+    void hos_crash_clean_end(void);
+    hos_crash_clean_end();
     return 0;
 }
 
@@ -2092,9 +2291,11 @@ static int game_argc;
 static char **game_argv;
 static DWORD WINAPI game_thread(void *p) {
     (void)p;
-    UINT code=(UINT)game_main(game_argc, game_argv);
+    const UINT result = (UINT)game_main(game_argc, game_argv);
     ocr_diag_stop();
-    ExitProcess(code);
+    void hos_crash_clean_end(void);
+    hos_crash_clean_end();
+    ExitProcess(result);
 }
 /* (hookshot, linux) Room in the drivers' own shader caches for what the preparation builds. The pipelines the notes predict (~43,000
    in OoT, vk_draw.cpp predict_run) are built into the driver's disk cache alone, not into mkw_vk_pipelines.bin, which is read in whole
@@ -2139,16 +2340,22 @@ static void driver_cache_folder(void) {
     }
 }
 int main(int argc, char **argv) {
+    {   /* (hookshot) the crash window's helper of this run (host/hos_crash_dialog.c): first, so it starts nothing of the game */
+        int hos_crash_helper_main(int argc, char **argv);
+        const int helper = hos_crash_helper_main(argc, argv);
+        if (helper >= 0) return helper;
+    }
     int hos_display_init(void);
     void hos_display_loop(void);
     load_ocarina_reborn_env();
+    hos_options_choose(argc, argv);   /* (before the Discord status reads it, below: host/options_path.c) */
     driver_cache_room();
     driver_cache_folder();
     game_argc = argc, game_argv = argv;
     int prepare_shaders = 0;
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--prepare-shaders")) prepare_shaders = 1;
-        else if (!strcmp(argv[i], "--romfs") || !strcmp(argv[i], "--user")) i++;
+        else if (!strcmp(argv[i], "--romfs") || !strcmp(argv[i], "--user") || !strcmp(argv[i], "--compile-shaders")) i++;
     }
     /* The builder's preparation worker needs Vulkan, but no SDL display. */
     const int window = prepare_shaders ? 0 : hos_display_init();

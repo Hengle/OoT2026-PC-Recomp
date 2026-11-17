@@ -1,4 +1,4 @@
-"""(hookshot) The fast float regions' ops (nx2/fastfp.py's FASTFP_HEADER: the FMA3 multiply-add, the multiply, divide,
+"""(hookshot) The fast float regions' ops (a64_lift.py's FASTFP_HEADER: the FMA3 multiply-add, the multiply, divide,
 add and subtract, and the vector add, subtract and multiply) against the exact bodies, game-free.
 
 Builds what the real build builds (a64_fpx.h, a64_suyu.h, a64_suyu.c, through tests/test_fpx_sticky.py's generate) plus
@@ -54,10 +54,9 @@ def main():
     t0 = time.time()
     with tempfile.TemporaryDirectory(prefix="hookshot-fastfp-fma-") as tmp:
         S.generate(cxx, tmp, S.target_flags(cxx, tmp))
-        sys.path.insert(0, os.path.join(ROOT, "nx2"))
-        import fastfp
+        import a64_lift
         with open(os.path.join(tmp, "a64_fastfp.h"), "w", newline="\n") as f:
-            f.write(fastfp.FASTFP_HEADER)
+            f.write(a64_lift.FASTFP_HEADER)
         exe = os.path.join(tmp, "fastfp_fma_test.exe")
         S.build([cc] + S.target_flags(cc, tmp) + ["-march=x86-64-v3"] + S.FLAGS +
                 ["-D_CRT_SECURE_NO_WARNINGS", "-I" + os.path.join(KIT, "rt"), "-I" + tmp,

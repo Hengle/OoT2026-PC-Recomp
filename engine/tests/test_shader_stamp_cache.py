@@ -5,6 +5,7 @@ An alternate --build-script permits the same regression to exercise an older pro
 import argparse
 import ast
 import hashlib
+import importlib.util
 import os
 from pathlib import Path
 import re
@@ -56,6 +57,7 @@ class ShaderStampCacheTests(unittest.TestCase):
             "gpu/vk/vk_api.h": "struct Api {};\n",
             "gpu/vk/vk_dlss.cpp": "int dlss;\n",
             "gpu/vk/vk_fsr4.cpp": "int fsr;\n",
+            "gpu/vk/vk_xess.cpp": "int xess;\n",
             "gpu/vk/vk_ngx_msvc_rt.cpp": "int msvc_rt;\n",
             "host/mingw_msvc_shims.c": "int shims;\n",
             "host/pgo_rt.c": "int pgo_rt;\n",
@@ -99,6 +101,13 @@ class ShaderStampCacheTests(unittest.TestCase):
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_bytes(text.encode())
         self.code = production_code(BUILD_SCRIPT)
+        # (the stamp's own module beside the build script, nx2/translator_files.py: the branch calls it for HOOKSHOT_SHADER_STAMP)
+        stamp_module = BUILD_SCRIPT.parent / "translator_files.py"
+        self.translator_files = None
+        if stamp_module.exists():
+            spec = importlib.util.spec_from_file_location("translator_files_under_test", stamp_module)
+            self.translator_files = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(self.translator_files)
 
     def jobs(self, linux, version="fixture", release=False, ngx="", mingw="llvm-mingw", fsr=False, pgo="", stamp="fixture"):
         namespace = {
@@ -123,6 +132,7 @@ class ShaderStampCacheTests(unittest.TestCase):
             "NGX_SDK": ngx,   # ("": no NVIDIA NGX SDK, vk_dlss.cpp built without DLSS, as by default)
             "NGX_MSVC_RT": "vk_ngx_msvc_rt.cpp",
             "FSR": fsr,   # (HOOKSHOT_FSR=1: vk_fsr4.cpp built with AMD FSR 4)
+            "translator_files": self.translator_files,
         }
         environ = dict({"RX_RELEASE": "1"} if release else {}, **({"RX_VK_PGO": pgo} if pgo else {}))   # (pgo: gen, or a profile)
         with mock.patch.dict(os.environ, environ, clear=True), warnings.catch_warnings():
@@ -303,6 +313,16 @@ class ShaderStampCacheTests(unittest.TestCase):
                 self.assertEqual(self.changed(plain, first), own)
                 self.assertEqual(self.changed(first, again), set())
                 self.assertEqual(self.changed(first, second), own)   # (the same path, another profile: built again)
+
+    def test_xess_reaches_only_vk_xess_on_windows(self):
+        # (Intel XeSS: its headers in every Windows build, for vk_xess.cpp alone; none on Linux, where its stubs say why)
+        for linux in (False, True):
+            with self.subTest(linux=linux):
+                jobs = self.jobs(linux)
+                self.assertEqual({n for n, j in jobs.items() if "-DHOOKSHOT_XESS" in j["flags"]},
+                                 set() if linux else {"gpu/vk/vk_xess.cpp"})
+                self.assertFalse([n for n, j in jobs.items() if any("third_party" in f and "xess" in f for f in j["flags"])
+                                  and n != "gpu/vk/vk_xess.cpp"])
 
 
 class NgxSdkTests(unittest.TestCase):

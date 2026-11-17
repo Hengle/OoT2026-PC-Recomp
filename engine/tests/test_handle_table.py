@@ -78,9 +78,12 @@ def check_sources(root):
     of = function(draw, 'template <class D>\nuint32_t handle_of(')
     assert 'stage_handle(s, st, d.handle_program, k)' in of, 'element k does not read record k'
 
-    stage = function(shader, 'uint32_t stage_handle(')
-    assert 'element' in stage and 'd.cbuf_offset + 8' in stage, \
-        "a table's elements past the storage buffer's bound size are read"
+    # (the element's read is stage_handle_eval since the handles are kept a draw (stage_handle), and stage_handles reads them all)
+    for name in ('uint32_t stage_handle_eval(const NvnState& s, const Stage& st, uint32_t program, uint32_t element) {',
+                 'void stage_handles('):
+        stage = function(shader, name)
+        assert 'element' in stage or 'count' in stage
+        assert 'd.cbuf_offset + 8' in stage, "a table's elements past the storage buffer's bound size are read (%s)" % name
     for kind in ('compute', 'vertex', 'fragment', 'task'):
         assert f'note_fallbacks(p, "{kind}"' in shader, f'the {kind} stage does not log the handles not followed'
     return info

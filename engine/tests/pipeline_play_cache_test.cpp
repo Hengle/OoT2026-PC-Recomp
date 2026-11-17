@@ -67,6 +67,7 @@ std::atomic<int> cache_reads{0}, cache_data_writes{0}, cache_publications{0}, pi
 
 #define CHECK(c) do { if (!(c)) { std::fprintf(stderr, "FAIL line %d: %s\n", __LINE__, #c); return 1; } } while (0)
 
+void predicted_use_log() {}   // (vk_draw.cpp: the predicted pipelines play met, after each play file)
 void logf(const char* fmt, ...) {
     va_list args;
     va_start(args, fmt);
@@ -237,13 +238,6 @@ namespace pcache_stamp {
 struct Dropped { size_t files; uint64_t bytes; };
 Dropped check(const std::string&, uint64_t) { return {0, 0}; }
 }
-static DWORD game_module_path(char* out, DWORD size) {
-    const std::string path = pcache_dir + "fixture.exe";
-    if (path.size() >= size) return 0;
-    std::memcpy(out, path.c_str(), path.size() + 1);
-    return static_cast<DWORD>(path.size());
-}
-
 // (init's conditional read uses the read-result stub; play writes keep the real mapped-file writer)
 #define PipelineCacheFile ReadPart
 #include "pcache_init.inc"
@@ -338,7 +332,9 @@ int run(const std::string& name) {
             // prepare record is not written as done)
             CHECK(!pcache_saved_now() && cache_files() == before);
         } else {
-            CHECK(cache_reads == 17 && merges == 16);
+            // (Hookshot merges each of the 16 play files twice, into the cache and into the copy that is written back
+            // compacted (vk_draw.cpp pcache_init's `together`), and the session's cache once more at the save with play on)
+            CHECK(cache_reads == 17 && merges == (play_off ? 32 : 33));
             CHECK(cache_data_writes == (play_off ? 1 : 2) && cache_publications == (play_off ? 1 : 2));
             CHECK(play_seq == (play_off ? 16u : 17u));
             CHECK((play_cache.load() != nullptr) == !play_off);
@@ -401,7 +397,8 @@ int run(const std::string& name) {
         CHECK(!exists(play_path(2)));
         CHECK(make(12) == VK_SUCCESS);
         play_cache_save();
-        CHECK(file_keys(play_path(2)) == std::set<uint64_t>{12} && file_keys(play_path(1)) == (std::set<uint64_t>{10, 11}));
+        // (issue 2579: one file a session, written again with each save's generation)
+        CHECK(file_keys(play_path(1)) == (std::set<uint64_t>{10, 11, 12}) && !exists(play_path(2)));
         CHECK(keys_of(pcache) == std::set<uint64_t>{1});
     } else if (name == "retry") {
         pcache = cache_of({});
@@ -409,11 +406,19 @@ int run(const std::string& name) {
         CHECK(make(20) == VK_SUCCESS);
         fail_moves = 1;
         play_cache_save();   // (not in place: kept)
-        CHECK(failed_moves == 1 && !exists(play_path(1)) && play_seq == 0 && destroys == 0);
+        CHECK(failed_moves == 1 && !exists(play_path(1)) && play_seq == 0 && destroys == 1);   // (kept in the session's cache)
         CHECK(make(21) == VK_SUCCESS);
-        play_cache_save();   // (the one kept first, then this one's)
-        CHECK(file_keys(play_path(1)) == std::set<uint64_t>{20} && file_keys(play_path(2)) == std::set<uint64_t>{21});
-        CHECK(destroys == 2 && play_seq == 2);
+        play_cache_save();   // (the one kept and this one's, in the session's one file)
+        CHECK(file_keys(play_path(1)) == (std::set<uint64_t>{20, 21}) && !exists(play_path(2)));
+        CHECK(destroys == 2 && play_seq == 1);
+        fail_moves = 1;
+        play_cache_save();   // (nothing new: nothing written)
+        CHECK(failed_moves == 1);
+        CHECK(make(22) == VK_SUCCESS);
+        play_cache_save();   // (a failed write of the session's file is tried again at the next save, with nothing new)
+        CHECK(failed_moves == 2 && file_keys(play_path(1)) == (std::set<uint64_t>{20, 21}));
+        play_cache_save();
+        CHECK(file_keys(play_path(1)) == (std::set<uint64_t>{20, 21, 22}));
     } else if (name == "users") {
         pcache = cache_of({});
         play_cache_begin();
@@ -435,7 +440,7 @@ int run(const std::string& name) {
         saver.join();
         CHECK(file_keys(play_path(1)) == (std::set<uint64_t>{29, 30}));   // (the compile under way in its generation's file)
         play_cache_save();
-        CHECK(file_keys(play_path(2)) == std::set<uint64_t>{31});
+        CHECK(file_keys(play_path(1)) == (std::set<uint64_t>{29, 30, 31}) && !exists(play_path(2)));
         // (the fetch lock off: the window's close, play_cache_save with a bound, still waits for a build under way as before;
         // on AMD's Windows driver one takes 5-13 s, and the play file is not given up for it)
         CHECK(!pcache_fetch_lock_on());
@@ -446,13 +451,13 @@ int run(const std::string& name) {
         std::atomic<bool> closed{false};
         std::thread closer([&] { play_cache_save(100); closed = true; });
         Sleep(400);
-        CHECK(!closed.load() && !exists(play_path(3)));
+        CHECK(!closed.load() && file_keys(play_path(1)) == (std::set<uint64_t>{29, 30, 31}));
         release = true;
         maker2.join();
         closer.join();
-        CHECK(file_keys(play_path(3)) == (std::set<uint64_t>{32, 33}));
+        CHECK(file_keys(play_path(1)) == (std::set<uint64_t>{29, 30, 31, 32, 33}) && !exists(play_path(2)));   // (the session's one file)
     } else if (name == "lock-users") {
-        // (the fetch lock on, https://github.com/NotRexed/Hookshot/issues/999: a save while a build is between two of
+        // (the fetch lock on, issue 999: a save while a build is between two of
         // create_cached's builds, counted in the generation and holding no lock. A save that held the lock while it waited for the
         // generation's users would wait for that build, and the build for the lock, for good: the game frozen at a background save)
         CHECK(pcache_fetch_lock_on());
@@ -489,11 +494,11 @@ int run(const std::string& name) {
         const auto t0 = std::chrono::steady_clock::now();
         play_cache_save(300);
         CHECK(std::chrono::steady_clock::now() - t0 < std::chrono::seconds(3));
-        CHECK(play_cache.load() != g2 && !exists(play_path(2)));
+        CHECK(play_cache.load() != g2 && file_keys(play_path(1)) == (std::set<uint64_t>{1, 60}));
         release = true;
         stuck.join();
         play_cache_save();
-        CHECK(file_keys(play_path(2)) == (std::set<uint64_t>{70, 71}));
+        CHECK(file_keys(play_path(1)) == (std::set<uint64_t>{1, 60, 70, 71}) && !exists(play_path(2)));   // (the session's one file)
     } else if (name == "merge-read-failed" || name == "merge-create-failed") {
         pcache = cache_of({1});
         write_file(play_path(1), "FAKE", {40});
@@ -516,17 +521,19 @@ int run(const std::string& name) {
         write_file(at("mkw_vk_pipelines_play_1234567890.bin"), "FAKE", {46});
         write_file(pcache_path, "FAKE", {1});
         CHECK(play_files_merge() == 2);
-        CHECK(keys_of(pcache) == (std::set<uint64_t>{1, 40, 41}) && play_seq == 7);
+        CHECK(keys_of(pcache) == (std::set<uint64_t>{1, 40, 41}) && play_seq == 8);
         CHECK(!exists(at("mkw_vk_pipelines_play_5.bin")) && exists(at("mkw_vk_pipelines_play_.bin")));
         CHECK(exists(at("mkw_vk_pipelines_play_x1.bin")) && exists(at("mkw_vk_pipelines_play_9.bin.tmp")));
         CHECK(exists(at("mkw_vk_pipelines_play_1234567890.bin")));
-        CHECK(exists(at("mkw_vk_pipelines_play_3.bin")) && exists(at("mkw_vk_pipelines_play_7.bin")));   // (kept: under 16)
+        // (under 16: put together into one play file, numbered after the highest, in their place: issue 2579)
+        CHECK(!exists(at("mkw_vk_pipelines_play_3.bin")) && !exists(at("mkw_vk_pipelines_play_7.bin")));
+        CHECK(file_keys(play_path(8)) == (std::set<uint64_t>{1, 40, 41}));
         CHECK(file_keys(pcache_path) == std::set<uint64_t>{1});   // (the start's file as it was)
         play_cache_begin();
         CHECK(make(40) == VK_SUCCESS && play_cache.load()->from_start == 1);   // (merged: from the start's cache)
         CHECK(make(47) == VK_SUCCESS);
         play_cache_save();
-        CHECK(file_keys(play_path(8)) == std::set<uint64_t>{47});   // (numbered after the highest read)
+        CHECK(file_keys(play_path(9)) == std::set<uint64_t>{47});   // (numbered after the highest read)
     } else if (name == "compact") {
         pcache = cache_of({1});
         write_file(pcache_path, "FAKE", {1});

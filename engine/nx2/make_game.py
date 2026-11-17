@@ -38,6 +38,7 @@ import queue
 import re
 import shutil
 import stat
+import struct
 import subprocess
 import threading
 import time
@@ -54,12 +55,13 @@ import toolchain as _toolchain
 import disk as _disk
 import object_store as _object_store
 import lift_store as _lift_store
+import game_title
 # (hookshot) RX_TARGET=windows on Linux: the Windows game, with llvm-mingw's Linux release (HOOKSHOT_MINGW, or llvm-mingw
 # beside the builder), to run under Proton or copy to a Windows PC
 LINUX, CROSS = not _toolchain.windows(), _toolchain.windows() and os.name != "nt"
 # (SDL2.dll is sdl2-compat: it loads SDL3.dll from beside the exe. Left out of bin\ since v2.0.0, it said "Failed loading SDL3
 # library" three times and no controller worked: Discord #bug-reporting, 11-08)
-BESIDE = ["ocarina_reborn", "ocarina_reborn_vk.so", "libSDL2-2.0.so.0"] if LINUX else ["ocarina_reborn.exe", "ocarina_reborn_vk.dll", "SDL2.dll", "SDL3.dll", "wgpu_native.dll"]
+BESIDE = ["ocarina_reborn", "ocarina_reborn_vk.so", "libSDL2-2.0.so.0"] if LINUX else ["ocarina_reborn.exe", "ocarina_reborn_vk.dll", "SDL2.dll", "SDL3.dll"]
 if not LINUX:
     BESIDE += ["ocarina_reborn.exe.symbols.json", "ocarina_reborn_vk.dll.symbols.json"]
 LANGUAGES = [("en-US", "English (US)"), ("en-GB", "English (UK)"), ("fr", "French (France)"), ("fr-CA", "French (Canada)"), ("de", "German"),
@@ -87,7 +89,7 @@ def no_throttle(handle=None):
 
 
 PREPARE = False   # (--prepare) say() prints RecompLauncher's "progress <0..1> <text>" lines instead of the builder app's @@ lines
-STAGE_SPAN = {"read": (0.0, 0.05), "lift": (0.05, 0.25), "compile": (0.25, 0.95), "finish": (0.95, 1.0)}   # (a share of the whole each stage takes)
+STAGE_SPAN = {"read": (0.0, 0.15), "lift": (0.15, 0.26), "compile": (0.26, 0.87), "finish": (0.87, 1.0)}   # (a share of the whole each stage takes: docs/development.md, Build times)
 _stage = {"span": (0.0, 1.0), "text": ""}
 
 
@@ -575,7 +577,7 @@ def stand_in_damaged_files(out, romfs):
         unresolved = sum(other is None for _, other in done)
         if unresolved:
             fail("The game dump still has %d damaged file%s with no replacement. The build stopped before compiling. "
-                 "Dump the game again and select the complete dump in Hookshot Builder. The affected files are listed above." %
+                 "Dump the game again and select the complete dump in the Ocarina Reborn launcher. The affected files are listed above." %
                  (unresolved, "" if unresolved == 1 else "s"))
     write_stamp(checked, checked_stamp)
     with contextlib.suppress(FileNotFoundError):
@@ -598,23 +600,8 @@ def check_cache_paths(out, paths):
                  "Choose a different output folder." % path)
 
 
-def check_cpu():
-    """(linux) The AppImage's Vulkan back end (HOOKSHOT_VK_PREBUILT) is built for x86-64-v3 elsewhere
-    (scripts/linux/appimage.sh), while the game follows this PC (nx2/host_cpu.py): on a CPU without AVX2 it would stop at
-    its start. Said now, before the game is read, not 40 minutes in (issue 363)"""
-    if not os.environ.get("HOOKSHOT_VK_PREBUILT") or os.environ.get("RX_MARCH"):
-        return
-    sys.path.insert(0, HERE)
-    from host_cpu import host_march
-    m = host_march()
-    if m != "x86-64-v3":
-        fail("Your processor has no AVX2 (it runs %s), and the AppImage's renderer needs it. Build Hookshot from source "
-             "instead (see the readme): a source build follows your processor." % m)
-
-
 def check(a, work):
     check_windows_sdk(work)   # (first: said in plain words when the game is chosen, not after it has been read)
-    check_cpu()
     if a.nup:
         probe = os.path.join(work, "probe")
         shutil.rmtree(probe, ignore_errors=True)
@@ -737,22 +724,18 @@ def check_linux_prerequisites(work=None):
                 if pin and importlib.util.find_spec(pin[1]) is None:
                     missing.append("Python module %s (not on %s's isolated import path; install requirements.txt "
                                    "with that Python)" % (pin[1], sys.executable))
-    prebuilt = build.prebuilt_renderer()
-    if prebuilt:
-        if not os.path.isfile(prebuilt):
-            missing.append("Vulkan renderer %s (HOOKSHOT_VK_PREBUILT)" % prebuilt)
-    else:
-        for (name, package, probe, env), found in zip(build.VK_HEADERS, build.vulkan_headers(work)):
-            if not found:
-                missing.append("%s header %s (CPM package %s: RX_CPM, clone/cpm, work/eg/.cache/cpm, then sibling "
-                               "mkw-recomp/Eglantine caches; then %s, package root or include/; then /usr/local, /usr)"
-                               % (name, probe, package, env))
+    # (the Vulkan back end is compiled by every build, the AppImage's too: its headers, and clang++ for it and a64emit)
+    for (name, package, probe, env), found in zip(build.VK_HEADERS, build.vulkan_headers(work)):
+        if not found:
+            missing.append("%s header %s (CPM package %s: RX_CPM, clone/cpm, work/eg/.cache/cpm, then sibling "
+                           "mkw-recomp/Eglantine caches; then %s, package root or include/; then /usr/local, /usr)"
+                           % (name, probe, package, env))
+    if build.FSR and not os.path.isfile(os.path.join(build.FSR_HEADERS, "api", "include", "ffx_api.h")):
+        missing.append("AMD's FSR API headers in %s (AMD FSR 4: third_party/fidelityfx; or build without --fsr)"
+                       % os.path.normpath(build.FSR_HEADERS))
     build.ffmpeg_linux(missing)
     cc = build.toolchain.find("clang")
-    # A source checkout also builds a64emit with clang++, even with a prebuilt renderer.
-    tools = [("clang", cc)]
-    if source_build or not prebuilt:
-        tools.append(("clang++", build.toolchain.find("clang++")))
+    tools = [("clang", cc), ("clang++", build.toolchain.find("clang++"))]
     for name, path in tools:
         if not os.path.isfile(path):
             missing.append("%s compiler %s (EMSDK/upstream/bin, else ~/emsdk/upstream/bin, then PATH; "
@@ -1319,6 +1302,13 @@ def seed_pipelines(out):
     dst = os.path.join(out, "ocarina_reborn_pipelines.bin")
     if not os.path.isfile(seed):
         return
+    os.makedirs(cache, exist_ok=True)
+    loose = os.path.join(out, "ocarina_reborn_pipelines.bin")
+    if os.path.isfile(loose) and not os.path.exists(dst):
+        try:
+            os.replace(loose, dst)
+        except OSError:
+            pass
     with open(seed, "rb") as f:
         stamp = f.read(8)
     try:
@@ -1384,8 +1374,57 @@ def game_env(environ=None):
     return env
 
 
-def not_prepared(why):
-    print("%s (%s): the game prepares them at its first start" % (NOT_PREPARED, why), flush=True)
+FIRST_START = "the game prepares them at its first start"   # (the builders' windows tell this ending from the others)
+
+
+def not_prepared(why, then=FIRST_START):
+    print("%s (%s): %s" % (NOT_PREPARED, why, then), flush=True)
+
+
+# (Compile shaders, the builders' and the launcher's choice: compile_shaders= in the game folder's ocarina_reborn_options.ini, the
+# number the game reads (gpu/vk/vk_draw.cpp compile_all). Most, the default: every shader program and the pipelines the lists
+# name, before the title. All: the predicted pipelines too, about 40 % more time for pipelines play almost never draws)
+COMPILE_LEVELS = {"most": 0, "all": 1}
+COMPILE_KEY = "compile_shaders"
+
+
+def options_path(out):
+    return os.path.join(out, "ocarina_reborn_options.ini")
+
+
+def folder_compile_level(out):
+    """The Compile shaders choice the folder's ocarina_reborn_options.ini holds ("most" or "all"), or None when it holds none"""
+    try:
+        with open(options_path(out), encoding="utf-8", errors="replace") as f:
+            for line in f:
+                key, eq, value = line.strip().partition("=")
+                if eq and key == COMPILE_KEY:
+                    n = int(value) if value.strip().lstrip("-").isdigit() else 0
+                    return next((name for name, v in COMPILE_LEVELS.items() if v == n), "most")
+    except OSError:
+        pass
+    return None
+
+
+def write_compile_level(out, level):
+    """compile_shaders=<n> into the folder's ocarina_reborn_options.ini, the file's other lines as they are (the game's menu keeps the
+    line too). A file with only this line still makes the game's first start a first start (gpu/vk/vk_menu.cpp menu_init)"""
+    path = options_path(out)
+    lines = []
+    try:
+        with open(path, encoding="utf-8", errors="replace", newline="") as f:
+            lines = [l for l in f.read().splitlines() if l.partition("=")[0].strip() != COMPILE_KEY]
+    except OSError:
+        pass
+    lines.append("%s=%d" % (COMPILE_KEY, COMPILE_LEVELS[level]))
+    with open(path + ".new", "w", encoding="utf-8", newline="\n") as f:
+        f.write("\n".join(lines) + "\n")
+    os.replace(path + ".new", path)
+
+
+def compile_level(a, out):
+    """This build's Compile shaders: --compile-shaders, else the folder's own choice, else Most"""
+    return getattr(a, "compile_shaders", None) or (folder_compile_level(out) if out else None) or "most"
 
 
 def prepare_skipped(a, environ=None):
@@ -1422,7 +1461,10 @@ def prepare_shaders(cmd, folder=None, silence=PREPARE_SILENCE):
     elif code == 3:
         not_prepared("shader preparation stopped with exit status 3; see the preceding error output")
     elif code == 4:   # (gpu/vk/vk_main.cpp prepare_watchdog: nothing moved for minutes, the driver stuck after a fault in it)
-        not_prepared("the GPU driver stopped responding")
+        # (it left ocarina_reborn_prepare_skipped beside the game: its starts skip the preparation too, so none stops in the same place,
+        # until a --prepare-shaders run goes through and removes it)
+        not_prepared("the GPU driver stopped responding",
+                     "the game builds each shader when it first draws it, and the next build or update tries the preparation again")
     elif code:
         not_prepared("the game stopped with exit status %d" % code)
     return code
@@ -1544,6 +1586,27 @@ def vk_profile_for(work, environ, readable=None, root=ROOT):
     return prof if (readable or (lambda p: profile_readable(p, any_os=True)))(prof) else None
 
 
+def game_name(out, work, nup=None):
+    """The game's own name and icon (nx2/game_title.py): read from the .nup when there is one and kept in the folder, then, on
+    Windows, made into the exe's icon and the name Windows shows for it (work/hookshot_game.res, linked by nx2/build.py). A
+    folder built from an unpacked dump has neither: the game stays "Hookshot". Nothing here stops a build"""
+    if nup:
+        try:
+            got = game_title.from_nup(nup)
+        except (OSError, SystemExit, ValueError, struct.error) as e:
+            got = None
+            print("the game's name and icon could not be read from the .nup (%s): the game keeps its own name" % e, flush=True)
+        if got:
+            game_title.keep(out, *got)
+    title, icon = game_title.kept(out)
+    print("the game's name: %s, its icon: %s" % (title or "none", "yes" if icon else "none"), flush=True)
+    if not LINUX:
+        try:
+            game_title.write_res(out, os.path.join(work, game_title.RES_FILE))
+        except OSError as e:
+            print("the exe's icon and name were not made (%s): it keeps its own name" % e, flush=True)
+
+
 def copy_writable(src, dst):
     """src's bytes at dst, writable whatever src's mode: copy2 took the mode along, and from a read-only install (a Nix
     store, a packaged tools folder) the copies in the work folder were read-only, so lift.py could not write chunks.txt
@@ -1553,6 +1616,43 @@ def copy_writable(src, dst):
             return
         os.chmod(dst, stat.S_IREAD | stat.S_IWRITE)
     shutil.copyfile(src, dst)
+
+
+# What a romfs must hold for the build and the game's start, each as (any one of its names, test): the build reads
+# Pack/ZsDic.pack.zs and System/Resource (prompt_assets.py, shader_census.py), and the game cannot start without its heap
+# definition, which it opens as Product. then Default. (#689 and a v3.0.0-rc.4 player: a romfs with no System folder crashed
+# at boot every time, "write 0x100000000000, guest 0", its heaps set up without their sizes; that file alone missing does too)
+ROMFS_NEEDED = ((("Pack/ZsDic.pack.zs",), os.path.isfile), (("System/Resource",), os.path.isdir),
+                (("System/HeapSize/Product.Nin_Ounce_NVN2.HeapDef.byml.zs",
+                  "System/HeapSize/Default.Nin_Ounce_NVN2.HeapDef.byml.zs"), os.path.isfile))
+
+
+def romfs_missing(romfs):
+    """The first of ROMFS_NEEDED that romfs lacks (its first name), or None"""
+    folder = long_path(romfs)   # (a dump's deepest paths pass 260 characters: #1468)
+    return next((names[0] for names, there in ROMFS_NEEDED
+                 if not any(there(os.path.join(folder, *name.split("/"))) for name in names)), None)
+
+
+def check_romfs_folder(romfs):
+    """A chosen romfs folder holds what the build and the game's start need (ROMFS_NEEDED), said before the game folder is
+    made. Issue 467: another tool's packed copy (index.json and one romfs.bin) was built for 15 minutes into 27 GB, and the
+    game stopped at boot without its system files"""
+    folder = long_path(romfs)
+    missing = romfs_missing(romfs)
+    if missing:
+        packed = (" It holds a romfs.bin, a packed copy of the game's files: extract it first."
+                  if os.path.isfile(os.path.join(folder, "romfs.bin")) else "")
+        fail("The romfs folder %s does not hold the game's files (no %s): choose the extracted RomFS.%s" % (romfs, missing, packed))
+
+
+def check_unpacked_romfs(romfs, source):
+    """The same for a romfs this builder unpacked from a .nup, or kept in the game folder for an update (source says which):
+    a game built from it could not start. Before the build, as for a chosen folder"""
+    missing = romfs_missing(romfs)
+    if missing:
+        fail("%s does not hold all of the game's files (no %s): a game built from it could not start. Dump the game again and "
+             "choose the complete dump in the Ocarina Reborn launcher." % (source, missing))
 
 
 def refuse_dump_links(folder):
@@ -1913,7 +2013,7 @@ def ngx_script():
     """scripts/ngx_sdk.py: NVIDIA's DLSS SDK, its file table and where each file goes"""
     import importlib.util
     path = os.path.join(ROOT, "scripts", "ngx_sdk.py")
-    if not os.path.isfile(path):   # (the AppImage carries no scripts/: its Vulkan back end comes built, without DLSS)
+    if not os.path.isfile(path):   # (a builder without scripts/ngx_sdk.py: an older AppImage carried none)
         fail("NVIDIA DLSS (HOOKSHOT_NGX_SDK) needs %s, which this builder does not carry: its renderer is built without DLSS. "
              "Unset HOOKSHOT_NGX_SDK, or build Hookshot from source for DLSS." % path)
     spec = importlib.util.spec_from_file_location("ngx_sdk", path)
@@ -1926,13 +2026,19 @@ def ngx_platform():
     return "linux" if LINUX else "windows"
 
 
+def ngx_folder():
+    """Where --fetch-ngx-sdk keeps NVIDIA's DLSS SDK between builds: HOOKSHOT_NGX_SDK, else work/ngx-sdk here"""
+    return os.environ.get("HOOKSHOT_NGX_SDK") or os.path.join(ROOT, "work", "ngx-sdk")
+
+
 def fetch_ngx_sdk(a):
     """--fetch-ngx-sdk (the Hookshot Builder's NVIDIA DLSS tick): NVIDIA's DLSS SDK into HOOKSHOT_NGX_SDK before the build, once
     NVIDIA's license was accepted (--accept-nvidia-license: the builder asked first). Only what is missing or not the file
     expected is downloaded"""
-    sdk = os.environ.get("HOOKSHOT_NGX_SDK", "")
-    if not sdk:
-        fail("--fetch-ngx-sdk needs HOOKSHOT_NGX_SDK, the folder NVIDIA's DLSS SDK goes into.")
+    # (the Builder drops a HOOKSHOT_NGX_SDK set on the PC, so a launcher asking through --cli has none: the folder is ours then,
+    # and the rest of the build, which reads the variable, finds the SDK there)
+    sdk = ngx_folder()
+    os.environ["HOOKSHOT_NGX_SDK"] = sdk
     if not a.accept_nvidia_license:
         fail("NVIDIA DLSS needs NVIDIA's license accepted first (--accept-nvidia-license).")
     ngx = ngx_script()
@@ -2003,6 +2109,51 @@ def place_fsr_runtime(out):
         return None
     dst = ffx.install(ffx_folder(), out)
     print("AMD FSR 4: AMD's runtime in %s (AMD's, under AMD's license)" % dst, flush=True)
+    return dst
+
+
+def xess_script():
+    """scripts/xess_sdk.py as a module: Intel's XeSS library, its files and SHA-256s"""
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("xess_sdk", os.path.join(ROOT, "scripts", "xess_sdk.py"))
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def xess_folder():
+    """Where --fetch-xess-runtime keeps Intel's XeSS library between builds: HOOKSHOT_XESS_SDK, else work/xess-sdk here"""
+    return os.environ.get("HOOKSHOT_XESS_SDK") or os.path.join(ROOT, "work", "xess-sdk")
+
+
+def fetch_xess_runtime(a):
+    """--fetch-xess-runtime (Windows; the launchers' Intel XeSS switch): Intel's signed libxess.dll (scripts/xess_sdk.py) into
+    xess_folder() before the build, once Intel's license was accepted (--accept-intel-license: the launcher asked first, as
+    for AMD's and NVIDIA's), each file checked against its SHA-256; only what is missing or not the file expected is
+    downloaded. Off unless asked: every Windows build has XeSS (gpu/vk/vk_xess.cpp), which runs once the library is there"""
+    if not getattr(a, "accept_intel_license", False):
+        fail("Intel XeSS needs Intel's license accepted first (--accept-intel-license).")
+    xess = xess_script()
+    print(xess.NOTICE, flush=True)
+    print("Intel's license accepted: getting Intel's XeSS library into %s" % xess_folder(), flush=True)
+    try:
+        xess.fetch(xess_folder(), say=lambda line: print(line, flush=True))
+    except (OSError, ValueError) as e:
+        fail("Intel's XeSS library could not be downloaded (%s). Check the connection and build again, or leave out "
+             "--fetch-xess-runtime and put Intel's libxess.dll beside the game yourself (the readme)." % e)
+
+
+def place_xess_runtime(out):
+    """(Intel XeSS, --fetch-xess-runtime) Intel's library into the game folder, where gpu/vk/vk_xess.cpp looks. Returns the
+    folder, or None when nothing was fetched or the player's own libxess.dll is there (left alone)"""
+    xess = xess_script()
+    if LINUX or not xess.complete(xess_folder()):
+        return None
+    if xess.other(out):
+        xess.install(xess_folder(), out, say=lambda line: print(line, flush=True))   # (it says what it left alone)
+        return None
+    dst = xess.install(xess_folder(), out)
+    print("Intel XeSS: Intel's libxess.dll in %s (Intel's, under Intel's license)" % dst, flush=True)
     return dst
 
 
@@ -2101,6 +2252,10 @@ def parse_args():
     p.add_argument("--update", help="a game folder built before: built again from the game files it keeps (the game's update offer)")
     p.add_argument("--no-prepare-shaders", action="store_true",
                    help="leave the shaders' preparation to the game's first start (the builder's \"Prepare shaders now\" unticked)")
+    p.add_argument("--compile-shaders", choices=tuple(COMPILE_LEVELS),
+                   help="what the shaders' preparation builds: most (the default) every shader and the pipelines the lists name; "
+                        "all the predicted pipelines too (about 40%% longer). Kept in the folder's ocarina_reborn_options.ini "
+                        "(compile_shaders=), which the game's own preparations follow; not given: the folder's")
     p.add_argument("--log", metavar="FILE", help="also save build output to a UTF-8 file (replaces the file if it exists)")
     # (NVIDIA DLSS, off unless asked: NVIDIA's SDK into HOOKSHOT_NGX_SDK first, under NVIDIA's license. scripts/ngx_sdk.py)
     p.add_argument("--fetch-ngx-sdk", action="store_true", help="download NVIDIA's DLSS SDK into HOOKSHOT_NGX_SDK before the build")
@@ -2111,6 +2266,11 @@ def parse_args():
     p.add_argument("--fetch-fsr-runtime", action="store_true",
                    help="with --fsr (Windows): download AMD's FSR runtime (scripts/ffx_sdk.py) and put it in the game folder")
     p.add_argument("--accept-amd-license", action="store_true", help="AMD's FSR SDK license, accepted (with --fetch-fsr-runtime)")
+    # (Intel XeSS: every Windows build has it, and it runs once Intel's libxess.dll is beside the game. gpu/vk/vk_xess.cpp)
+    p.add_argument("--fetch-xess-runtime", action="store_true",
+                   help="(Windows) download Intel's XeSS library (scripts/xess_sdk.py) and put it in the game folder")
+    p.add_argument("--accept-intel-license", action="store_true",
+                   help="Intel's XeSS SDK license, accepted (with --fetch-xess-runtime)")
     a = p.parse_args()
     if a.prepare:   # (first: a bad --game below is said as RecompLauncher's "error" line)
         global PREPARE
@@ -2146,6 +2306,13 @@ def warn_slow_disk(*folders):
                   "The build goes ahead on this drive." % folder, file=sys.stderr if PREPARE else sys.stdout, flush=True)
             return
 
+
+
+def stale_copies(found, parents, visible):
+    """The copies end_stale_games ends: those with no visible window, but not the crash window's helper of a game still open
+    (host/hos_crash_dialog.c: the game's --crash-watch, a windowless child of the game it waits on). Ending it would lose that
+    run's watcher, and the game's own window stops the update anyway; a helper showing its window is visible, so left alone"""
+    return [pid for pid in found if pid not in visible and parents.get(pid) not in visible]
 
 
 INSTALLED_NOTE = ".ocarina_reborn_installed.json"   # (in the game folder: what the finish copied in, each file's hash and stat)
@@ -2231,7 +2398,7 @@ def end_stale_games(folders):
     snap = k32.CreateToolhelp32Snapshot(0x2, 0)
     if not snap or snap == wintypes.HANDLE(-1).value:
         return []
-    found = []
+    found, parents = [], {}
     try:
         e = Entry()
         e.dwSize = ctypes.sizeof(Entry)
@@ -2245,6 +2412,7 @@ def end_stale_games(folders):
                         path = os.path.normcase(buf.value)
                         if any(path.startswith(r) for r in roots) and os.path.dirname(path) + os.sep in roots:
                             found.append(e.th32ProcessID)
+                            parents[e.th32ProcessID] = e.th32ParentProcessID
                     k32.CloseHandle(h)
             ok = k32.Process32NextW(snap, ctypes.byref(e))
     finally:
@@ -2262,9 +2430,7 @@ def end_stale_games(folders):
                 visible.add(pid.value)
         return True
     u32.EnumWindows(proc(each), 0)
-    for pid in found:
-        if pid in visible:
-            continue
+    for pid in stale_copies(found, parents, visible):
         h = k32.OpenProcess(0x0001 | 0x00100000, False, pid)   # (PROCESS_TERMINATE | SYNCHRONIZE)
         if h:
             print("A copy of Hookshot left running without a window (process %d) was ended so the update can replace it" % pid,
@@ -2307,34 +2473,42 @@ def main(a=None):
         a.out = a.update
     if not a.out or not (a.update or a.nup or (a.romfs and a.exefs)):
         fail("needs --out, and --nup or --romfs with --exefs")
+    if not (a.update or a.nup):
+        check_romfs_folder(a.romfs)
     out = os.path.abspath(a.out)
     work = os.path.abspath(a.work)
     lock_work(work)   # (before anything is read or cleared in it: stop_stray_compilers, drop_stale_objects, the lift)
     a.language = build_language(a, out)   # (now: the folder's own language.txt is still the one the player left)
     warn_slow_disk(out, work)   # (a warning, not a stop: a hard drive still builds, only much slower)
     check_writable(out)
-    check_cpu()   # (no game read yet: the AppImage on a CPU without AVX2 stops here)
+    # (AMD FSR 4: the build's switch for nx2/build.py, set or cleared here, before the checks: the Vulkan back end is compiled
+    # with it, and its headers are checked. One set in the shell is not taken for this build's: --fsr, or the folder's mark, decides)
+    fsr = fsr_wanted(a, out)
+    if fsr:
+        os.environ["HOOKSHOT_FSR"] = "1"
+    else:
+        os.environ.pop("HOOKSHOT_FSR", None)
     if getattr(a, "fetch_ngx_sdk", False):
-        fetch_ngx_sdk(a)   # (the SDK selects a source renderer instead of HOOKSHOT_VK_PREBUILT)
+        fetch_ngx_sdk(a)   # (the Vulkan back end is compiled with NVIDIA DLSS)
     check_windows_sdk(work)
     stop_stray_compilers(work, a.default_work)
     drop_stale_objects(work)
-    # (AMD FSR 4: the build's switch for nx2/build.py, and the folder's mark for the next --update)
-    if fsr_wanted(a, out):
-        os.environ["HOOKSHOT_FSR"] = "1"
+    # (AMD FSR 4: the folder's mark for the next --update)
+    if fsr:
         if getattr(a, "fetch_fsr_runtime", False) and not LINUX:
             fetch_fsr_runtime(a)
         elif getattr(a, "fetch_fsr_runtime", False):
             print("--fetch-fsr-runtime: AMD publishes this runtime for Windows only; on Linux see the readme "
                   "(amd_fidelityfx_upscaler_vk.so)", flush=True)
         open(os.path.join(out, FSR_MARK), "w").close()
-        if os.environ.get("HOOKSHOT_VK_PREBUILT"):   # (the AppImage's back end, built without FSR 4)
-            print("--fsr: this build uses the prebuilt Vulkan back end (HOOKSHOT_VK_PREBUILT), which has no AMD FSR 4: the "
-                  "Upscaler row will not offer it", flush=True)
     else:
-        os.environ.pop("HOOKSHOT_FSR", None)
         if os.path.isfile(os.path.join(out, FSR_MARK)):
             os.remove(os.path.join(out, FSR_MARK))
+    # (Intel XeSS: no mark, every Windows build has it; Intel's library only when asked, and never taken away by a build without)
+    if getattr(a, "fetch_xess_runtime", False) and not LINUX:
+        fetch_xess_runtime(a)
+    elif getattr(a, "fetch_xess_runtime", False):
+        print("--fetch-xess-runtime: Intel publishes no XeSS library for Linux, so a Linux build has no XeSS", flush=True)
     exefs = os.path.join(work, "exefs")
     romfs = os.path.join(out, "romfs")
 
@@ -2344,8 +2518,9 @@ def main(a=None):
     if a.update:
         if not os.path.isdir(kept) or not os.path.isdir(romfs):
             fail("This game folder has no copy of the game files to update from: it was built before updates came in. Choose your game files "
-                 "in Hookshot Builder and build into the same folder once; updates after that work by themselves.")
+                 "in the Ocarina Reborn launcher and build into the same folder once; updates after that work by themselves.")
         check_cache_paths(out, (kept, romfs))
+        check_unpacked_romfs(romfs, "This game folder's copy of the game files (%s)" % romfs)
         shutil.copytree(kept, exefs)
         check_modules(exefs)
         stand_in_damaged_files(out, romfs)   # (a folder unpacked by an earlier builder from a 23.3 GB dump)
@@ -2360,13 +2535,14 @@ def main(a=None):
             st = os.stat(a.nup)
         except OSError as e:
             fail("Could not access your .nup file %s: %s. Check that the file is still there, reconnect its drive if needed, "
-                 "or choose the file again in Hookshot Builder." % (a.nup, e))
+                 "or choose the file again in the Ocarina Reborn launcher." % (a.nup, e))
         stamp = "unpacked by this builder: %s %d" % (os.path.basename(a.nup), st.st_size)
         same = False
         if os.path.exists(good) and os.path.isdir(romfs) and os.path.isdir(kept):
             same = read_stamp(good).strip() == stamp
         if same:
             print("the game was read from this .nup before: reading it again is skipped", flush=True)
+            check_unpacked_romfs(romfs, "Your .nup file %s" % a.nup)   # (unpacked by a builder before this check)
             shutil.copytree(kept, exefs)
         else:
             shutil.rmtree(game, ignore_errors=True)
@@ -2380,6 +2556,7 @@ def main(a=None):
                 check_supported_build(staged_exefs)
                 if not os.path.isdir(os.path.join(game, "romfs")):
                     fail("The package did not contain a romfs folder.")
+                check_unpacked_romfs(os.path.join(game, "romfs"), "Your .nup file %s" % a.nup)
             except (OSError, SystemExit):
                 try:
                     shutil.rmtree(game)
@@ -2406,10 +2583,16 @@ def main(a=None):
         refuse_dump_links(a.romfs)
         shutil.copytree(a.exefs, exefs)   # (unpacked in place: the user's copy stays as it is)
         run(PY + ["nx2/unpack.py", exefs])
+        # (before the folder's copies are touched: a dump of another version, refused, used to replace .ocarina_reborn_exefs first, and
+        # the next build from the .nup those were read from took them as its own and was refused too)
+        check_supported_build(exefs)
         link_or_copy(a.romfs, romfs)
         shutil.rmtree(kept, ignore_errors=True)
         shutil.copytree(exefs, kept)
+        with contextlib.suppress(FileNotFoundError):   # (the copies are this dump's now, not the .nup's that stamp names)
+            os.remove(os.path.join(out, ".ocarina_reborn_romfs"))
     check_supported_build(exefs)
+    # (Ocarina Reborn: the exe keeps its own name and icon, ocarina_reborn.res; the .nup's title is not taken)
 
     # (made once on the development PC: lists of addresses and counts, no game code)
     # (ocarina_reborn_vk.profdata: the renderer's own profile, counts over Hookshot's own code)
@@ -2624,7 +2807,13 @@ def main(a=None):
     # an update with nothing changed links the same 460 MB exe again, and its copy and swap were 4-8 s of the finish on the
     # lab, more where an antivirus reads each new exe. A file that differs is staged and swapped as before)
     installed = read_installed(out)
-    staged = [(src, dst) for src, dst in staged if not installed_already(src, dst, out, installed)]
+    # (a loop, not a comprehension: tests/test_linux_update.py runs this part of main with out among exec's locals, which a
+    # comprehension's own scope does not see before Python 3.12)
+    fresh = []
+    for src, dst in staged:
+        if not installed_already(src, dst, out, installed):
+            fresh.append((src, dst))
+    staged = fresh
     for src, dst in staged:
         try:
             if os.path.exists(dst + ".new"):
@@ -2648,7 +2837,14 @@ def main(a=None):
                  "Staged replacements remain beside the installed files; the compiled source remains at %s." % (dst, src))
     if staged:
         note_installed(out, installed, staged)
-    if launcher:   # (a folder built before the launcher: its libraries left the folder for bin\; ocarina_reborn is the launcher now)
+    if not LINUX:   # (the WebGPU renderer's library, which builds from before the Vulkan back end was the only renderer left)
+        for d in sorted({game_dir, out}):
+            try:
+                if os.path.isfile(os.path.join(d, "wgpu_native.dll")):
+                    os.remove(os.path.join(d, "wgpu_native.dll"))
+            except OSError:
+                pass
+    if launcher:   # (a folder built before the launcher: its libraries left the folder for bin\; hookshot is the launcher now)
         stale = [] if LINUX else sorted(f for f in os.listdir(out) if f.endswith(".dll") and f.startswith(("av", "sw")))
         for n in BESIDE[1:] + stale + ["ocarina_reborn.map", "ocarina_reborn-game.exe"]:
             try:
@@ -2659,6 +2855,8 @@ def main(a=None):
     place_ngx_runtime(out)
     if fsr_wanted(a, out) and getattr(a, "fetch_fsr_runtime", False):
         place_fsr_runtime(out)
+    if getattr(a, "fetch_xess_runtime", False):
+        place_xess_runtime(out)
     PHASES.part("swap and runtimes")
     # every shader of the game, for its first start to translate (gpu/vk/vk_shader.cpp seed_open). Without it the game still runs, compiling them
     # as it meets them: not worth stopping a finished build for
@@ -2669,6 +2867,14 @@ def main(a=None):
         print("the shader list was not made: the game will compile its shaders as it plays", flush=True)
     else:
         note_shader_list(work, romfs, os.path.join(out, "ocarina_reborn_shaders.bin"))
+    # (hookshot) Some dumps hold textures whose first kilobytes are zeros; the game cannot decode them and never finishes loading
+    # the models that need one: the fairy fountains' floor and walls were not drawn, and as an adult the model was loaded again
+    # and again for good. tools/dump_repair.py writes a small mod that stands in for the ones it knows, from the player's own
+    # files; it was a step for the player to run by hand (README), now every build does it. Not worth stopping a build for
+    repair = os.path.join(ROOT, "tools", "dump_repair.py")
+    if os.path.isfile(repair) and run(PY + [repair, romfs, os.path.join(out, "mods", "00-dump-repair")], check=False,
+                                      output=sys.stderr):
+        print("the dump's damaged textures were not checked: the game runs without the stand-ins", flush=True)
     PHASES.part("shader list")
     # (hookshot) the button prompts of other controllers (host/prompts.c): the game's icon font redrawn per controller, with fontTools.
     # Without it the game shows its own icons
@@ -2684,7 +2890,7 @@ def main(a=None):
         shutil.rmtree(prompts, ignore_errors=True)
     PHASES.part("button prompts")
     icon = os.path.join(ROOT, "assets", "ocarina_reborn.png")
-    if LINUX and os.path.exists(icon):   # (the window's icon: host/posix/display_sdl.c)
+    if LINUX and not game_title.write_png(out, os.path.join(out, "ocarina_reborn.png")) and os.path.exists(icon):   # (the window's icon: host/posix/display_sdl.c; the game's own when its .nup had one)
         copy_writable(icon, os.path.join(out, "ocarina_reborn.png"))   # (a second build overwrites the first's)
     seed_pipelines(out)
     ship_state_list(out)
@@ -2692,7 +2898,8 @@ def main(a=None):
     with open(language, "w", encoding="utf-8", newline="\n") as f:
         f.write("# The game's language. Change the line below to one of the codes listed here, save, and start the game again.\n\n%s\n\n" % a.language)
         f.writelines("# %-8s %s\n" % l for l in LANGUAGES)
-    # (what the game's update offer reads, host/hos_update.c: which release these tools are, and where the builder that made the folder is)
+    # (what the folder's launcher reads, builder/setup/portable_home.h and builder/linux/ocarina_reborn-folder: which release these tools
+    # are, and where the builder that made the folder is)
     tag = ""
     for version_name in ("version.txt", "VERSION"):   # (VERSION: the AppImage, which has no version.txt)
         version = os.path.join(ROOT, version_name)
@@ -2709,9 +2916,6 @@ def main(a=None):
                 f.write("builder_local=1\n")
             elif os.environ.get("HOOKSHOT_BUILDER_EXE"):
                 f.write("builder=%s\n" % os.environ["HOOKSHOT_BUILDER_EXE"])
-                # (the Python builder: builder is its pythonw.exe, and these the arguments before --update, host/hos_update.c)
-                if os.environ.get("HOOKSHOT_BUILDER_ARGS"):
-                    f.write("builder_args=%s\n" % os.environ["HOOKSHOT_BUILDER_ARGS"])
     PHASES.part("pipeline lists, icon and stamps")
     # (the game's code as read: written again by every build, so not left behind in the work folder. The translated code (sa\gen)
     # and the compiled objects stay: the next build skips the lift when nothing it reads changed (#428) and compiles only what
@@ -2749,11 +2953,14 @@ def main(a=None):
                                                     "" if previous is None else " (the last one %s)" % clock(previous)), flush=True)
     say("times", "%.0f" % total_seconds, "%.0f" % compile_seconds, "-1" if previous is None else "%.0f" % previous)
     # (after the times: they stay comparable from build to build, without a GPU's minutes that can be switched off)
+    if getattr(a, "compile_shaders", None):   # (the choice kept in the folder: the game's own preparations at a start follow it)
+        write_compile_level(out, a.compile_shaders)
+    level = compile_level(a, out)
     skipped = prepare_skipped(a)
     if skipped:
         not_prepared(skipped)
     else:
-        prepare_shaders([os.path.join(game_dir, BESIDE[0]), "--prepare-shaders"], out)
+        prepare_shaders([os.path.join(game_dir, BESIDE[0]), "--prepare-shaders", "--compile-shaders", level], out)
     say("done", out)
 
 

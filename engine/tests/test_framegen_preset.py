@@ -51,6 +51,9 @@ Options opts;
 int saves = 0;
 void save() { ++saves; }
 void apply_pad_layout(int) {}
+int detect_pad_layout() { return opts.pad_layout; }
+constexpr int kAutoPreset = 6;   /* (the Quality preset Auto (this PC): apply_auto, not reached here) */
+void apply_auto() {}
 void env_release(const int*) {}   // (the environment's hold on a row: none here)
 bool row_fixed(const int*) { return false; }
 namespace ur = mkwvk::upscaler_rows;

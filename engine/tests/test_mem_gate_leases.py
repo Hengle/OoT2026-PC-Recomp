@@ -52,7 +52,7 @@ class CompileGateTests(unittest.TestCase):
         self.cached = []
         self.scope.update(GATE=self.gate, OBJ_CACHE=str(self.cache),
                           PLANNED={(job[1], job[2]): self.keys[job[2]] for job in self.jobs},
-                          no_throttle=lambda handle: None,
+                          no_throttle=lambda handle: None, below_normal=lambda handle: None,
                           cache_put=lambda obj, key: self.cached.append((obj, key)))
 
     def popen(self, factory):

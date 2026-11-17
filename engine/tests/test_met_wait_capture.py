@@ -44,6 +44,7 @@ def main():
     replay = (ROOT / "gpu" / "vk" / "vk_replay.cpp").read_text(encoding="utf-8")
     memory = (ROOT / "gpu" / "vk" / "vk_memory.cpp").read_text(encoding="utf-8")
     header = (ROOT / "gpu" / "vk" / "vk_internal.h").read_text(encoding="utf-8")
+    docs = (ROOT / "docs" / "development.md").read_text(encoding="utf-8")
 
     need("uint64_t memory_captures_begun();" in header, "vk_internal.h no longer declares memory_captures_begun")
     make = block(memory, "std::unique_ptr<Capture> capture_make() {")
@@ -79,6 +80,7 @@ def main():
          resume.index("met_resumed_at = nullptr;"), "the mark holds for the resumed run only")
     need("resume_capture_on()" in resume, "resume_queue and the met wait must read the same RX_VK_RESUME_CAPTURE")
 
+    need("`RX_VK_MET_WAIT_CAPTURE=0`" in docs, "docs/development.md has no row for RX_VK_MET_WAIT_CAPTURE")
     print("PASS: a met wait for a CPU event with an uncaptured signal stops once for resume_queue's capture")
 
 

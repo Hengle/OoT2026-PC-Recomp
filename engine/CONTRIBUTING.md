@@ -15,12 +15,16 @@ never will. That includes:
 
 - the `.nup`, `romfs`, `exefs`, `.nso`, `.nca`, `.nsp`, `.xci` or `.nsz`/`.xcz` files, and any title keys;
 - `work/` and everything in it: the extracted dump, `image.bin`, the lifted C, test builds, runs and screenshots;
-- `hookshot.exe`, `hookshot_vk.dll`, `hookshot_programs.bin` (and its `hookshot_programs.idx`), `hookshot_pipelines.bin`,
-  `mkw_vk_pipelines.bin` and other build output;
-- saves (`user/`), `hookshot_options.ini`, `hookshot_env.txt` and `language.txt`.
+- `ocarina_reborn.exe`, `ocarina_reborn_vk.dll` and other build output, and the game folder's `cache/` (`ocarina_reborn_programs.bin` and
+  its `.idx`, `ocarina_reborn_pipelines.bin`, `mkw_vk_pipelines.bin`);
+- saves (`user/`), `ocarina_reborn_options.ini`, `ocarina_reborn_env.txt` and `language.txt`. The one exception: scrubbed saves
+  under `assets/saves/` ([the rules](assets/saves/README.md)): one slot each (`progress.sav` and `caption.sav` only),
+  its picture made grey and its date reset by `scripts/oot_saves.py scrub`, passing `check-repo-saves`, made fresh
+  for the farm (never someone's own adventure), and added through a pull request two maintainers approve.
+  `account.sav`, `option.sav`, `ocarina_reborn_options.ini`, `ocarina_reborn_env.txt` and the rest of `user/` stay banned.
 
 Do not open an issue or a PR asking where to get the game, how to decrypt it, or for someone else's files. A
-screenshot, a video and `hookshot_log.txt` are fine and often necessary; the log holds no game data.
+screenshot, a video and `ocarina_reborn_log.txt` are fine and often necessary; the log holds no game data.
 
 `.gitignore` covers most of this, but check `git status` before you commit. If you are not sure whether a file is
 game data, leave it out.
@@ -35,17 +39,17 @@ break. Claim in Discord #dev-work before you start.
 |---|---|
 | **Test on other hardware** | NVIDIA cards are the most tested; the README's [status table](readme.md#project-status) says what works where, and [tested configurations](docs/tested-configurations.md) lists the runs behind it (build, hardware, driver, where, fps). Reports from AMD and Intel cards, other NVIDIA drivers, other distributions and SteamOS are useful even when everything works: add a row there. Pull requests that need a run on your hardware are queued as [test requests](docs/test-requests.md): pick one up, by hand or with an agent. |
 | **Play further** | The tested area is the start of the game. Reaching new areas, cutscenes, menus and items finds problems the developer has not seen. |
-| **Report what is broken** | Use the [issue forms](https://github.com/NotRexed/Hookshot/issues/new/choose): game problem, build problem or idea. Include the version, your hardware, where you were and `hookshot_log.txt`. |
+| **Report what is broken** | Use the [issue forms](https://git.notrexed.dev/Hookshot/Hookshot/issues/new/choose): game problem, build problem or idea. Include the version, your hardware, where you were and `ocarina_reborn_log.txt`. |
 | **Send a fix** | Fork, fix, test, open a pull request. Small, focused changes are easiest to review and merge. |
 | **Improve the docs** | The README, the development guide and the design notes are part of the project. Corrections and clearer steps are welcome. |
 
 ## Before you open an issue or a PR
 
-- Try the [newest release](https://github.com/NotRexed/Hookshot/releases/latest) first. It includes every fix before it.
+- Try the [newest release](https://git.notrexed.dev/Hookshot/Hookshot/releases/latest) first. It includes every fix before it.
 - Search the open issues. If yours is already there, add your details instead of opening another.
 - English, please.
 - One topic per issue or pull request. Do not mix a fix with a refactor or a batch of unrelated changes.
-- Report the version you actually ran: the release name, or the first line of `hookshot_log.txt`.
+- Report the version you actually ran: the release name, or the first line of `ocarina_reborn_log.txt`.
 - Test without ReShade, shader-cache tools, overlays and frame-generation injectors when you report a graphics or
   performance problem. They change what Hookshot does.
 
@@ -78,7 +82,6 @@ before it starts.
    | From `tools` | To | Variable |
    |---|---|---|
    | `tools\cpm` | anywhere | `RX_CPM` points at it (Vulkan headers and FFmpeg; without it, system headers or `HOOKSHOT_*_HEADERS`, the standalone build stops) |
-   | `tools\wgpu-native` | anywhere | `WGPU_NATIVE` points at it (the WebGPU fallback renderer; without it the game is built without one) |
    | `tools\third_party` | `third_party\` | (its `.dll`, `.exe`, `.lib` and `.sha1` files, to the same places: `a64emit`, `lld-link`, `zbic` and SDL2) |
    | `tools\work` | `work\` | (hot-function list, link order, profile and icon; without it the game builds but runs slower) |
 
@@ -126,12 +129,12 @@ python -I nx2/make_game.py --nup "C:\path\your-game.nup" --out "C:\Games\Hooksho
 ```
 
 On Windows the llvm-mingw build links NVIDIA's static `nvsdk_ngx_s.lib` (built for Microsoft's static runtime) into
-`hookshot_vk.dll`, with `gpu/vk/vk_ngx_msvc_rt.cpp` and `host/mingw_msvc_shims.c` for what it needs of that runtime.
+`ocarina_reborn_vk.dll`, with `gpu/vk/vk_ngx_msvc_rt.cpp` and `host/mingw_msvc_shims.c` for what it needs of that runtime.
 `make_game.py` copies `nvngx_dlss.dll` and DLSS Frame Generation's `nvngx_dlssg.dll` into the game folder's `ngx`
 folder; never put NGX's core, `_nvngx.dll`, beside the game (it is the driver's). On Linux it is `--platform linux` (or
 `scripts/linux/ngx-sdk.sh`), with `libnvsdk_ngx.a`, `libnvidia-ngx-dlss.so` and `libnvidia-ngx-dlssg.so`. A Windows
 game with DLSS can be built on Linux too, with `RX_TARGET=windows` as below.
-CI's `vulkan-dlss` workflow (`.github/workflows/vulkan-dlss.yml`) checks only that `hookshot_vk.dll` still links with the
+CI's `vulkan-dlss` workflow (`.github/workflows/vulkan-dlss.yml`) checks only that `ocarina_reborn_vk.dll` still links with the
 SDK. It runs by hand, and on a push or pull request only when a file DLSS's build depends on changes; it accepts NVIDIA's
 license for that run alone and uploads nothing.
 
@@ -172,7 +175,7 @@ compilers that always run (up to 4 on Windows) still run under a smaller number.
 | `python -I nx2/make_game.py --check --nup "C:\path\your-game.nup"` | Check the game and its version without building. |
 | `python -I nx2/dump.py --dump <folder with exefs/ and romfs/> --set` | Record the dump in `work/dump.txt`. |
 | `python -I nx2/lift.py --standalone --write` | Lift the game to C in `work/sa/gen`. |
-| `python -I nx2/build.py --standalone --jobs 4` | Compile `work/sa/build/hookshot.exe` and `hookshot_vk.dll`. |
+| `python -I nx2/build.py --standalone --jobs 4` | Compile `work/sa/build/ocarina_reborn.exe` and `ocarina_reborn_vk.dll`. |
 | `powershell -File scripts/run-vk.ps1 -Window -Seconds 120` | Run the standalone build with the Vulkan back end and take screenshots in `work/runs/<name>/shots`. |
 | `python -I scripts/prof.py <stacks file>` | Read a profile sampled with `HOS_PROFILE`, `HOS_SAMPLE` and `HOS_SAMPLE_FILE`. |
 
@@ -186,7 +189,7 @@ hot code at `-O1`, about a quarter less compile time. Never use it for fps, timi
 
 ### Game-free checks
 
-These need no dump and are what CI runs, on every pull request and every push to `main`. One command runs them all:
+These need no dump and are what CI runs, on every pull request and every push to `main`. One command runs the source checks:
 
 ```powershell
 python -I -B tests/run_all.py
@@ -204,6 +207,11 @@ validator (`spirv-val`), the SPIR-V or Vulkan headers (`HOOKSHOT_SPIRV_HEADERS` 
 cache in `RX_CPM` or `build-linux/deps/cpm`), or the `zstandard` package. A check whose tool is missing is skipped and
 says so; CI passes `--strict`, which fails it instead. A check that cannot run in CI (a GPU, the game, a Visual Studio
 prompt), or runs on one OS only, says so in its own file with `RUN_ALL_SKIP`; `--no-skip` runs it anyway.
+
+CI also runs `tests/run_vulkan_fixtures.py` on Ubuntu 24.04 with Mesa's lavapipe software driver and the Khronos
+validation layer. It executes the authored write-back shader, copy-span and seven offscreen aspect/crop cases;
+missing devices, skipped cases and validation errors fail the job. This is CPU Vulkan execution, not hardware GPU
+coverage, a swapchain or a game run. The ordinary source checks keep their GPU opt-ins/skips for machines without Vulkan.
 
 ### Checks that need your dump or a run
 
@@ -248,6 +256,9 @@ the development guide's [reference](docs/development.md#switches-for-testing-and
 
 - Match the file you are editing: there is no formatter configuration, so use the indentation, comment style and
   naming around you. Do not reformat unrelated code in the same change.
+- A function that keeps a rule written in the docs says where, in a comment just above it: `// doc: docs/<file>.md#<heading
+  anchor>` (`# doc:` in Python), with the rule's number or a few words after it. `tests/test_doc_anchors.py` fails on an
+  anchor whose file or heading is gone, so a renamed heading is fixed in the same change.
 - Keep OoT-specific code in new files where possible. `nx2/`, `host/` and `gpu/` are kept close to mkw-recomp so
   upstream fixes can be applied as a patch; keeping the paths and the shared files recognizable is what makes that
   work. Each sync names its new mkw-recomp base commit in the commit message.
@@ -332,9 +343,9 @@ NVIDIA's DLSS SDK is not one of them: it is never in the repository, and nothing
 
 ## Where to talk
 
-- **Issues:** [use the forms](https://github.com/NotRexed/Hookshot/issues/new/choose).
+- **Issues:** [use the forms](https://git.notrexed.dev/Hookshot/Hookshot/issues/new/choose).
 - **Discord:** https://discord.gg/rexed. Use the `dev-work` channel for prs.
-- **Newest release:** https://github.com/NotRexed/Hookshot/releases/latest
+- **Newest release:** https://git.notrexed.dev/Hookshot/Hookshot/releases/latest
 
 Thanks for testing, reporting and sending fixes. Every report from a different GPU and every area played further than
 before moves the port forward.
