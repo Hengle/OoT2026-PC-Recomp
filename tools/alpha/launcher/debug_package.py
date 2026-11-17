@@ -15,7 +15,10 @@ def recent(paths, root, count):
     found = []
     for path in paths:
         try:
-            if path.is_symlink() or not path.is_file() or not path.resolve().is_relative_to(Path(root).resolve()):
+            # (no links; the path itself under root. Not resolve(): Windows redirects an app container's AppData writes, a launcher
+            # started from a packaged app's process wrote its run files into ...\Packages\<app>\LocalCache, and resolve() then
+            # named that folder, so the newest run was left out of the package (2026-11-17, run 225135))
+            if path.is_symlink() or not path.is_file() or not Path(os.path.abspath(path)).is_relative_to(Path(os.path.abspath(root))):
                 continue
             found.append((path.stat().st_mtime_ns, path))
         except OSError:
@@ -45,7 +48,8 @@ def candidates(game, folders):
         (game, 'game-logs', ('ocarina_reborn_log*.txt', 'hookshot_log*.txt'), 1),
         (folders['CrashDumps'], 'symbols', ('symbols-*.json',), 2),
         (game, 'crash/native', ('ocarina_reborn_crash_*.txt',), 5),
-        (game, 'timeline/direct', ('ocarina_reborn_diagnostics.jsonl', 'ocarina_reborn_diagnostics.jsonl.previous.jsonl'), 2),
+        # (a direct start's timeline is named after its process since 1.1.4-4: ocarina_reborn_diagnostics-<pid>.jsonl; the newest two)
+        (game, 'timeline/direct', ('ocarina_reborn_diagnostics*.jsonl',), 2),
         (folders['PrepareLogs'], 'prepare-logs', ('*.log',), 5),
         (folders['Logs'], 'launcher-logs', ('*.log',), 10),
         (game, 'game-logs', ('ocarina_reborn_log*.txt', 'hookshot_log*.txt'), 10),
@@ -91,7 +95,7 @@ def create(destination, game, folders, build, system, settings, note='', replace
         write('settings-at-export.json', json.dumps(settings, indent=2))
         write('problem-description.txt', note[:8000] or 'No description supplied. Ask for room/boss/song, steps and the marker time.')
         write('READ-ME.txt', 'Start with problem-description.txt and crash/run-*.json. Match run_id, binary SHA256 and timeline filename.\n'
-              'Performance reports are in reports/. Incidents, Ctrl+F8/F1 markers and surrounding samples are in *-timeline.jsonl.\n'
+              'Performance reports of this build are in reports/, of earlier builds in reports/older-builds/. Incidents, Ctrl+F8/F1 markers and surrounding samples are in *-timeline.jsonl.\n'
               'Timeline sample times are milliseconds since recorder startup, recorded in the paired run metadata UTC/local start window.\n'
               'Each sample contains interval totals, not per-frame averages. CPU is process-wide CPU time across cores.\n'
               'Stage durations overlap across threads and nested operations; GPU measurements can arrive late. Do not sum them as exclusive frame costs.\n'
@@ -121,8 +125,17 @@ def create(destination, game, folders, build, system, settings, note='', replace
                     else:
                         raw = stream.read(allowance)
                 total += len(raw)
+                entry = dict(name=name, source_bytes=size, exported_bytes=len(raw), truncated=size>allowance)
+                if name.startswith('reports/'):   # (a report of another build than the one exported is not this build's result)
+                    try:
+                        made_by = json.loads(raw).get('build')
+                    except (ValueError, AttributeError):
+                        made_by = None
+                    if made_by and build.get('stamp') and made_by != build.get('stamp'):
+                        name = 'reports/older-builds/' + name[len('reports/'):]
+                        entry.update(name=name, build=made_by, note='made by another build than the exported one')
                 write(name, raw.decode('utf-8', 'replace'))
-                manifest['files'].append(dict(name=name, source_bytes=size, exported_bytes=len(raw), truncated=size>allowance))
+                manifest['files'].append(entry)
             except OSError as exc:
                 manifest['omitted'].append(dict(name=name, reason=type(exc).__name__))
         manifest['source_bytes_read'] = total

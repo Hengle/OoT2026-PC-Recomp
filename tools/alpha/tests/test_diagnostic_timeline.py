@@ -176,10 +176,34 @@ class NativeRecorderTests(unittest.TestCase):
 
     def test_cap_rotates_and_keeps_recording(self):
         _,rows=self.launch('cap')
-        self.assertEqual([r['type'] for r in rows],['continuation','clock_anchor','after_rotation','end'])
+        self.assertEqual([r['type'] for r in rows],['continuation','clock_anchor','after_rotation','frame_histogram','end'])
         previous=[json.loads(line) for line in (self.root/'cap.jsonl.previous.jsonl').read_text().splitlines()]
         self.assertEqual(previous[-1]['type'],'limit')
         self.assertTrue(any(r['type']=='clock_anchor' for r in previous))
+
+    def test_audio_events_leave_room_and_histogram_gives_run_quantiles(self):
+        _,rows=self.launch('priority')
+        kinds=[r.get('kind') for r in rows if r['type']=='event']
+        self.assertEqual(kinds.count('capture_wait'),10,'important events must not be pushed out by audio voices')
+        self.assertLessEqual(kinds.count('audio_voice_request'),8)
+        samples=[r for r in rows if r['type']=='sample']
+        self.assertTrue(any(r['low_priority_events_skipped']>=490 for r in samples))
+        self.assertTrue(all(r['dropped_events']==0 for r in samples))
+        self.assertTrue(all('system_cpu_busy_pct' in r and 'page_faults' in r and 'context_stale' in r for r in samples))
+        run=[r for r in rows if r['type']=='run']
+        self.assertTrue(run and run[0]['qpc_origin_ms']>0)
+        hist=[r for r in rows if r['type']=='frame_histogram'][-1]
+        self.assertEqual(sum(hist['all']),1050); self.assertEqual(sum(hist['outside_menus']),1000)
+        def quantile(counts,q):
+            # (upper edge of the bucket holding the q-th frame: 1 ms to 50, 5 to 100, 25 to 300, 100 to 1000)
+            edges=[i+1 for i in range(50)]+[50+5*(i+1) for i in range(10)]+[100+25*(i+1) for i in range(8)]+[300+100*(i+1) for i in range(7)]+[float('inf')]
+            need=q*sum(counts);run=0
+            for c,e in zip(counts,edges):
+                run+=c
+                if run>=need:return e
+        self.assertEqual(quantile(hist['outside_menus'],0.99),17)    # (990 of 1000 frames at 16 ms)
+        self.assertEqual(quantile(hist['outside_menus'],0.999),41)   # (the 999th: one of the nine at 40 ms)
+        self.assertEqual(quantile(hist['outside_menus'],1.0),800)    # (the one 700 ms frame)
 
     def test_exhausted_phase_slots_keep_aggregate_io_without_repeated_scanning(self):
         _,rows=self.launch('slots')

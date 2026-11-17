@@ -30,9 +30,10 @@ def main():
     actual += "\n" + block(vma, "void flush_mapped_range(")
     astc = block(tex, "bool upload_astc_gpu(")
     # Diagnostic state now written by the complete gather prefix is production state too.
-    marker = "thread_local const char* astc_fail ="
-    start = tex.index(marker)
-    actual += "\n" + tex[start:tex.index(";", start) + 1] + "\n"
+    for marker in ("thread_local const char* astc_fail =", "thread_local double upload_stage_ms =",
+                   "thread_local uint64_t upload_staged_bytes ="):   # (Ocarina Reborn: the slow-upload line's staging time and bytes)
+        start = tex.index(marker)
+        actual += "\n" + tex[start:tex.index(";", start) + 1] + "\n"
     # The actual gather, publication and command-buffer request. Decoder shaders are outside this cache fixture.
     stop = astc.index("    const uint64_t align =", astc.index("    const uint64_t staged ="))
     astc = astc[:stop].replace("    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, astc_pipe);", "    consume(cmd);")
@@ -52,7 +53,7 @@ def main():
         cpp, exe = Path(temp) / "fixture.cpp", Path(temp) / "fixture.exe"
         cpp.write_text(fixture, encoding="utf-8")
         subprocess.run([a.cxx, "-std=c++20", "-O1", "-Wall", "-Wextra", "-Werror", "-Wno-missing-field-initializers",
-                        "-I" + str(a.headers), *(["-fsanitize=address,undefined", "-fno-omit-frame-pointer", "-fno-pie", "-no-pie"] if a.sanitize else []),
+                        "-I" + str(a.headers), "-I" + str(ROOT / "gpu/vk"), *(["-fsanitize=address,undefined", "-fno-omit-frame-pointer", "-fno-pie", "-no-pie"] if a.sanitize else []),
                         str(cpp), "-o", str(exe)], check=True)
         for cache in ["coherent", "noncoherent"]:
             for case in ["cpu", "astc", "atom", "reuse", "inflight-tail", "multiple", "failure", "empty-range",

@@ -13,14 +13,20 @@ inline int mode() {
     }();
     return value;
 }
-inline uint64_t texture_limit(uint64_t normal, uint64_t ram, int policy) {
+inline uint64_t texture_limit(uint64_t normal, uint64_t ram, int policy, uint64_t commit_free_at_start = 0) {
     if (!policy || !ram) return normal;
     // Texture caches also consume driver/host bookkeeping. This is a cache limit,
     // never a texture-resolution change. GPU-only images retain their existing guards.
     const uint64_t share = policy == 2 ? ram / 8 : ram / 5;
     const uint64_t ceiling = policy == 2 ? 4096 * MiB : 12288 * MiB;
     const uint64_t rounded = share / (256 * MiB) * (256 * MiB);
-    return std::min(normal, std::clamp(rounded, 1024 * MiB, ceiling));
+    uint64_t limit = std::clamp(rounded, 1024 * MiB, ceiling);
+    // (Ocarina Reborn: a Balanced limit grown with the commit free at start, 2026-11-17's test 1.1.4-2, was taken back: on AMD
+    // the textures are system RAM too, and at 11 GB the RAM free fell to 1.4 GB, the capture spares were trimmed to 32 MB and
+    // remade on the game's thread, and frames over 50 ms went from 5 to 28 a minute. The RAM share stays the limit; the
+    // parameter is kept, unused, for the call)
+    (void)commit_free_at_start;
+    return std::min(normal, limit);
 }
 inline uint64_t target_cache_limit(uint64_t normal, int policy) {
     return policy == 2 ? std::min(normal, 64 * MiB) : normal;

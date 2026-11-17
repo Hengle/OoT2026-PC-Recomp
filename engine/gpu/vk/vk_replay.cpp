@@ -2540,26 +2540,67 @@ void bench_frame(int64_t presents) {
 
 /// A slow submit (over 15 ms): what took its time, logged (60 of them). The stalls in it are exact (PROF, PROF_EXACT); the
 /// per-draw phases' cheap part is sampled, one draw in eight (PROF_HOT): an estimate, exact with RX_VK_PROF_ALL=1
+/// (Ocarina Reborn) this thread's own memory work (submit_memory_work's maps, capture and collection, ns): what a slow submit spent
+/// itself, apart from what other threads did meanwhile (the memsync_part_ns totals count every thread)
+thread_local int64_t tl_memwork_ns[3] = {0, 0, 0};
+thread_local uint64_t tl_watch_value = 0;   // (the submission a SlowWatch on this thread is for: its log line names it)
+/// this thread's CPU time in ms (kernel + user): a slow part the thread was not running for (waiting, paged, preempted) shows as
+/// wall time without CPU time
+double thread_cpu_ms() {
+#ifdef _WIN32
+    FILETIME c, e, k, u;
+    if (!GetThreadTimes(GetCurrentThread(), &c, &e, &k, &u)) return -1;
+    const auto t = [](const FILETIME& f) { return (double)(((uint64_t)f.dwHighDateTime << 32) | f.dwLowDateTime) / 1e4; };
+    return t(k) + t(u);
+#else
+    return -1;
+#endif
+}
 struct SlowWatch {
     std::chrono::steady_clock::time_point t0 = std::chrono::steady_clock::now();
     int64_t prof0[PROF_COUNT];
     int64_t ms0[4];   // (hookshot: memory sync's parts and the lock wait, at the start)
+    int64_t own0[3];  // (this thread's memory work at the start)
+    double cpu0;
     const char* what;
     explicit SlowWatch(const char* w) : what(w) {
         std::memcpy(prof0, prof_ns, sizeof prof0);
-        for (int i = 0; i < 3; i++) ms0[i] = memsync_part_ns[i].load(std::memory_order_relaxed);
+        for (int i = 0; i < 3; i++) ms0[i] = memsync_part_ns[i].load(std::memory_order_relaxed), own0[i] = tl_memwork_ns[i];
         ms0[3] = memsync_lock_wait_ns.load(std::memory_order_relaxed);
+        cpu0 = thread_cpu_ms();
+        tl_watch_value = 0;
     }
     ~SlowWatch() {
         const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
-        static int logged;
-        if (ms < 15.0 || logged >= 80 || presents_now < 600) return;   // (after the first load)
-        logged++;
+        // (Ocarina Reborn: every slow one counted; the first 80 told in full, and after them each of 50 ms and more, 400 of those,
+        // so a late hitch is not lost behind the first load's 80 (2026-11-17's log: all 80 spent before minute two). Every 100
+        // counted, a line of how many there were)
+        static int logged, logged_big;
+        static std::atomic<uint64_t> slow_n{0}, slow_big_n{0};
+        if (ms < 15.0 || presents_now < 600) return;   // (after the first load)
+        const uint64_t n_slow = ++slow_n, n_big = ms >= 50.0 ? ++slow_big_n : slow_big_n.load();
+        if (n_slow % 100 == 0)
+            logf("vk: slow submits so far: %llu of 15 ms and more, %llu of 50 ms and more", (unsigned long long)n_slow, (unsigned long long)n_big);
+        if (logged >= 80 && (ms < 50.0 || logged_big >= 400)) return;
+        if (logged >= 80) logged_big++;
+        else logged++;
         static const char* names[PROF_COUNT] = {"submit", "present", "draw", "descriptors", "texture lookups",
                                                 "uploads", "pipelines", "programs", "commands", "dispatch",
                                                 "memory sync", "queue submit", "slot wait"};
-        char line[600];
-        int k = snprintf(line, sizeof line, "vk: slow %s: %.1f ms:", what, ms);
+        char line[900];
+        int k = snprintf(line, sizeof line, "vk: slow %s: %.1f ms @%.1f:", what, ms,
+                         std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now().time_since_epoch()).count());
+        {   // (Ocarina Reborn: this thread alone, its parts disjoint: its own memory work, the rest of its time unattributed by that,
+            // and how much of the wall time it was running on a CPU at all. The list after it is the global phase counters: every
+            // thread's, overlapping, and nested (descriptors, texture lookups and uploads are inside draw))
+            double own[3], sum = 0;
+            for (int i = 0; i < 3; i++) own[i] = (tl_memwork_ns[i] - own0[i]) / 1e6, sum += own[i];
+            const double cpu1 = thread_cpu_ms();
+            k += snprintf(line + k, sizeof line - k, " [submission %llu, this thread: maps %.1f, capture %.1f, collect %.1f, other %.1f; "
+                          "on CPU %.1f of %.1f]", (unsigned long long)tl_watch_value, own[0], own[1], own[2], std::max(0.0, ms - sum),
+                          cpu0 >= 0 && cpu1 >= 0 ? cpu1 - cpu0 : -1.0, ms);
+            k += snprintf(line + k, sizeof line - k, " all threads, overlapping and nested:");
+        }
         for (int i = 2; i < PROF_COUNT; i++) {
             const double d = (prof_ns[i] - prof0[i]) / 1e6;
             if (d >= 1.0) k += snprintf(line + k, sizeof line - k, " %s %.1f", names[i], d);
@@ -2595,6 +2636,10 @@ void submit_memory_work(uint64_t value) {
     const auto m3 = std::chrono::steady_clock::now();
     memsync_part_ns[1] += std::chrono::duration_cast<std::chrono::nanoseconds>(m2 - m1).count();
     memsync_part_ns[2] += std::chrono::duration_cast<std::chrono::nanoseconds>(m3 - m2).count();
+    tl_memwork_ns[0] += std::chrono::duration_cast<std::chrono::nanoseconds>(m1a - m0).count();
+    tl_memwork_ns[1] += std::chrono::duration_cast<std::chrono::nanoseconds>(m2 - m1).count();
+    tl_memwork_ns[2] += std::chrono::duration_cast<std::chrono::nanoseconds>(m3 - m2).count();
+    tl_watch_value = value;
     {   // (every 600 submits: what the memory work before a submit's recording cost)
         static double a, b, c;
         static int64_t k;

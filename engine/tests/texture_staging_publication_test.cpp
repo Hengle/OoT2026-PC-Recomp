@@ -11,6 +11,7 @@
 #include <utility>
 #include <vector>
 
+#include "astc_opaque.h"   // (the BC1 scan the gather does as it copies)
 namespace fixture {
 void require(bool ok, const char* why) { if (!ok) { fprintf(stderr, "FAIL: %s\n", why); std::exit(1); } }
 struct VmaAllocation_T { std::vector<uint8_t> cpu, gpu; bool alive = true; };
@@ -66,7 +67,11 @@ struct Texture {
     VkImageType type = VK_IMAGE_TYPE_2D; VkSampleCountFlagBits samples = VK_SAMPLE_COUNT_1_BIT;
     uint32_t layers = 2; struct { uint64_t layer_size = 1536; } L;
     uint64_t gpu = 0;
+    // (Ocarina Reborn: the BC1/BC3 choice's state, read by upload_astc_gpu's gather: no BC image here, so the scan stays off)
+    bool bc = false, bc_resized = false; uint8_t bc1 = 0; VkFormat format = VK_FORMAT_R8G8B8A8_UNORM;
 };
+VkFormat linear_twin(VkFormat f) { return f; }
+bool bc1_on() { return false; }
 struct { uint64_t offset = 0; } geo;
 auto level_geo(const Texture&, int) { return geo; }
 bool astc_ready() { return true; }

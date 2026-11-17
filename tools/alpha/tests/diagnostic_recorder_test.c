@@ -3,6 +3,8 @@
 HosThread *hos_self(void) {return NULL;}
 const char *hos_thread_name(HosThread *t) {(void)t;return "fixture";}
 void hos_log(const char *fmt, ...) {(void)fmt;}
+const char *hos_report_run_id(void) {return "test-run";}
+const char *hos_version(void) {return "test";}
 void hos_input_snapshot(char *out,size_t cap) {snprintf(out,cap,"sdl=1 fresh=1 right=0,0 final=0,0");}
 int ocr_diag_cpu_threads(OcrDiagCpuThread *out,int max) {
     if(max<1)return 0;
@@ -37,6 +39,17 @@ int main(int argc,char **argv) {
     if(argc>1 && !strcmp(argv[1],"cap")) {
         written=DIAG_LIMIT;
         write_line("{\"schema\":1,\"type\":\"after_rotation\"}");ocr_diag_stop();return 0;
+    }
+    if(argc>1 && !strcmp(argv[1],"priority")) {
+        /* a flood of audio voice events in one second must leave room for the waits and markers */
+        for(int i=0;i<500;++i)ocr_diag_event("audio_voice_request","voice");
+        for(int i=0;i<10;++i)ocr_diag_event("capture_wait","important");
+        OcrDiagFrame h={.frame_ms=16.0};
+        for(int i=0;i<990;++i)ocr_diag_frame(&h);
+        h.frame_ms=40;for(int i=0;i<9;++i)ocr_diag_frame(&h);
+        h.frame_ms=700;ocr_diag_frame(&h);
+        h.frame_ms=16;h.menu=1;for(int i=0;i<50;++i)ocr_diag_frame(&h);
+        Sleep(1300);ocr_diag_stop();return 0;
     }
     OcrDiagFrame f={.frame_ms=16.667,.renderer_ms=3,.gpu_ms=4,.draws=0,.vram_known=1,.vram_used=123,.vram_budget=456};
     if(argc>1 && !strcmp(argv[1],"bench")) {

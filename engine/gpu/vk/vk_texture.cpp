@@ -1322,6 +1322,11 @@ VkImageView astc_level_view(Texture* tex, uint32_t level, uint32_t layer) {
 /// every layer's chain: Eden's AssembleInto does the same)
 /// (hookshot) why the last upload_astc_gpu on this thread failed, for the log of a BC3 image left to be tried again
 thread_local const char* astc_fail = nullptr;
+/// (ocarina_reborn) the last upload_astc_gpu's copy of the ASTC blocks into staging, with the BC1 scan, in ms: the slow-upload line
+thread_local double upload_stage_ms = -1;
+/// (ocarina_reborn) and how many bytes of ASTC blocks it staged for the GPU decoder: every layer's whole mip chain from the dirty
+/// level down, whatever the dirty bytes were (the slow-upload line's "N of M KB" is the dirty part the CPU wrote, not what moved)
+thread_local uint64_t upload_staged_bytes = 0;
 
 // (hookshot) Big ASTC textures whose every block decodes opaque (astc_opaque.h) are kept as BC1, BC3's colour half: the same
 // texels in half the video memory. A texture's first whole upload with texels in it decides (its image made BC3 is made again
@@ -1396,6 +1401,8 @@ bool bc_reformat(Texture& tex, VkFormat f) {
 
 bool upload_astc_gpu(Texture& tex, uint64_t total, const Ranges* dirty) {
     astc_fail = nullptr;
+    upload_stage_ms = -1;
+    upload_staged_bytes = 0;
     if (tex.type != VK_IMAGE_TYPE_2D || tex.samples != VK_SAMPLE_COUNT_1_BIT || !astc_ready()) {
         astc_fail = "not a 2D image the GPU decoder takes";
         return false;
@@ -1418,22 +1425,38 @@ bool upload_astc_gpu(Texture& tex, uint64_t total, const Ranges* dirty) {
         return false;
     }
     std::vector<uint8_t> scratch;
+    // (ocarina_reborn) the BC1 choice below looks at the ASTC blocks: from the copy's source in host memory, never read back
+    // from the staging arena. That memory is written sequentially (VMA's HOST_ACCESS_SEQUENTIAL_WRITE: on a card with
+    // resizable BAR, video memory the CPU sees uncached), and reading it back took the whole time of a BC3 upload: 16-17 ms
+    // for a 632 KB texture, whether the CPU had changed all of it or 2 KB (2026-11-17, 9800X3D + RX 7900 XTX: "slow upload
+    // 17.1 ms ... 2 of 632 KB again"). And only while the choice is open: a BC3 image known to carry alpha (bc1 1) is not
+    // scanned at all; a BC1 one still is, for alpha that makes it BC3 again
+    const bool bc_choice = tex.bc && !tex.bc_resized && linear_twin(tex.format) != VK_FORMAT_BC7_UNORM_BLOCK && bc1_on();
+    const bool need_scan = bc_choice && (tex.format == VK_FORMAT_BC1_RGBA_UNORM_BLOCK || !tex.bc1);
+    astc_opaque::Scan sc;
+    const auto t_stage = std::chrono::steady_clock::now();
     for (size_t k = 0; k < layers.size(); k++) {
         const uint64_t at = (uint64_t)layers[k] * layer_size + tail0;
         if (at >= total) continue;
         const uint64_t n = std::min(tail, total - at);
-        std::memcpy(s.data + k * tail, guest_bytes(tex.gpu + at, n, scratch), n);
+        const uint8_t* src = guest_bytes(tex.gpu + at, n, scratch);
+        if (need_scan && !sc.alpha) {   // (as one scan of the staged layers in order: it stops at the first alpha block)
+            const astc_opaque::Scan part = astc_opaque::scan(src, n);
+            sc.opaque += part.opaque, sc.empty += part.empty, sc.alpha += part.alpha;
+        }
+        std::memcpy(s.data + k * tail, src, n);
     }
+    upload_stage_ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t_stage).count();
     const uint64_t staged = tail * layers.size();
+    upload_staged_bytes = staged;
     flush_mapped_range(s.allocation, s.offset, staged);   // (encoded blocks read by the GPU decoder, not necessarily coherent)
     st_bytes += (int64_t)staged;
     VkCommandBuffer cmd = upload_cmd();
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, astc_pipe);
     const uint64_t align = std::max<uint64_t>(dev.props.limits.minStorageBufferOffsetAlignment, 4);
-    if (tex.bc && !tex.bc_resized && linear_twin(tex.format) != VK_FORMAT_BC7_UNORM_BLOCK && bc1_on()) {   // (hookshot: BC1 for a
-        // texture whose blocks are all opaque, astc_opaque.h; a BC7 image, RX_VK_ASTC_BC7's, stays BC7)
+    if (need_scan) {   // (hookshot: BC1 for a texture whose blocks are all opaque, astc_opaque.h; a BC7 image, RX_VK_ASTC_BC7's,
+        // stays BC7. The blocks were scanned as they were copied, above)
         const bool is_bc1 = tex.format == VK_FORMAT_BC1_RGBA_UNORM_BLOCK;
-        const astc_opaque::Scan sc = astc_opaque::scan(s.data, staged);
         if (is_bc1 && sc.alpha) {   // (new contents with alpha: BC3 again, every layer uploaded into it)
             if (bc_reformat(tex, VK_FORMAT_BC3_UNORM_BLOCK)) {
                 tex.bc1 = 1;
@@ -3192,6 +3215,7 @@ Texture* texture_touch(Texture* tex, bool for_sampling) {
                  tex->released ? "finalized" : "live", (unsigned long long)kb, dirty.size(), gpu_dirty ? ", a GPU buffer wrote it" : "");
     }
     const auto up0 = std::chrono::steady_clock::now();
+    upload_stage_ms = -1;
     const bool up_ok = upload(*tex, partial || sparse_written ? &dirty : nullptr);
     {   // (an upload over 15 ms: what it was, 60 of them)
         const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - up0).count();
@@ -3200,12 +3224,17 @@ Texture* texture_touch(Texture* tex, bool for_sampling) {
         if (ms > 15.0 && slow_logged++ < 60) {
             uint64_t part = 0;
             if (partial) for (const auto& r : dirty) part += r.second - r.first;
-            logf("vk: slow upload %.1f ms: #%u %#llx %ux%ux%u x%u levels %u NVN %#x%s%s, %llu of %llu KB%s", ms, tex->id,
+            char stage_part[160] = "";
+            if (upload_stage_ms >= 0)
+                snprintf(stage_part, sizeof stage_part, "; ASTC blocks staged %llu KB in %.1f ms (decoded on the GPU), %s @%.1f",
+                         (unsigned long long)(upload_staged_bytes >> 10), upload_stage_ms, tex->bc1 == 1 ? "alpha known" : "BC1 choice scanned",
+                         std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now().time_since_epoch()).count());
+            logf("vk: slow upload %.1f ms: #%u %#llx %ux%ux%u x%u levels %u NVN %#x%s%s, %llu of %llu KB%s%s", ms, tex->id,
                  (unsigned long long)tex->gpu, tex->width, tex->height, tex->depth, tex->layers, tex->levels,
                  tex->nvn_format, tex->astc ? " ASTC" : "",
                  tex->bc ? (linear_twin(tex->format) == VK_FORMAT_BC7_UNORM_BLOCK ? " (BC7)" : " (BC3)") : "",
                  (unsigned long long)((partial ? part : tex->guest_size) >> 10), (unsigned long long)(tex->guest_size >> 10),
-                 tex->uploaded ? " again" : "");
+                 tex->uploaded ? " again" : "", stage_part);
         }
     }
     if (up_ok) {
@@ -5051,14 +5080,15 @@ bool ocr_ram_limited = false, ocr_ram_urgent = false;
             // headroom before the reactive RAM guard has to evict under pressure.
             if (!ocr_texture_budget_gb() && !getenv("RX_VK_TEX_MAX_MB") && !vram_env) {
                 const uint64_t before = budget;
-                budget = ocr_streaming::texture_limit(budget, ms.ullTotalPhys, ocr_streaming::mode());
+                static const uint64_t commit_at_start = ms.ullAvailPageFile;   // (the first look: the commit free as play began)
+                budget = ocr_streaming::texture_limit(budget, ms.ullTotalPhys, ocr_streaming::mode(), commit_at_start);
                 ocr_ram_limited = budget < before;
                 static bool reported = false;
                 if (!reported) {
                     reported = true;
-                    logf("[OcarinaReborn/PERF] streaming mode %d: Auto texture budget %llu -> %llu MB, system RAM %llu MB",
-                        ocr_streaming::mode(), (unsigned long long)(before >> 20), (unsigned long long)(budget >> 20),
-                        (unsigned long long)(ms.ullTotalPhys >> 20));
+                    logf("[OcarinaReborn/PERF] streaming mode %d: Auto texture budget %llu -> %llu MB, system RAM %llu MB, commit free "
+                         "at start %llu MB", ocr_streaming::mode(), (unsigned long long)(before >> 20), (unsigned long long)(budget >> 20),
+                         (unsigned long long)(ms.ullTotalPhys >> 20), (unsigned long long)(commit_at_start >> 20));
                 }
             }
             if (frame_no % 600 == 0)

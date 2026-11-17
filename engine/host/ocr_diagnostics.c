@@ -20,7 +20,20 @@ extern void hos_log(const char *fmt, ...);
 #define DIAG_LINE 4096
 #define DIAG_LIMIT (8u * 1024u * 1024u)
 static SRWLOCK frame_lock = SRWLOCK_INIT, event_lock = SRWLOCK_INIT;
-static _Atomic int enabled, stopping, marker, hitch, dropped, events_dropped, untracked_phase_threads;
+static _Atomic int enabled, stopping, marker, hitch, dropped, events_dropped, untracked_phase_threads, low_events_skipped;
+/* (Ocarina Reborn) the run's frame times, every frame the recorder took, in buckets of 1 ms to 50, 5 ms to 100, 25 ms to 300,
+   100 ms to 1 s and one above: quantiles of the whole run (p99, p99.9) from them, not from the retained windows' worst frames.
+   Two: every frame, and the frames outside the menus (OcrDiagFrame.menu) */
+#define HIST_BUCKETS 76
+static unsigned hist_all[HIST_BUCKETS], hist_play[HIST_BUCKETS];
+static int hist_bucket(double ms) {
+    if (ms < 0) ms = 0;
+    if (ms < 50) return (int)ms;
+    if (ms < 100) return 50 + (int)((ms - 50) / 5);
+    if (ms < 300) return 60 + (int)((ms - 100) / 25);
+    if (ms < 1000) return 68 + (int)((ms - 300) / 100);
+    return 75;
+}
 static _Atomic int64_t last_frame_ns;
 static int64_t frequency, origin;
 static HANDLE worker, stop_event;
@@ -103,7 +116,17 @@ static void clock_anchor(void) {
 void ocr_diag_event(const char *kind, const char *detail) {
     if (!atomic_load_explicit(&enabled, memory_order_relaxed)) return;
     if (kind && !strcmp(kind, "user_marker")) atomic_store(&marker, 1);
-    if (!TryAcquireSRWLockExclusive(&event_lock)) { atomic_fetch_add(&events_dropped, 1); return; }
+    /* (Ocarina Reborn) the audio voices' events come by the thousand (2,139 requests in a 6.5-minute run) and took the 32 slots a
+       second before the waits, captures and markers could: 34,540 events lost. They get 8 of the slots; the rest are counted */
+    const int low = kind && !strncmp(kind, "audio_voice", 11);
+    if (!TryAcquireSRWLockExclusive(&event_lock)) { atomic_fetch_add(low ? &low_events_skipped : &events_dropped, 1); return; }
+    static unsigned low_in_second; static int64_t low_second;
+    if (low) {
+        const int64_t sec = now_ns() / 1000000000LL;
+        if (sec != low_second) low_second = sec, low_in_second = 0;
+        if (low_in_second >= 8 || event_count >= 24) { atomic_fetch_add(&low_events_skipped, 1); ReleaseSRWLockExclusive(&event_lock); return; }
+        ++low_in_second;
+    }
     if (event_count < 32) {
         char k[40], d[360]; safe_text(k, sizeof k, kind); safe_text(d, sizeof d, detail);
         snprintf(events[event_count++], 512, "{\"schema\":1,\"type\":\"event\",\"t_ms\":%.3f,\"kind\":\"%s\",\"detail\":\"%s\"}", since_ms(now_ns()), k, d);
@@ -129,6 +152,7 @@ void ocr_diag_frame(const OcrDiagFrame *s) {
     if (s->frame_ms >= 100) atomic_store(&hitch, 1);
     if (!TryAcquireSRWLockExclusive(&frame_lock)) { atomic_fetch_add(&dropped, 1); return; }
     ++frames; over50 += s->frame_ms > 50; over100 += s->frame_ms > 100;
+    { const int b = hist_bucket(s->frame_ms); ++hist_all[b]; if (!s->menu) ++hist_play[b]; }
     if (s->frame_ms > worst) worst = s->frame_ms;
 #define ADD(f) sum.f += s->f
     ADD(frame_ms); ADD(renderer_ms); ADD(gpu_ms); ADD(pipeline_ms); ADD(program_ms); ADD(upload_ms);
@@ -189,6 +213,17 @@ static void active_threads(int64_t now) {
         write_line(line); ++n;
     }
 }
+static void write_histogram(const char *why) {
+    unsigned all[HIST_BUCKETS], play[HIST_BUCKETS];
+    AcquireSRWLockExclusive(&frame_lock); memcpy(all,hist_all,sizeof all); memcpy(play,hist_play,sizeof play); ReleaseSRWLockExclusive(&frame_lock);
+    char line[2048]; size_t at=0;
+    at+=snprintf(line+at,sizeof line-at,"{\"schema\":1,\"type\":\"frame_histogram\",\"t_ms\":%.3f,\"why\":\"%s\",\"edges\":\"1ms<50,5ms<100,25ms<300,100ms<1000,1000+\",\"all\":[",since_ms(now_ns()),why);
+    for(int i=0;i<HIST_BUCKETS && at<sizeof line-16;++i) at+=snprintf(line+at,sizeof line-at,"%s%u",i?",":"",all[i]);
+    at+=snprintf(line+at,sizeof line-at,"],\"outside_menus\":[");
+    for(int i=0;i<HIST_BUCKETS && at<sizeof line-16;++i) at+=snprintf(line+at,sizeof line-at,"%s%u",i?",":"",play[i]);
+    snprintf(line+at,sizeof line-at,"]}");
+    write_line(line);
+}
 static DWORD WINAPI record_thread(void *unused) {
     (void)unused;
     SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL);
@@ -209,6 +244,17 @@ static DWORD WINAPI record_thread(void *unused) {
         int pm_ok=GetProcessMemoryInfo(GetCurrentProcess(),(PROCESS_MEMORY_COUNTERS*)&pm,sizeof pm);
         PERFORMANCE_INFORMATION pi={.cb=sizeof pi}; int pi_ok=GetPerformanceInfo(&pi,sizeof pi);
         FILETIME created,exit,kernel,user; double cpu_ms=-1;
+        /* (Ocarina Reborn) the whole PC's CPU busy share and this process's page faults in the interval: a second the game's
+           threads barely ran (2026-11-17, 248 s: 406 ms of process CPU, a 668 ms frame) tells apart a PC busy elsewhere from
+           threads that waited, and faults from memory paged out */
+        static uint64_t prev_idle, prev_sys; double system_busy=-1; FILETIME si,sk,su;
+        if (GetSystemTimes(&si,&sk,&su)) {
+            const uint64_t idle=filetime_value(si), sys=filetime_value(sk)+filetime_value(su);
+            if (prev_sys && sys>prev_sys) system_busy=100.0*(1.0-(double)(idle-prev_idle)/(double)(sys-prev_sys));
+            prev_idle=idle; prev_sys=sys;
+        }
+        static DWORD prev_faults; long long faults=-1;
+        if (pm_ok) { if (prev_faults) faults=(long long)(pm.PageFaultCount-prev_faults); prev_faults=pm.PageFaultCount; }
         if (GetProcessTimes(GetCurrentProcess(),&created,&exit,&kernel,&user)) {
             uint64_t cpu=filetime_value(kernel)+filetime_value(user);
             if (previous_cpu) cpu_ms=(cpu-previous_cpu)/10000.0;
@@ -250,11 +296,11 @@ static DWORD WINAPI record_thread(void *unused) {
             "\"renderer_ms\":%.3f,\"gpu_ms\":%.3f,\"pipeline_ms\":%.3f,\"program_ms\":%.3f,\"upload_ms\":%.3f,\"memory_sync_ms\":%.3f,\"slot_wait_ms\":%.3f,\"readback_ms\":%.3f,\"texture_frame_ms\":%.3f,\"translate_ms\":%.3f,\"pipeline_wait_ms\":%.3f,"
             "\"draws\":%llu,\"upload_bytes\":%llu,\"new_pipelines\":%llu,\"not_ready\":%llu,\"menu\":%d,\"fg\":%d,\"vram_known\":%d,\"vram_used\":%llu,\"vram_budget\":%llu,"
             "\"memory_known\":%d,\"available_ram\":%llu,\"process_memory_known\":%d,\"working_set\":%llu,\"private_commit\":%llu,\"system_commit_known\":%d,\"system_commit\":%llu,\"system_commit_limit\":%llu,\"process_cpu_ms\":%.3f,"
-            "\"read_ms\":%.3f,\"read_bytes\":%llu,\"read_calls\":%llu,\"native_zstd_ms\":%.3f,\"decompressed_bytes\":%llu,\"guest_wait_ms\":%.3f,\"no_frame_ms\":%.3f,\"dropped_frames\":%d,\"dropped_events\":%d,\"untracked_phase_threads\":%d,\"sample_work_ms\":%.3f,\"previous_writer_work_ms\":%.3f,\"thread_cpu\":%s,\"context_known\":%d,\"map\":\"%s\",\"context_age_ms\":%.3f,\"event_active\":%d,\"loading\":%d,\"child\":%d}",
+            "\"read_ms\":%.3f,\"read_bytes\":%llu,\"read_calls\":%llu,\"native_zstd_ms\":%.3f,\"decompressed_bytes\":%llu,\"guest_wait_ms\":%.3f,\"no_frame_ms\":%.3f,\"dropped_frames\":%d,\"dropped_events\":%d,\"untracked_phase_threads\":%d,\"sample_work_ms\":%.3f,\"previous_writer_work_ms\":%.3f,\"thread_cpu\":%s,\"context_known\":%d,\"map\":\"%s\",\"context_age_ms\":%.3f,\"context_stale\":%d,\"event_active\":%d,\"loading\":%d,\"child\":%d,\"system_cpu_busy_pct\":%.1f,\"page_faults\":%lld,\"low_priority_events_skipped\":%d}",
             ++seq,since_ms(now),interval,n,s.frame_ms,max_ms,h50,h100,s.renderer_ms,s.gpu_ms,s.pipeline_ms,s.program_ms,s.upload_ms,s.memory_sync_ms,s.slot_wait_ms,s.readback_ms,s.texture_frame_ms,s.translate_ms,s.pipeline_wait_ms,
             (unsigned long long)s.draws,(unsigned long long)s.upload_bytes,(unsigned long long)s.new_pipelines,(unsigned long long)s.not_ready,s.menu,s.frame_generation,s.vram_known,(unsigned long long)s.vram_used,(unsigned long long)s.vram_budget,
             mem_ok,(unsigned long long)mem.ullAvailPhys,pm_ok,(unsigned long long)pm.WorkingSetSize,(unsigned long long)pm.PrivateUsage,pi_ok,(unsigned long long)pi.CommitTotal*pi.PageSize,(unsigned long long)pi.CommitLimit*pi.PageSize,cpu_ms,
-            times[0]/1e6,(unsigned long long)bytes[0],(unsigned long long)calls[0],times[1]/1e6,(unsigned long long)bytes[1],times[2]/1e6,gap,atomic_load(&dropped),atomic_load(&events_dropped),atomic_load(&untracked_phase_threads),(now_ns()-work_start)/1e6,previous_writer_work_ms,cpu_threads,context_known,map,context.age_ms,context.event,context.loading,context.child);
+            times[0]/1e6,(unsigned long long)bytes[0],(unsigned long long)calls[0],times[1]/1e6,(unsigned long long)bytes[1],times[2]/1e6,gap,atomic_load(&dropped),atomic_load(&events_dropped),atomic_load(&untracked_phase_threads),(now_ns()-work_start)/1e6,previous_writer_work_ms,cpu_threads,context_known,map,context.age_ms,!context_known || context.age_ms>5000,context.event,context.loading,context.child,system_busy,faults,atomic_load(&low_events_skipped));
         int marked=atomic_exchange(&marker,0), hit=atomic_exchange(&hitch,0);
         int startup_wait=!last && now-origin>=30000000000LL;
         int stalled=(gap>=5000 || startup_wait) && (!last_stall || now-last_stall>=10000000000LL);
@@ -274,8 +320,10 @@ static DWORD WINAPI record_thread(void *unused) {
         AcquireSRWLockExclusive(&event_lock); count=event_count; memcpy(pending,events,count*512); event_count=0; ReleaseSRWLockExclusive(&event_lock);
         for(unsigned j=0;j<count;++j) write_line(pending[j]);
         if(output && (now<=active_until || count || seq%5==0)) fflush(output);
+        if(seq%30==0) write_histogram("periodic");
         previous_writer_work_ms=(now_ns()-work_start)/1e6;
     }
+    write_histogram("end");
     for(unsigned j=0;j<history_count;++j) write_line(history[(history_at+DIAG_HISTORY-history_count+j)%DIAG_HISTORY]);
     AcquireSRWLockExclusive(&event_lock);
     for(unsigned j=0;j<event_count;++j) write_line(events[j]);
@@ -299,14 +347,25 @@ void ocr_diag_init(void) {
     if(!n || n>=1024) {
         n=GetModuleFileNameW(NULL,path,900); if(!n || n>=900) return;
         while(n && path[n-1]!=L'\\' && path[n-1]!=L'/') --n;
-        _snwprintf(path+n,1024-n,L"ocarina_reborn_diagnostics.jsonl");
+        /* (Ocarina Reborn) a direct start's timeline is named after its process: a second start beside a running game (refused
+           by the instance guard, or a --prepare-shaders run) truncated the running game's file with its own 26 s of no frames, and
+           the debug package paired that with the other run's log (2026-11-17, run abb775b9...). The package takes the newest */
+        _snwprintf(path+n,1024-n,L"ocarina_reborn_diagnostics-%lu.jsonl",(unsigned long)GetCurrentProcessId());
     }
     wcscpy(output_path,path);
     _snwprintf(previous_path,1100,L"%ls.previous.jsonl",path);
     output=_wfopen(path,L"wb"); if(!output) return;
     // Direct launches reuse a fixed path; never pair a new run with stale history.
     DeleteFileW(previous_path);
-    write_line("{\"schema\":1,\"type\":\"start\",\"history_seconds\":30,\"follow_seconds\":10,\"segment_max_bytes\":8388608,\"retained_segments\":2,\"notes\":\"Stage totals overlap across threads; GPU timing delayed. Native zstd only; uninstrumented work is unknown. No-frame progress may mean loading or focus loss. Ctrl+F8 marks a problem.\"}");
+    {   /* (Ocarina Reborn) the start names its run: process, run id (as the log's "run_id:" line and the run's report), source */
+        const char *hos_report_run_id(void);
+        extern const char *hos_version(void);
+        char head[256];
+        snprintf(head,sizeof head,"{\"schema\":1,\"type\":\"run\",\"pid\":%lu,\"run_id\":\"%s\",\"version\":\"%s\",\"qpc_origin_ms\":%.3f}",
+                 (unsigned long)GetCurrentProcessId(),hos_report_run_id(),hos_version(),origin/1e6);
+        write_line("{\"schema\":1,\"type\":\"start\",\"history_seconds\":30,\"follow_seconds\":10,\"segment_max_bytes\":8388608,\"retained_segments\":2,\"notes\":\"Stage totals overlap across threads; GPU timing delayed. Native zstd only; uninstrumented work is unknown. No-frame progress may mean loading or focus loss. Ctrl+F8 marks a problem.\"}");
+        write_line(head);
+    }
     clock_anchor();
     fflush(output);
     stop_event=CreateEventW(NULL,TRUE,FALSE,NULL);

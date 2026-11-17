@@ -84,6 +84,10 @@ int main(){
     CHECK(texture_limit(24*1024*MiB,32*1024*MiB,2)==4096*MiB);
     CHECK(texture_limit(512*MiB,8*1024*MiB,1)==512*MiB);
     CHECK(texture_limit(12*1024*MiB,16*1024*MiB,0)==12*1024*MiB);
+    // the commit free at start does not grow Balanced's limit (1.1.4-2's test: RAM ran short, captures were remade)
+    CHECK(texture_limit(11000*MiB,31849*MiB,1,41988*MiB)==6144*MiB);
+    CHECK(texture_limit(24*1024*MiB,16*1024*MiB,1,15*1024*MiB)==3072*MiB);
+    CHECK(texture_limit(24*1024*MiB,32*1024*MiB,1,0)==6400*MiB);
     CHECK(!defer_cleanup(0,9999,500,0,false,1));
     CHECK(defer_cleanup(1,1500,500,0,false,1));
     CHECK(!defer_cleanup(64,1500,500,0,true,1));
