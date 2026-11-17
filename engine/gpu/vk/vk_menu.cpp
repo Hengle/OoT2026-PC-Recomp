@@ -4808,56 +4808,109 @@ void draw_rupees(ui::Ctx& c) {
     c.d->PopClipRect();
 }
 
-/// The start-up screen: the logo, the wordmark, what the start is doing, a bar, on a warm dark. A little below the middle; what
-/// is under the logo at 0.86 of the logo's scale. startup_fade, 0 to 1, darkens it all to black as it ends
+/// (Ocarina Reborn) The start-up screen: the forest picture (assets/ocarina_reborn.png, 1672 x 941, made by the launcher's
+/// tools/alpha/make_build_art.py: the owner's design with its live parts taken out) over the whole window, and on it, at
+/// the picture's own places, what the start is doing: START under the title, the bar in its gold frame with the real
+/// share of the preparation (none while it is not counted: a light runs along the empty bar instead), and three steps,
+/// Check the launcher (done: the launcher started the game), Prepare the game (the shaders and pipelines), Start the
+/// game (after them). Under the steps, small, the counts and the time left. startup_fade, 0 to 1, darkens it to black.
 void draw_startup(ui::Ctx& c) {
     StartupView v;
     {
         std::lock_guard lk(startup_mu);
         v = startup;
     }
-    const float s = c.s, w = c.w, h = c.h, cx = w * 0.5f, k = s * 0.86f;   // (k: the scale of what is under the logo)
-    c.d->AddRectFilled(ImVec2(0, 0), ImVec2(w, h), ui::rgba(5, 10, 26));
-    const float lh = 250 * s, top = h * 0.5f - 300 * s;   // (Ocarina Reborn: its logo has the name)
-    for (int i = 40; i >= 1; i--) c.d->AddCircleFilled(ImVec2(cx, top + lh * 0.5f + 70 * s), h * 0.021f * i, ui::rgba(0, 110, 255, 4), 128);
+    const float w = c.w, h = c.h;
+    const float t = (float)ImGui::GetTime();
+    c.d->AddRectFilled(ImVec2(0, 0), ImVec2(w, h), ui::rgba(3, 14, 12));
+    constexpr float kW = 1672, kH = 941;   // (the picture; every place below is in its pixels)
+    const float k = std::max(w / kW, h / kH), ox = (w - kW * k) * 0.5f, oy = (h - kH * k) * 0.5f;
+    const auto P = [&](float x, float y) { return ImVec2(ox + x * k, oy + y * k); };
     float aspect = 1;
-    ImTextureData* logo = ui::logo(&aspect);
-    if (logo) c.d->AddImage(logo->GetTexRef(), ImVec2(cx - lh * aspect * 0.5f, top), ImVec2(cx + lh * aspect * 0.5f, top + lh));
-    float y = top + lh + 16 * s;
-    ui::flourish(c, cx - 190 * k, cx + 190 * k, y + 66 * k, ui::kAccent);
-    if (!v.title.empty()) {
-        y += 120 * k;
-        if (!v.step.empty()) {   // ("STEP 2 OF 2" as "Step 2 of 2")
-            std::string step = v.step;
-            for (size_t i = 1; i < step.size(); i++) step[i] = (char)tolower((unsigned char)step[i]);
-            ui::text_centre(c, c.f.body, 15 * k, ImVec2(cx, y), ui::kAccent, step.c_str());
+    if (ImTextureData* art = ui::logo(&aspect)) c.d->AddImage(art->GetTexRef(), P(0, 0), P(kW, kH));
+    const bool closing = v.title == ocr_tr("Closing");
+    const bool starting = v.title == ocr_tr("Starting the game");
+    // START, in the place the picture keeps for it under the title
+    ui::spaced(c, c.f.heading, 31 * k, P(836, 570), ui::rgba(226, 232, 236), "START", 17 * k);
+    // the bar: its inside a capsule inside the picture's gold frame (make_build_art.py START_BAR)
+    const float bx0 = 298, by0 = 659, bx1 = 1369, by1 = 737, br = (by1 - by0) * 0.5f;
+    const double frac = starting ? 1.0 : v.fraction;
+    if (frac > 0.0005) {
+        const float fx = bx0 + (bx1 - bx0) * (float)std::min(frac, 1.0);
+        const float rr = std::min(br, (fx - bx0) * 0.5f) * k;
+        c.d->AddRectFilled(P(bx0, by0), P(fx, by1), ui::rgba(28, 150, 58), rr);
+        // (teal-blue at its start into green, a lighter middle, a light along its top: the design's glass)
+        const float g0 = bx0 + br, g1 = std::max(g0, std::min(fx - br, bx0 + 560));
+        if (g1 > g0) c.d->AddRectFilledMultiColor(P(g0, by0 + 2), P(g1, by1 - 2), ui::rgba(30, 140, 225, 230),
+                                                  ui::rgba(30, 170, 90, 0), ui::rgba(30, 170, 90, 0), ui::rgba(30, 140, 225, 230));
+        if (fx - bx0 > 2 * br)
+            c.d->AddRectFilled(P(bx0 + br * 0.5f, by0 + 6), P(fx - br * 0.5f, by0 + 16), ui::rgba(200, 255, 210, 46), 5 * k);
+        // (light running along the fill, and a few sparks drifting through it)
+        c.d->PushClipRect(P(bx0, by0), P(fx, by1), true);
+        for (int i = 0; i < 3; i++) {
+            const float span = std::max(60.0f, fx - bx0);
+            const float x = bx0 + std::fmod(t * 160 + i * span / 3, span + 120) - 60;
+            c.d->AddRectFilledMultiColor(P(x - 50, by0), P(x, by1), ui::rgba(180, 255, 200, 0), ui::rgba(180, 255, 200, 70),
+                                         ui::rgba(180, 255, 200, 70), ui::rgba(180, 255, 200, 0));
+            c.d->AddRectFilledMultiColor(P(x, by0), P(x + 50, by1), ui::rgba(180, 255, 200, 70), ui::rgba(180, 255, 200, 0),
+                                         ui::rgba(180, 255, 200, 0), ui::rgba(180, 255, 200, 70));
         }
-        ui::text_centre(c, c.f.heading, 24 * k, ImVec2(cx, y + 20 * k), ui::kInk, v.title.c_str());
-        const float x0 = cx - 270 * k, x1 = cx + 270 * k, by = y + 64 * k;
-        float under = by;
-        if (v.fraction >= 0) {   // (the bar as a value cell: a dark cell, gold inside, the percentage on it)
-            const float bh = 26 * k, in = 4 * k, fx = x0 + in + (x1 - x0 - 2 * in) * (float)std::min(v.fraction, 1.0);
-            c.d->AddRectFilled(ImVec2(x0, by), ImVec2(x1, by + bh), ui::kCellDark);
-            c.d->AddRect(ImVec2(x0, by), ImVec2(x1, by + bh), ui::kEdge, 0, std::max(1.0f, s));
-            if (fx > x0 + in) ui::gold(c, ImVec2(x0 + in, by + in), ImVec2(fx, by + bh - in));
-            // (the percentage in the middle of the whole bar, drawn twice: dark ink where the gold is under it, light where the
-            // empty bar is, each clipped to its part, so every letter keeps its contrast as the edge passes through it)
-            const float split = std::max(fx, x0 + in);
-            c.d->PushClipRect(ImVec2(x0, by), ImVec2(split, by + bh), true);
-            ui::text_mid_centre(c, c.f.strong, 15 * k, cx, by + bh * 0.5f, ui::kGoldInk, v.pct.c_str());
-            c.d->PopClipRect();
-            c.d->PushClipRect(ImVec2(split, by), ImVec2(x1, by + bh), true);
-            ui::text_mid_centre(c, c.f.strong, 15 * k, cx, by + bh * 0.5f, ui::kInk, v.pct.c_str());
-            c.d->PopClipRect();
-            under = by + bh;
+        for (int i = 0; i < 18; i++) {
+            const float u = std::fmod(i * 0.618f + t * (0.03f + 0.01f * (i % 5)), 1.0f);
+            const float x = bx0 + u * (bx1 - bx0), y = by0 + 12 + std::fmod(i * 0.377f, 1.0f) * (by1 - by0 - 24);
+            if (x < fx - 6) c.d->AddCircleFilled(P(x, y), (1.2f + (i % 3) * 0.6f) * k,
+                                                 ui::rgba(220, 255, 230, (int)(120 + 100 * std::sin(t * 4 + i))), 8);
         }
-        const float px = 16.5f * k;
-        ui::text(c, c.f.body, px, ImVec2(v.fraction >= 0 ? x0 : cx - ui::size_of(c.f.body, px, v.left.c_str()).x * 0.5f, under + 12 * k),
-                 ui::kSoft, v.left.c_str());
-        if (!v.right.empty())
-            ui::text(c, c.f.body, px, ImVec2(x1 - ui::size_of(c.f.body, px, v.right.c_str()).x, under + 12 * k), ui::kSoft, v.right.c_str());
-        if (!v.hint.empty()) ui::text_centre(c, c.f.body, 15.5f * k, ImVec2(cx, by + 92 * k), ui::kDim, v.hint.c_str());
+        c.d->PopClipRect();
+        for (int i = 4; i >= 1; i--)   // (the bright edge at the value)
+            c.d->AddCircleFilled(P(fx - br * 0.35f, (by0 + by1) * 0.5f), br * k * (0.25f + 0.18f * i), ui::rgba(150, 255, 220, 22), 32);
+    } else if (!closing) {   // (not counted yet: a light runs along the empty bar)
+        const float x = bx0 + br + std::fmod(t * 0.35f, 1.0f) * (bx1 - bx0 - 2 * br);
+        c.d->PushClipRect(P(bx0, by0), P(bx1, by1), true);
+        c.d->AddRectFilledMultiColor(P(x - 90, by0 + 4), P(x, by1 - 4), ui::rgba(60, 200, 230, 0), ui::rgba(60, 200, 230, 90),
+                                     ui::rgba(60, 200, 230, 90), ui::rgba(60, 200, 230, 0));
+        c.d->AddRectFilledMultiColor(P(x, by0 + 4), P(x + 90, by1 - 4), ui::rgba(60, 200, 230, 90), ui::rgba(60, 200, 230, 0),
+                                     ui::rgba(60, 200, 230, 0), ui::rgba(60, 200, 230, 90));
+        c.d->PopClipRect();
     }
+    if (frac >= 0) {   // (the share in the middle of the bar, white on the fill, with a soft shadow)
+        const std::string pct = starting ? std::string("100%") : v.pct;
+        const float px = 50 * k, cy = (by0 + by1) * 0.5f;
+        ui::text_mid_centre(c, c.f.heading, px, ox + 836 * k + 2 * k, oy + cy * k + 2 * k, ui::rgba(4, 30, 12, 200), pct.c_str());
+        ui::text_mid_centre(c, c.f.heading, px, ox + 836 * k, oy + cy * k, ui::rgba(246, 255, 242), pct.c_str());
+    }
+    // the three steps (the picture keeps the thin lines between them)
+    const char* names[3] = {ocr_tr("Check the launcher"), ocr_tr("Prepare the game"), ocr_tr("Start the game")};
+    const float sx[3] = {329, 735, 1155}, lx[3] = {378, 785, 1210}, sy = 815, sr = 22;
+    const int active = starting ? 2 : 1;
+    for (int i = 0; i < 3; i++) {
+        const ImVec2 cc = P(sx[i], sy);
+        const float r = sr * k;
+        if (i < active) {   // (done: a green ring, glowing, and its check)
+            for (int g = 3; g >= 1; g--) c.d->AddCircle(cc, r + g * 2.5f * k, ui::rgba(90, 255, 110, 26), 48, 3 * k);
+            c.d->AddCircleFilled(cc, r, ui::rgba(4, 34, 14, 190), 48);
+            c.d->AddCircle(cc, r, ui::rgba(110, 240, 110), 48, 3.2f * k);
+            const ImVec2 pts[3] = {P(sx[i] - 9, sy + 1), P(sx[i] - 2.5f, sy + 8), P(sx[i] + 10, sy - 7)};
+            c.d->AddPolyline(pts, 3, ui::rgba(225, 255, 220), 0, 3.6f * k);
+        } else if (i == active && !closing) {   // (under way: a cyan ring, its bright arc turning)
+            c.d->AddCircle(cc, r, ui::rgba(30, 90, 130, 200), 48, 4 * k);
+            for (int g = 2; g >= 1; g--) {
+                c.d->PathArcTo(cc, r, t * 4.5f, t * 4.5f + 5.2f, 40);
+                c.d->PathStroke(ui::rgba(60, 170, 255, 40), 0, (4.5f + g * 4) * k);
+            }
+            c.d->PathArcTo(cc, r, t * 4.5f, t * 4.5f + 5.2f, 40);
+            c.d->PathStroke(ui::rgba(120, 225, 255), 0, 4.2f * k);
+        } else {
+            c.d->AddCircle(cc, r, ui::rgba(96, 130, 136, 200), 48, 2 * k);
+        }
+        const ImU32 ink = i <= active ? ui::rgba(244, 246, 236) : ui::rgba(170, 186, 182);
+        ui::text_mid(c, c.f.body, 27 * k, ox + lx[i] * k, oy + (sy + 2) * k, ink, names[i]);
+    }
+    // under them, small: what the preparation counts and the time left (or what the end is doing)
+    std::string under = v.left;
+    if (!v.right.empty()) under += (under.empty() ? "" : "   \xC2\xB7   ") + v.right;
+    if (closing) under = v.title + (v.left.empty() ? "" : "  \xE2\x80\x94  " + v.left);
+    if (!under.empty()) ui::text_centre(c, c.f.body, 18 * k, P(836, 872), ui::rgba(186, 210, 200), under.c_str());
     if (const float f = startup_fade.load(std::memory_order_relaxed); f > 0)   // (the end: to black, the game's first frame next)
         c.d->AddRectFilled(ImVec2(0, 0), ImVec2(w, h), ui::rgba(0, 0, 0, (int)(std::min(f, 1.0f) * 255 + 0.5f)));
 }

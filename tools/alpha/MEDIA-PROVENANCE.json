@@ -2,7 +2,7 @@
   "origin": "Mixed project artwork: generated geometric graphics remain outside the restored launcher files listed below. Launcher Ocarina graphics and Navi animation were restored from a pre-cleanup local backup at the user's request on 2026-11-14. Original authorship and redistribution permission for the restored media remain unverified; recorded hashes are not a rights assessment.",
   "files": {
     "OcarinaReborn.ico": "da82281ceb385d082c1c9d476e4c5df5e1606d5129362cbbd69f210665e664cd",
-    "engine/assets/ocarina_reborn.png": "938a139e0dcb826927dc6335157bc64fd225e7080c5a18e82ecd044294b38bb5",
+    "engine/assets/ocarina_reborn.png": "05b0d902530008dc64149310f33768335c129a3d20f01171337189bacde53246",
     "engine/builder/HookshotBuilder/Images/ocarina_reborn.png": "1ac441c8fae91c91d5d75dbd9b1aa1ac5cca350d50015ebe889dc06ac59c4b71",
     "engine/builder/py/hookshot_builder/assets/ocarina_reborn.ico": "e57087f24d0387111528adb89bf76fe61ff44df530663e17682cc8256c2af918",
     "engine/builder/py/hookshot_builder/assets/ocarina_reborn.png": "1ac441c8fae91c91d5d75dbd9b1aa1ac5cca350d50015ebe889dc06ac59c4b71",
@@ -37,8 +37,13 @@
     "tools/alpha/launcher/assets/ocarina-80.png": "24b1ae8767608340d75c1688a3a26532d38bffc4e8ffc0b02131d69f03887ccd",
     "tools/alpha/launcher/assets/ocarina-96.png": "e4b1a1369612aea3d8865179e935870acf176442202a72f6079c1d5346dde3d5",
     "tools/alpha/ocarina-icon.png": "07a64a72a007a8a3977c360a51606c3d38cd782626facc21ef427942a04082aa",
-    "tools/alpha/startup-logo.png": "938a139e0dcb826927dc6335157bc64fd225e7080c5a18e82ecd044294b38bb5",
-    "tools/alpha/hud/rainbow-rupee.gif": "22ee849b02a7991c5d858ab6ba2058602cab8046e89a2d5b10f39f0c7b61c1c4"
+    "tools/alpha/startup-logo.png": "05b0d902530008dc64149310f33768335c129a3d20f01171337189bacde53246",
+    "tools/alpha/hud/rainbow-rupee.gif": "22ee849b02a7991c5d858ab6ba2058602cab8046e89a2d5b10f39f0c7b61c1c4",
+    "tools/alpha/art-src/build-forest-reference.png": "44dd935195bcbfb18bfe8547ee3c03db69d32852fa34426088f01dc0f1844f0a",
+    "tools/alpha/launcher/assets/build-forest.pack": "d59f08c7189338ba91a0fb11b79f5cf63a8fe5be3f3c8c1bfb0e4da7bffece42",
+    "tools/alpha/art-src/launcher-forest-reference.png": "bdc76823ac6e224621b349ebb2e8c1cfd08b39bba34aacad0e857731603ec738",
+    "tools/alpha/art-src/start-forest-reference.png": "734d551348ac8a39dedae456482907eae2c7858dd082130254883f21632a58d5",
+    "tools/alpha/launcher/assets/launcher-forest.pack": "d61a3937a2961a6d95c23eafe0afe947b4175491180221d6daa786ea8b08a0de"
   },
   "restored_launcher_media": {
     "source": "Local authoring-before backup of tools/alpha/launcher/assets and tools/alpha/OcarinaReborn.ico; exact original files, no image modifications. Startup logo also copied unchanged from authoring-before/tools/alpha/startup-logo.png. Game icon copied unchanged from authoring-before/tools/alpha/ocarina-icon.png.",
@@ -66,13 +71,25 @@
       "tools/alpha/launcher/assets/ocarina-72.png": "18ce37e82bf971f7b50098bea1e4c17b8c098a3da86350adf41036bce7d2a4d8",
       "tools/alpha/launcher/assets/ocarina-80.png": "24b1ae8767608340d75c1688a3a26532d38bffc4e8ffc0b02131d69f03887ccd",
       "tools/alpha/launcher/assets/ocarina-96.png": "e4b1a1369612aea3d8865179e935870acf176442202a72f6079c1d5346dde3d5",
-      "tools/alpha/startup-logo.png": "938a139e0dcb826927dc6335157bc64fd225e7080c5a18e82ecd044294b38bb5",
-      "engine/assets/ocarina_reborn.png": "938a139e0dcb826927dc6335157bc64fd225e7080c5a18e82ecd044294b38bb5",
       "tools/alpha/ocarina-icon.png": "07a64a72a007a8a3977c360a51606c3d38cd782626facc21ef427942a04082aa"
     }
   },
   "rainbow_rupee": {
     "source": "User attachment: Schimmernder Regenbogenkristall-Glitzerschleife.gif",
     "request": "2026-11-15: use this animated crystal as the rupee HUD symbol. Original GIF copied unchanged, including its transparency and frame timing; renderer atlas generated at build time."
+  },
+  "build_screen_artwork": {
+    "source": "Reference picture of the BUILD screen supplied by the project owner in chat on 2026-11-17 (1672 x 941, received as WebP, stored losslessly as PNG). build-forest.pack is derived from it by tools/alpha/make_build_art.py: the live interface parts are filled in from their surroundings, the empty bar continued from the reference's own empty end, plus masks; no other image source. launcher-forest-reference.png (1536 x 1024, the launcher's main page) and start-forest-reference.png (1672 x 941, the screen after Play) were supplied the same way on 2026-11-17; launcher-forest.pack holds the banner and floor cut unchanged from the former. startup-logo.png and engine/assets/ocarina_reborn.png (the game's start-up picture) are start-forest-reference.png with its bar inside, the step marks, the step names and the word BUILD filled in from their surroundings (make_build_art.py start_picture); they replace the earlier red Ocarina Reborn logo.",
+    "request": "2026-11-17: replace the build / update / installation progress window with an animated version of this picture, using the real build progress.",
+    "rights_status": "Supplied by the project owner for this use; original authorship and redistribution permission not independently verified.",
+    "files": {
+      "tools/alpha/art-src/build-forest-reference.png": "44dd935195bcbfb18bfe8547ee3c03db69d32852fa34426088f01dc0f1844f0a",
+      "tools/alpha/launcher/assets/build-forest.pack": "d59f08c7189338ba91a0fb11b79f5cf63a8fe5be3f3c8c1bfb0e4da7bffece42",
+      "tools/alpha/art-src/launcher-forest-reference.png": "bdc76823ac6e224621b349ebb2e8c1cfd08b39bba34aacad0e857731603ec738",
+      "tools/alpha/art-src/start-forest-reference.png": "734d551348ac8a39dedae456482907eae2c7858dd082130254883f21632a58d5",
+      "tools/alpha/launcher/assets/launcher-forest.pack": "d61a3937a2961a6d95c23eafe0afe947b4175491180221d6daa786ea8b08a0de",
+      "tools/alpha/startup-logo.png": "05b0d902530008dc64149310f33768335c129a3d20f01171337189bacde53246",
+      "engine/assets/ocarina_reborn.png": "05b0d902530008dc64149310f33768335c129a3d20f01171337189bacde53246"
+    }
   }
 }

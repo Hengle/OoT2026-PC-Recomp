@@ -63,3 +63,38 @@ def palette(color):
                   TEXT=(242,246,255), SUB=(169,187,219), MUTED=(125,146,186),
                   LINK=mix(color,(255,255,255),60))
     return {key: '#%02x%02x%02x' % value for key, value in colors.items()}
+
+
+# The launcher's own look since the forest redesign (2026-11-17): dark glass, gold frames, a glowing accent. palette() above
+# stays the F1 menu's (the game draws the same navy shades: hud/ocr_interface_theme.h). In the launcher the chosen interface
+# colour tints the whole look (the night, the glass, the light along fields and rows, the glows, the buttons, the icons);
+# only the gold of the frames stays. The default colour (Reborn Blue, as the game's own default) is the design's forest
+# green here.
+FOREST_ACCENT = (66, 186, 96)
+
+
+def launcher_palette(color):
+    accent = FOREST_ACCENT if tuple(color) == DEFAULT else tuple(color)
+    forest = accent == FOREST_ACCENT
+    span = lambda base: max(base) - min(base)
+
+    def shade(base):   # (a forest shade moved toward the accent as tint() moves the navy ones toward theirs)
+        return tuple(max(0, min(255, b + ((a - f) * span(base) + 104) // 209)) for b, a, f in zip(base, accent, FOREST_ACCENT))
+    ink = (0, 0, 0) if luminance(accent) > .179 else (255, 255, 255)
+    top = mix(accent, (0, 0, 0), 8)
+    colors = {
+        'BG_TOP': shade((6, 30, 28)), 'BG_BOTTOM': shade((3, 17, 16)), 'HEAD': shade((3, 17, 17)),
+        'PANEL': shade((7, 46, 41)), 'PANEL_HI': shade((11, 64, 56)), 'CELL': shade((4, 31, 28)),
+        'GLASS_EDGE': shade((43, 106, 94)),
+        'LINE': (150, 128, 62), 'LINE_HI': (232, 204, 108),   # (the gold of the frames: every colour)
+        'EDGE': (196, 220, 88) if forest else mix(accent, (255, 255, 255), 38),   # (the light along fields and rows)
+        'RULE': (110, 220, 200) if forest else mix(accent, (255, 255, 255), 50),  # (a panel title's rule)
+        'ICON': (191, 244, 255) if forest else mix(accent, (255, 255, 255), 72),
+        'ACCENT': accent, 'ACCENT_HI': mix(accent, (255, 255, 255), 28), 'ACCENT_LO': mix(accent, (0, 0, 0), 52),
+        'GLOW': accent, 'BUTTON_TOP': top, 'BUTTON_EDGE': (240, 214, 124),
+        'ON_ACCENT': ink,
+        'TEXT': (240, 246, 240), 'SUB': shade((182, 206, 198)), 'MUTED': shade((132, 164, 156)),
+        'LINK': mix(accent, (255, 255, 255), 60),
+    }
+    colors['BUTTON_INK'] = (255, 255, 255) if luminance(top) <= .30 else (0, 0, 0)
+    return {key: '#%02x%02x%02x' % value for key, value in colors.items()}

@@ -10,6 +10,7 @@ JSON line per update for the launcher:
 
     {"step": <id>, "frac": 0..1, "count": n, "total": n, "unit": "files|shaders", "text": ..., "total_pct": 0..100}
     {"done": <id>}            a step finished          {"log": <line>}    a line of the build's own output
+    {"skip": <id>}            a step this build does not have (an update has no NUP check), never started
     {"error": "<kind>: <text>", "step": <id>}           {"finished": true}
 
 Steps and where their numbers come from (all of them from the build's own output; nothing is timed):
@@ -73,7 +74,7 @@ def out(**m):
 
 class Progress:
     def __init__(self):
-        self.step, self.frac, self.done = 'nup', 0.0, set()
+        self.step, self.frac, self.done, self.started = 'nup', 0.0, set(), set()
         self.files_total = self.plan = self.programs = self.files_done = 0
 
     def total_pct(self):
@@ -81,13 +82,14 @@ class Progress:
         return round(sum(w for _, w in STEPS[:i]) + STEPS[i][1] * min(max(self.frac, 0.0), 1.0), 2)
 
     def go(self, step, frac=0.0, **extra):
-        if step != self.step:
+        if step != self.step or step not in self.started:
             for s in ORDER[:ORDER.index(step)]:
                 if s not in self.done:
                     self.done.add(s)
-                    out(done=s)
+                    out(done=s) if s in self.started else out(skip=s)
             self.step = step
             self.frac = 0.0
+            self.started.add(step)
         self.frac = max(self.frac, frac)
         out(step=step, frac=round(self.frac, 4), total_pct=self.total_pct(), **extra)
 
@@ -106,14 +108,18 @@ class Progress:
             if st:
                 self.go(st, 0.0)
         elif w[0] == '@@plan' and len(w) > 1:
+            # "@@plan <rebuilt> <all>": every file reports one @@file line (new, cached or again), so the count runs to
+            # <all>; counting against <rebuilt> showed "761 / 382"
             try:
-                self.plan = int(w[1])
+                self.plan = int(line.split()[-1])
             except ValueError:
                 pass
         elif w[0] == '@@file' and self.step == 'build':
-            self.files_done += 1
+            if line.split()[-1] != 'again':   # (a file built again after a failure is still one file)
+                self.files_done += 1
             if self.plan:
-                self.go('build', self.files_done / self.plan, count=self.files_done, total=self.plan, unit='files')
+                n = min(self.files_done, self.plan)
+                self.go('build', n / self.plan, count=n, total=self.plan, unit='files')
         elif w[0] == '@@progress' and len(w) > 1:
             try:
                 f = float(w[1])
@@ -133,14 +139,14 @@ class Progress:
             for s in ORDER:
                 if s not in self.done:
                     self.done.add(s)
-                    out(done=s)
+                    out(done=s) if s in self.started else out(skip=s)
         else:
             m = re.search(r'romfs (\d+) files', line)
             if m and self.step == 'extract':
                 self.files_total = int(m.group(1)) + 5   # (+ the 5 ExeFS files the running count includes)
             m = re.match(r'\s+(\d+) files, ([\d.]+) GB', line)
             if m and self.step == 'extract' and self.files_total:
-                n = int(m.group(1))
+                n = min(int(m.group(1)), self.files_total)
                 self.go('extract', n / self.files_total, count=n, total=self.files_total, unit='files')
             m = re.match(r'done: (\d+) files written', line)
             if m and self.step == 'extract':
@@ -215,7 +221,8 @@ def main():
     env = dict(os.environ, HOOKSHOT_MINGW=str(H / 'llvm-mingw'), RX_CPM=str(H / 'cpm'), WGPU_NATIVE=str(H / 'wgpu-native'),
                HOOKSHOT_NO_UPDATE_CHECK='1',
                HOOKSHOT_KEEP_BUILD_FILES='1')   # (the compiled objects stay: an update compiles only what changed)
-    prog.go('nup', 0.0, text='Validating game file')
+    if not a.update:   # (an update reads the game files the folder keeps: there is no .nup to check)
+        prog.go('nup', 0.0, text='Validating game file')
     err = None
     with open(logs / ('check.log' if a.check_only else 'build.log'), 'w', encoding='utf-8', errors='replace') as log:
         log.write(f'[{time.strftime("%H:%M:%S")}] {" ".join(cmd)}\n')

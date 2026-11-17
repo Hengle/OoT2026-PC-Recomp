@@ -156,7 +156,10 @@ def paginate(rows, height):
 
 
 def version_key(text):
-    return tuple(int(x) for x in re.findall(r'\d+', str(text).split('-')[0])[:3])
+    """(major, minor, patch, n): a numeric '-n' (1.1.4-1) is its own version, a word ('-alpha') is not"""
+    base, _, tail = str(text).partition('-')
+    numbers = tuple(int(x) for x in re.findall(r'\d+', base)[:3])
+    return numbers + ((int(tail),) if tail.isdigit() else (0,))
 
 
 def bundled():

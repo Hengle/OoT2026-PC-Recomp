@@ -10,7 +10,7 @@ FORBIDDEN_NAMES = {'oot_younglink.zip', 'oot_adultlink.zip', 'music.wav', 'music
                    'prod.keys', 'title.keys', 'signing.key', 'image.bin'}
 GAME_SUFFIXES = {'.nup', '.nsp', '.xci', '.nca', '.nso', '.rom', '.z64', '.n64', '.v64', '.bwav', '.bars', '.bfwav'}
 MEDIA_SUFFIXES = {'.png', '.jpg', '.jpeg', '.webp', '.ico', '.raw', '.wav', '.mp3', '.ogg',
-                  '.gif', '.mp4', '.webm', '.flac', '.aac', '.m4a', '.avi'}
+                  '.gif', '.mp4', '.webm', '.flac', '.aac', '.m4a', '.avi', '.pack'}   # (.pack: build-forest.pack's pictures)
 
 FAIRY_SOURCE = 'tools/alpha/launcher/assets/fairy.bin'
 

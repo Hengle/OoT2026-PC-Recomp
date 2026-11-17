@@ -1014,8 +1014,9 @@ class App(tk.Tk):
             n = len(game_settings.SECTIONS) + 2   # (the sections, Difficulty, Cheats)
             self.settings_page((self.page_tab + d) % n, True)
 
-    def show(self, step, body):
-        """draws the page: the header, then body(ctx, top) under it"""
+    def show(self, step, body, banner=False):
+        """draws the page: the forest scenery (banner: the main page's bright banner with the Ocarina, else the same
+        scenery dimmed under the page), the header, then body(ctx, top) under it"""
         self.step = step
         self.page_tab = None
         self.page_back = self.page_wheel = None   # (a page's own way back and mouse wheel: set after show())
@@ -1024,15 +1025,26 @@ class App(tk.Tk):
             self.float_ctl = None
 
         def draw(ctx):
+            hh = 84 * ctx.s
+            ctx.scenery(hh, self.banner_height(ctx, hh) if banner else 230 * ctx.s, 1.0 if banner else 0.2)
+            ctx.outline(hh + 2 * ctx.s)
             top = self.header(ctx)
             body(ctx, top)
         self.stage.show(draw)
 
+    MAIN_PAGE_NEED = 752   # (the main page under its banner, in design units: heading, panels, footer and their gaps)
+
+    def banner_height(self, ctx, top):
+        """the main page's banner: the art's own proportion at the window's width, less when the window is too short
+        for it and the page (never under 90 design units: the page's gaps give way first)"""
+        s = ctx.s
+        room = ctx.H - top - self.MAIN_PAGE_NEED * s
+        return max(90 * s, min(ctx.W * 214 / 1472, room + 60 * s))
+
     def header(self, ctx):
         s, W = ctx.s, ctx.W
         hh = 84 * s
-        ctx.p.rect(0, 0, W, hh, ui.HEAD, 0.55)
-        ctx.hline(0, hh, W, ui.LINE, 0.8)
+        ctx.p.rect(0, 0, W, hh, ui.HEAD, 0.82)
         if self.chrome.ok:
             ctx.hot(0, 0, W, hh, self.chrome.drag, cursor='', kind='drag')
             if self.state() != 'zoomed':
@@ -1046,7 +1058,7 @@ class App(tk.Tk):
         ctx.text(152 * s, hh / 2, 'Ocarina Reborn', 28, 'bold', ui.TEXT, anchor='w')
         title_end = 152 * s + ctx.text_width('Ocarina Reborn', 28, 'bold')
         # the steps: Game files > Build > Play, the current one lit
-        items = (('files', 'folder', 'Game files'), ('build', 'cube', 'Build'), ('play', 'play', 'Play'))
+        items = (('files', 'folder', 'Game files'), ('build', 'cube', 'Build'), ('play', 'play', T('Spielen', 'Play')))
         pad, isz, gap, chev = 30 * s, 26 * s, 12 * s, 44 * s
         widths = [pad * 2 + isz + gap + ctx.text_width(t, 21) for _, _, t in items]
         total = sum(widths) + chev * 2 + 8 * s
@@ -1063,19 +1075,21 @@ class App(tk.Tk):
         right_room += (mw + 10 * s if mw else 0) + (uw + 10 * s if uw else 0)
         x0 = min(x0, W - right_room - total)
         cy, ch = hh / 2 - 2 * s, 58 * s
-        ctx.panel(x0, cy - ch / 2, total, ch, r=29, fill=ui.CELL, alpha=0.8, border=ui.LINE, balpha=0.9)
+        ctx.panel(x0, cy - ch / 2, total, ch, r=18, fill=ui.CELL, alpha=0.85, border=ui.GLASS_EDGE, balpha=0.9)
         x = x0 + 4 * s
         for i, ((key, icon, text), w) in enumerate(zip(items, widths)):
             on = key == self.step
-            if on:
-                ctx.panel(x, cy - ch / 2 + 4 * s, w, ch - 8 * s, r=25, fill=ui.BUTTON_TOP, fill2=ui.ACCENT_LO, alpha=1,
-                          border=ui.ACCENT_HI, border2=ui.ACCENT, bw=1.2, glow=ui.GLOW, gr=16, ga=0.45)
-            col = ui.BUTTON_INK if on else ui.SUB
+            if on:   # (the step the window is at: green glass in gold, as the design's Play)
+                ty, th = cy - ch / 2 + 1 * s, ch - 2 * s
+                ctx.p.rrect(x, ty, w, th, 14 * s, glow=ui.GLOW, gr=14 * s, ga=0.55)
+                ctx.p.frame(x, ty, w, th, 14 * s, s, gold_w=2.2, fill_top=ui.BUTTON_TOP, fill_bottom=ui.ACCENT_LO, alpha=1,
+                            glow=0.3)
+            col = '#fbf3c4' if on else ui.TEXT
             ctx.icon(x + pad + isz / 2, cy, icon, 23, col)
             ctx.text(x + pad + isz + gap, cy, text, 21, 'semibold' if on else 'regular', col, anchor='w')
             x += w
             if i < 2:
-                ctx.icon(x + chev / 2, cy, 'right', 15, ui.SUB)
+                ctx.icon(x + chev / 2, cy, 'right', 15, ui.TEXT)
                 x += chev
         # the window's buttons, and the music
         bx = W
@@ -1100,7 +1114,7 @@ class App(tk.Tk):
             ctx.button(bx, hh / 2 - 19 * s, mw, 38 * s, music_label, self.toggle_music, kind='quiet',
                        icon='mute' if self.muted else 'speaker', size=16, weight='regular')
         ctx.button(bx - nw, hh / 2 - 19 * s, nw, 38 * s, navi_label, self.toggle_fairy, kind='quiet',
-                   icon='checked' if navi_on else 'checkbox', size=16, weight='regular')
+                   icon='monitor', size=16, weight='regular')
         return hh
 
     def content(self, ctx, margin=54):
@@ -1114,7 +1128,7 @@ class App(tk.Tk):
         ctx.icon_box(x + 6 * s, y, 76 * s, icon, 34, icon_color, r=14)
         ctx.text(x + 106 * s, y + 2 * s, title, 40, 'bold', ui.TEXT)
         if sub:
-            ctx.text(x + 107 * s, y + 56 * s, sub, 19, 'regular', '#c3d0ea', width=(w or ctx.W) - 120 * s)
+            ctx.text(x + 107 * s, y + 56 * s, sub, 19, 'regular', '#d2e2dc', width=(w or ctx.W) - 120 * s)
 
     def footer_line(self, ctx, x, w, y):
         ctx.hline(x, y, w, ui.LINE, 0.6)
@@ -1337,7 +1351,7 @@ class App(tk.Tk):
                     ctx.hline(x + 14 * s, ry, w - 28 * s, ui.LINE, 0.5)
                 ctx.icon_box(x + 15 * s, ry + rh / 2 - 32 * s, 64 * s, icon, 28, ui.ACCENT_HI, r=12)
                 ctx.text(x + 106 * s, ry + rh / 2 - 6 * s, title, 22, 'semibold', ui.TEXT, anchor='sw')
-                ctx.text(x + 106 * s, ry + rh / 2 + 2 * s, sub, 18, 'regular', '#c3d0ea', anchor='nw')
+                ctx.text(x + 106 * s, ry + rh / 2 + 2 * s, sub, 18, 'regular', '#d2e2dc', anchor='nw')
                 bx0 = x + max(w * 0.44, 560 * s)
                 ctx.progress(f'bar{i}', bx0, ry + rh / 2 + 4 * s, x + w - 10 * s - bx0, 14 * s, 0.0)
             # disk space | the button
@@ -1359,7 +1373,7 @@ class App(tk.Tk):
         free = free_gb(self.dest.get() or self.cfg['game_dir'])
         drive = Path(self.dest.get() or '.').anchor.rstrip('\\') or 'C:'
         return (T(f'Benötigt: {NEED_GB},0 GB  •  {drive} hat {free:.0f} GB frei', f'Needs {NEED_GB} GB  •  {drive} has {free:.0f} GB free'),
-                '#c3d0ea' if free >= NEED_GB else RED)
+                '#d2e2dc' if free >= NEED_GB else RED)
 
     def check_nup(self, f):
         cmd = [str(INSTALL / 'python' / 'python.exe'), '-I', str(INSTALL / 'ocarina_prepare.py'), '--nup', str(f),
@@ -1436,25 +1450,15 @@ class App(tk.Tk):
             self.busy = False
             log('prepare stopped or failed')
             self.route()
-        bs = BuildScreen(self, cmd, ASSETS, UI_LANG[0] == 'de', DIRS['Logs'] / f'build-{NOW}.log', done, back, INFO['version'])
-        if self.chrome.ok:   # (the build screen fills the window: its top moves the window, the window's buttons float over it)
-            bs.c.bind('<Button-1>', lambda e: self.chrome.drag() if e.y < 70 * self.stage.scale(*self.stage.size) else None,
-                      add='+')
-            self.window_buttons_over(bs.c)
-
-    def window_buttons_over(self, under):
-        s = self.stage.scale(self.winfo_width(), self.winfo_height())
-        bw, bh = int(56 * s), int(44 * s)
-        c = tk.Canvas(self, width=bw * 3, height=bh, bg='#050b1c', highlightthickness=0, bd=0)
-        c.place(relx=1.0, x=0, y=0, anchor='ne')
-        for i, (name, cmd) in enumerate((('minimize', self.iconify), ('maximize', self.toggle_max), ('close', self.quit_app))):
-            r = c.create_rectangle(i * bw, 0, (i + 1) * bw, bh, fill='#050b1c', outline='')
-            c.create_text(i * bw + bw / 2, bh / 2, text=ui.GLYPH[name], font=(ui.ICON, -int(15 * s)), fill=ui.SUB)
-            c.tag_bind(r, '<Enter>', lambda e, r=r, n=name: c.itemconfig(r, fill='#c42b1c' if n == 'close' else ui.PANEL_HI))
-            c.tag_bind(r, '<Leave>', lambda e, r=r: c.itemconfig(r, fill='#050b1c'))
-        c.bind('<Button-1>', lambda e: (self.iconify, self.toggle_max, self.quit_app)[min(2, e.x // bw)]())
-        tk.Misc.lift(c)   # (a canvas's own lift() raises its items, not the widget)
-        self.float_ctl = c
+        if self.float_ctl:
+            self.float_ctl.destroy()
+            self.float_ctl = None
+        # (the build screen fills the window and draws its own minimise / maximise / close in the artwork's corner when the
+        # launcher's caption is its own; its top moves the window. Closing while the build runs asks first, as Abbrechen)
+        window = dict(minimize=self.iconify, maximize=self.toggle_max, close=self.quit_app, drag=self.chrome.drag,
+                      controls=self.chrome.ok)
+        BuildScreen(self, cmd, ASSETS, UI_LANG[0] == 'de', DIRS['Logs'] / f'build-{NOW}.log', done, back, INFO['version'],
+                    window=window)
 
     def resume_page(self, job):
         def restart():
@@ -1535,7 +1539,7 @@ class App(tk.Tk):
             ctx.text(x + 116 * s, ay + 70 * s, T(
                 'Nur Geändertes wird neu kompiliert. Danach bereitet der erste Start die Shader vor. Dein Spielordner und '
                 'deine Einstellungen bleiben erhalten.', 'Only what changed is compiled again. The first start then prepares '
-                'the shaders. Your game folder and your settings stay as they are.'), 19, 'regular', '#c3d0ea',
+                'the shaders. Your game folder and your settings stay as they are.'), 19, 'regular', '#d2e2dc',
                 width=half - 150 * s)
             if saves:
                 bx = x + half + 24 * s
@@ -1544,7 +1548,7 @@ class App(tk.Tk):
                 ctx.text(bx + 116 * s, ay + 34 * s, T('Deine Spielstände', 'Your save data'), 22, 'semibold')
                 ctx.text(bx + 116 * s, ay + 70 * s, T('Sie bleiben beim Update erhalten. Ein Backup vorher ist trotzdem sicherer.',
                                                       'It stays as it is during the update. Making a backup first is still safer.'),
-                         19, 'regular', '#c3d0ea', width=half - 150 * s)
+                         19, 'regular', '#d2e2dc', width=half - 150 * s)
                 ctx.text(bx + 116 * s, ay + ah - 110 * s, T('Backup-Ordner', 'Backup location'), 16, 'semibold', ui.SUB)
                 ctx.text(bx + 116 * s, ay + ah - 84 * s, str(backup_root()), 18, 'regular', ui.TEXT, width=half - 150 * s)
                 ctx.button(bx + 116 * s, ay + ah - 52 * s, 210 * s, 36 * s, T('Ordner ändern', 'Change location'), change,
@@ -1569,8 +1573,9 @@ class App(tk.Tk):
         def body(ctx, top):
             s = ctx.s
             x, w = self.content(ctx)
-            (hy, _), (dv, _), (cy, chh), (dv2, _), (fy, fh) = layout(
-                ctx, top, [(76, 34, 0), (0, 27, 0.15), (420, 30, 1), (0, 32, 0.15), (82, 7, 0)])
+            # (under the banner: its lower part fades into the night behind the heading, as in the design)
+            top = top + self.banner_height(ctx, top) - 26 * s
+            (hy, _), (cy, chh), (fy, fh) = layout(ctx, top, [(76, 0, 0), (420, 22, 1), (104, 24, 0)], bottom_margin=26)
             self.heading(ctx, x, hy, T('Ocarina Reborn ist bereit.', 'Ocarina Reborn is ready.'),
                          T('Beim ersten Start werden Shader vorbereitet. Die Dauer hängt von CPU und Grafiktreiber ab.',
                            'The first start prepares shaders. Time depends on your CPU and graphics driver.'), icon='play', w=w)
@@ -1578,92 +1583,93 @@ class App(tk.Tk):
             news = self.notes()
             if news:   # (what the newest release brought, from the site's GitHub; offline, this version's own notes)
                 label = T(f'Neu in {news[0]}', f'New in {news[0]}')
-                nw = ctx.text_width(label, 17, 'semibold') + 64 * s
+                nw = ctx.text_width(label, 17, 'semibold') + 70 * s
                 px -= nw
-                ctx.button(px, hy + 18 * s, nw, 40 * s, label, self.show_news, kind='pill', icon='info', size=17)
-                px -= 12 * s
+                ctx.button(px, hy + 18 * s, nw, 42 * s, label, self.show_news, kind='pill', icon='info', size=17,
+                           color=ui.LINK)
+                px -= 18 * s
             warn = self.facts and advisor.pc_warnings(self.facts, self.active_gpu, UI_LANG[0] == 'de')
             if self.diag or warn or self.facts:
                 bad = warn or any(k == 'warn' for k, _ in self.diag)
                 label = T('Leistung: Hinweise', 'Performance: tips') if bad else T('Letzte Sitzung', 'Last session')
-                nw = ctx.text_width(label, 17, 'semibold') + 64 * s
+                nw = ctx.text_width(label, 17, 'semibold') + 70 * s
                 px -= nw
-                ctx.button(px, hy + 18 * s, nw, 40 * s, label, self.show_diagnosis, kind='pill',
+                ctx.button(px, hy + 18 * s, nw, 42 * s, label, self.show_diagnosis, kind='pill',
                            icon='warning' if bad else 'check', size=17, color=ui.GOLD if bad else None)
-            ctx.hline(x, dv, w, ui.LINE, 0.55)
-            gap = 24 * s
-            lw = (w - gap) * 0.56
+            gap = 34 * s
+            lw = (w - gap) * 0.5
             rw = w - gap - lw
             # left: what the game starts with
-            ctx.panel(x, cy, lw, chh, r=16, fill=ui.PANEL, fill2=ui.CELL, alpha=0.85, border=ui.LINE)
-            ctx.text(x + 30 * s, cy + 26 * s, T('SPIELSTART', 'GAME START'), 17, 'semibold', ui.SUB)
-            fields = ((('globe', T('Spielsprache (Text)', 'Game language (text)'), 'language', [n for _, n in LANGS],
+            ctx.panel(x, cy, lw, chh, r=22, fill=ui.PANEL, fill2=ui.CELL, alpha=0.86, ornate=True)
+            ctx.section(x + 40 * s, cy + 36 * s, lw - 70 * s, T('SPIELSTART', 'GAME START'))
+            fields = ((('gamepad', T('Spielsprache (Text)', 'Game language (text)'), 'language', [n for _, n in LANGS],
                         dict(LANGS).get(self.cfg['language'], 'Deutsch')),
                        ('speaker', T('Audioausgabe', 'Audio output'), 'audio', [T('Windows-Standard', 'Windows default')] + devs,
                         devs[int(self.cfg['audio'])] if self.cfg.get('audio', 'default') != 'default' and
                         int(self.cfg['audio']) < len(devs) else T('Windows-Standard', 'Windows default')),
-                       ('settings', T('Launcher-Sprache', 'Launcher language'), 'ui', ['Deutsch', 'English'],
+                       ('monitor', T('Launcher-Sprache', 'Launcher language'), 'ui', ['Deutsch', 'English'],
                         'Deutsch' if UI_LANG[0] == 'de' else 'English')))
-            room = chh - 70 * s
+            room = chh - 92 * s
             step = room / 3
             for i, (icon, title, key, values, cur) in enumerate(fields):
-                fy0 = cy + 64 * s + i * step
-                ctx.icon(x + 44 * s, fy0 + 12 * s, icon, 22, ui.TEXT)
-                ctx.text(x + 72 * s, fy0 + 12 * s, title, 19, 'regular', ui.TEXT, anchor='w')
-                ctx.dropdown(x + 30 * s, fy0 + 32 * s, lw - 60 * s, min(52 * s, step - 44 * s), values, cur,
+                fy0 = cy + 80 * s + i * step
+                ctx.icon(x + 56 * s, fy0 + 12 * s, icon, 23, ui.TEXT)
+                ctx.text(x + 86 * s, fy0 + 12 * s, title, 20, 'regular', ui.TEXT, anchor='w')
+                ctx.dropdown(x + 44 * s, fy0 + 36 * s, lw - 90 * s, min(44 * s, step - 46 * s), values, cur,
                              lambda v, k=key: self.set_option(k, v), size=20)
             # right: the game's own pages
             rx = x + lw + gap
-            ctx.panel(rx, cy, rw, chh, r=16, fill=ui.PANEL, fill2=ui.CELL, alpha=0.85, border=ui.LINE)
-            ctx.text(rx + 30 * s, cy + 26 * s, T('SPIEL', 'GAME'), 17, 'semibold', ui.SUB)
-            tiles = (('save', T('Spielstände', 'Save data'), T('Backups, Wiederherstellen, Import', 'Backups, restore, import'),
+            ctx.panel(rx, cy, rw, chh, r=22, fill=ui.PANEL, fill2=ui.CELL, alpha=0.86, ornate=True)
+            ctx.section(rx + 40 * s, cy + 36 * s, rw - 70 * s, T('SPIEL', 'GAME'))
+            tiles = (('folder', T('Spielstände', 'Save data'), T('Backups, Wiederherstellen, Import', 'Backups, restore, import'),
                       self.saves_page),
-                     ('cube', 'Mods', T('An/aus, aus ZIP oder Ordner hinzufügen', 'On/off, add from a ZIP or folder'),
+                     ('puzzle', 'Mods', T('An/aus, aus ZIP oder Ordner hinzufügen', 'On/off, add from a ZIP or folder'),
                       self.mods_page),
                      ('settings', T('Einstellungen', 'Settings'), T('Grafik, Steuerung, Audio, Schwierigkeit, Cheats', 'Graphics, controls, audio, difficulty, cheats'),
                       self.settings_page),
-                     ('wrench', 'Reborn Auto', T('Messen, Vorschlag, Vergleich', 'Measure, suggest, compare') +
+                     ('sync', 'Reborn Auto', T('Messen, Vorschlag, Vergleich', 'Measure, suggest, compare') +
                       (T('  ·  zweiter Lauf offen', '  ·  second run pending')
                        if (self.cfg.get('reborn_auto') or {}).get('step') == 'compare' else ''), self.reborn_auto),
-                     ('layers', T('Shader vorbereiten', 'Prepare shaders'), T('Weniger Ruckler, z. B. nach Treiber-Update',
-                                                                              'Less stutter, e.g. after a driver update'),
+                     ('chip', T('Shader vorbereiten', 'Prepare shaders'), T('Weniger Ruckler, z. B. nach Treiber-Update',
+                                                                            'Less stutter, e.g. after a driver update'),
                       self.prepare_shaders),
-                     ('refresh', T('Spiel neu bauen', 'Rebuild game'), T('Aus deiner NUP-Datei, neu', 'From your NUP file, again'),
+                     ('layers', T('Spiel neu bauen', 'Rebuild game'), T('Aus deiner NUP-Datei, neu', 'From your NUP file, again'),
                       self.game_files))
-            th = (chh - 80 * s) / len(tiles)
+            th = (chh - 92 * s) / len(tiles)
             for i, (icon, title, sub, cmd) in enumerate(tiles):
-                ty = cy + 62 * s + i * th
-                tx, tw_, tl = rx + 20 * s, rw - 40 * s, th - 12 * s
+                ty = cy + 70 * s + i * th
+                tx, tw_, tl = rx + 30 * s, rw - 60 * s, th - 10 * s
 
                 def look(c, on, tx=tx, ty=ty, tw_=tw_, tl=tl):
-                    c.panel(tx, ty, tw_, tl, r=12, fill=ui.PANEL_HI if on else ui.CELL, alpha=0.9,
-                            border=ui.LINE_HI if on else ui.LINE, balpha=1.0, glow=ui.GLOW if on else None, gr=10, ga=0.15)
+                    c.field(tx, ty, tw_, tl, r=14, lit=on)
                 look(ctx, False)
-                isz = min(56 * s, tl - 16 * s)
-                ctx.icon_box(tx + 14 * s, ty + tl / 2 - isz / 2, isz, icon, 24, ui.ACCENT_HI, r=10, fill=ui.PANEL)
-                if tl >= 62 * s:   # (room for two lines)
-                    ctx.text(tx + 30 * s + isz, ty + tl / 2 - 2 * s, title, 21, 'semibold', ui.TEXT, anchor='sw')
-                    ctx.text(tx + 30 * s + isz, ty + tl / 2 + 2 * s, sub, 17, 'regular', ui.SUB, anchor='nw')
-                else:   # (six tiles in a small window: the title, smaller, and the line under it as its hover help)
-                    ctx.text(tx + 30 * s + isz, ty + tl / 2, title, 19, 'semibold', ui.TEXT, anchor='w')
-                ctx.icon(tx + tw_ - 30 * s, ty + tl / 2, 'right', 16, ui.SUB)
+                ctx.icon(tx + 40 * s, ty + tl / 2, icon, 26, ui.ICON_INK)
+                if tl >= 66 * s:   # (room for two lines)
+                    ctx.text(tx + 92 * s, ty + tl / 2 - 1 * s, title, 21, 'regular', ui.TEXT, anchor='sw')
+                    ctx.text(tx + 92 * s, ty + tl / 2 + 3 * s, sub, 16, 'regular', ui.SUB, anchor='nw')
+                else:   # (the design's rows: the title alone)
+                    ctx.text(tx + 92 * s, ty + tl / 2, title, 21, 'regular', ui.TEXT, anchor='w')
+                ctx.icon(tx + tw_ - 32 * s, ty + tl / 2, 'right', 17, ui.TEXT)
                 ctx.hot(tx, ty, tw_, tl, cmd, hover=look)
-            # bottom: the support tools, quiet; Play, bright
-            ctx.hline(x, dv2, w, ui.LINE, 0.5)
-            mid = fy + fh / 2
-            ctx.text(x + 4 * s, mid, T('DIAGNOSE', 'DIAGNOSTICS'), 15, 'semibold', ui.MUTED, anchor='w')
-            tx = x + 4 * s + ctx.text_width(T('DIAGNOSE', 'DIAGNOSTICS'), 15, 'semibold') + 20 * s
+            # bottom: the support tools in their own glass strip; Play, the big green button
+            bw = min(440 * s, w * 0.34)
+            fw = w - bw - 30 * s
+            ctx.panel(x, fy, fw, fh, r=16, fill=ui.CELL, alpha=0.7, border=ui.GLASS_EDGE, balpha=0.9)
+            ctx.p.light_line(x + 20 * s, fy + fh, fw - 40 * s, s, ui.rgb(ui.EDGE), 0.55)
+            mid = fy + fh * 0.36
+            ctx.icon(x + 34 * s, mid, 'bug', 19, ui.TEXT)
+            ctx.text(x + 56 * s, mid, T('DIAGNOSE', 'DIAGNOSTICS'), 16, 'regular', ui.TEXT, anchor='w')
+            tx = x + 56 * s + ctx.text_width(T('DIAGNOSE', 'DIAGNOSTICS'), 16) + 24 * s
             for icon, text, cmd in (('logs', T('Logs öffnen', 'Open logs'), lambda: os.startfile(DIRS['Logs'])),
                                     ('wrench', T('Diagnose-Tools', 'Diagnostic tools'), self.diagnostic_tools),
-                                    ('bug', T('Debug-Paket erstellen', 'Create debug package'), self.debug_package)):
-                bw = ctx.text_width(text, 17) + 60 * s
-                ctx.button(tx, mid - 21 * s, bw, 42 * s, text, cmd, kind='quiet', icon=icon, size=17, weight='regular')
-                tx += bw + 8 * s
-            ctx.text(x + 4 * s, mid + 34 * s, self.cfg['game_dir'], 15, 'regular', ui.MUTED, anchor='w')
-            bw = 297 * s
-            ctx.button(x + w - bw, fy, bw, fh, T('Spielen', 'Play'), self.play, kind='primary', icon='play', size=30,
-                       weight='bold', r=16)
-        self.show('play', body)
+                                    ('cube', T('Debug-Paket erstellen', 'Create debug package'), self.debug_package)):
+                bw_ = ctx.text_width(text, 18) + 64 * s
+                ctx.button(tx, mid - 20 * s, bw_, 40 * s, text, cmd, kind='quiet', icon=icon, size=18, weight='regular')
+                tx += bw_ + 6 * s
+            ctx.text(x + 30 * s, fy + fh * 0.74, self.cfg['game_dir'], 16, 'regular', ui.TEXT, anchor='w')
+            ctx.button(x + w - bw, fy - 6 * s, bw, fh + 12 * s, T('Spielen', 'Play'), self.play, kind='primary', icon='play',
+                       size=38, weight='bold', r=40)
+        self.show('play', body, banner=True)
 
     def saves_page(self):
         """the player's save data: backups (make, restore, where they go), import from an emulator or another install, and the
@@ -1809,7 +1815,7 @@ class App(tk.Tk):
                 vals = (bk['timestamp'].replace('T', '  '), bk['kind'], bk['reason'][:28], str(bk['files']),
                         f"{bk['size'] / 1048576:.1f} MB")
                 for (_, fx), v in zip(cols, vals):
-                    ctx.text(x + 24 * s + fx * iw, ry + rh / 2 - 2 * s, v, 17, 'regular', ui.TEXT if on else '#c3d0ea', anchor='w')
+                    ctx.text(x + 24 * s + fx * iw, ry + rh / 2 - 2 * s, v, 17, 'regular', ui.TEXT if on else '#d2e2dc', anchor='w')
 
                 def pick(p=bk['path']):
                     self.saves_sel = p

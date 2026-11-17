@@ -80,6 +80,8 @@ class PatchNotesTests(unittest.TestCase):
         self.assertTrue(notes.due('1.1.3', '1.1.2', True))
         self.assertFalse(notes.due('1.1.3', '1.1.3', True))
         self.assertFalse(notes.due('1.1.3-alpha', '1.1.3', True))
+        self.assertTrue(notes.due('1.1.4-1', '1.1.4', True))       # (a numbered small update has its own notes)
+        self.assertFalse(notes.due('1.1.4-1', '1.1.4-1', True))
         self.assertTrue(notes.due('1.1.2', '1.1.3', True))      # (an older installer over a newer one: its notes are new here)
 
     def test_launcher_ships_the_notes_of_its_version(self):

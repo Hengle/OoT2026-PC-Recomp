@@ -612,7 +612,7 @@ def recolour_menu(H):
     print(f'menu: {n} colours changed')
 
 
-LOGO = Path(__file__).resolve().parent / 'startup-logo.png'   # the Ocarina Reborn logo on transparency, 912 px wide
+LOGO = Path(__file__).resolve().parent / 'startup-logo.png'   # the start-up screen's forest picture, 1672 x 941 (make_build_art.py)
 
 
 # The files the build makes and the game keeps (hookshot.exe, hookshot_vk.dll, hookshot_log.txt, hookshot_options.ini,

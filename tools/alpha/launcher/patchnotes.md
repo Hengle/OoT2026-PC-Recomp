@@ -1,46 +1,30 @@
-**IMPORTANT — Ocarina Reborn v1.1.4: PLEASE READ THE PATCH NOTES**
+**IMPORTANT — Ocarina Reborn v1.1.4-1: PLEASE READ THE PATCH NOTES**
 
-**🚀 Engine & Performance Update**
+**🌲 New look**
 
-**This update includes the new engine. Let the launcher update/rebuild the game and prepare shaders before playing. The first start can take longer while the new shaders and pipelines are prepared. Keep your existing caches; do not delete them manually.**
-
-**⚡ Performance & memory**
-- Updated the engine to **v2.3.2**, with further CPU, renderer and memory improvements.
-- Improved CPU-thread coordination to avoid missed wake-ups and unnecessary waiting.
-- Rendering work takes priority over background shader preparation, helping background work interfere less with gameplay.
-- Improved reuse and cleanup of graphics memory, with fewer repeated allocations and safer release of resources still used by the GPU.
-- Added recovery headroom for memory-allocation failures under Windows memory pressure. This reduces one crash risk; it does not replace having enough RAM and page-file space.
-- Better cleanup of temporary shader resources, including when shader preparation fails.
-
-**🖥️ Rendering & Frame Generation**
-- Built-in Frame Generation now limits extra frames to what your display can show and drops late generated frames instead of holding up the next real frame.
-- Improved HDR/upscaler handling, graphics-data synchronization and shader translation, including Intel compatibility fixes.
-- Improved ultrawide menus and loading transitions.
-- Optional **CRT filters** in F1 for a retro display style. Off by default; Native HDR bypasses them.
-- The engine now supports **Intel XeSS / XeSS Native AA** on compatible Windows systems with Intel's runtime installed. It is optional and not bundled with this installer.
-
-**💾 Saves & stability**
-- Automatic save backups are kept outside the game folder. The newest backup can be restored automatically when the save folder is empty; existing saves are not overwritten.
-- Improved audio-device recovery and crash reporting.
-- Protection against two game or shader-preparation processes using the same game folder and conflicting over the cache.
-- Debug reports now distinguish failed starts from older sessions, so old FPS measurements are not blamed on a new launch.
-
-**🎨 Classic UI — optional**
-- Open **Launcher → Mods → Choose Classic UI**.
-- Choose **Switch, Xbox or PlayStation button icons**, including swapped-button variants, **four HUD styles** and **three title-screen logos**.
-- Click **Install and enable**. Only your chosen version is downloaded — around **80 MB**. After installation, the on/off switch also works offline.
-- Changes apply at the next game start. Classic UI itself does not require a game rebuild.
-- Classic UI by **kuledawg**, downloaded directly from [GameBanana](https://gamebanana.com/mods/737280). Other HUD mods may conflict. Installation and switching are tested; in-game visual testing is still ongoing.
+**This is a small update on top of v1.1.4: a new launcher look, a new build screen, a new start screen and a portrait-mode camera fix. Engine, performance and memory behaviour are unchanged from v1.1.4.**
 
 **🛠️ Launcher**
-- **Open launcher** returns to the launcher after a game build/update instead of immediately starting the game.
-- The installer's final option now clearly says **Launch Ocarina Reborn Launcher**.
+- New forest-themed launcher design with a new header, buttons and panels.
+- The interface color you choose in the settings now tints the whole launcher.
+
+**🔨 Build & update screen**
+- Completely new build/update screen with a step list and one overall progress bar.
+- Shows real progress and an accurate file counter (it no longer counts past the total).
+- Steps an update does not need are shown as **not needed** instead of being ticked off.
+- The build log can be opened directly from the screen.
+
+**▶️ Start screen**
+- New start screen after clicking **Play**, with three steps: **Check the launcher**, **Prepare the game** and **Start the game**, plus a real progress bar.
+
+**📱 9:16 / portrait fix**
+- On pictures narrower than 16:9 (for example **9:16**, 4:3 or 16:10), the gameplay camera now keeps the full 16:9 height view and shows more above and below instead of cutting off the sides.
+- Cutscenes keep their own camera.
 
 **ℹ️ Updating**
-- Restart the launcher and click **Update**. Install over your existing version, then let the launcher update the game.
+- **If you have v1.1.4 installed: download the installer from the website and install it over your existing version.** The launcher will not offer this update automatically because the main version number is unchanged.
+- Let the launcher update the game once after installing.
 - **No uninstall or game-file reimport is needed. Saves and settings stay.**
-- If you already installed the earlier, withdrawn **1.1.4**, download the installer again from the website. The version number is unchanged, so that launcher will not offer it automatically.
-- Performance depends on your hardware and the scene. This update does not promise to eliminate every stutter or graphics issue.
 
 **📊 Help us improve**
 - If you notice stutters, press **Ctrl+F8**, close the game and create a fresh **Debug Package**. After a crash, reopen the launcher to create it.

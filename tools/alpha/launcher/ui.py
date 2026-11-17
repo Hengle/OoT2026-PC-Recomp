@@ -19,7 +19,7 @@ from ctypes import wintypes
 import numpy as np
 import interface_theme
 
-# ---- the palette (the design: dark navy, blue glass panels, a bright blue accent)
+# ---- the palette (the forest design: dark teal glass, gold frames, a green accent; interface_theme.launcher_palette)
 BG_TOP, BG_BOTTOM = '#0d1b36', '#081226'
 HEAD = '#0a1730'
 PANEL, PANEL_HI = '#10224a', '#132a58'
@@ -32,8 +32,13 @@ LINK = '#86d0ff'
 GOLD, RED, GREEN = '#f4c430', '#ff8a80', '#3ccf6e'
 
 
+EDGE, RULE, ICON_INK, GLASS_EDGE = '#c4dc58', '#6edcc8', '#bff4ff', '#2b6a5e'
+
+
 def apply_theme(values):
-    globals().update(interface_theme.palette(interface_theme.rgb(values)))
+    p = interface_theme.launcher_palette(interface_theme.rgb(values))
+    p['ICON_INK'] = p.pop('ICON')
+    globals().update(p)
 
 
 apply_theme({})
@@ -44,7 +49,8 @@ GLYPH = dict(download='', folder='', folder_open='', cube='', play='
              minimize='', maximize='', restore='', close='', settings='', save='',
              bug='', wrench='', layers='', speaker='', mute='', music='', info='',
              check='', clock='', back='', import_='', history='', warning='',
-             logs='', key='', checkbox='', checked='')
+             logs='', key='', checkbox='', checked='',
+             gamepad='', monitor='', puzzle='')
 
 
 def rgb(c):
@@ -56,6 +62,23 @@ def font_family(*names):
     return next((n for n in names if n in have), names[-1])
 
 
+# ---- the forest scenery (assets/launcher-forest.pack: tools/alpha/make_build_art.py)
+_SCENERY = []
+
+
+def scenery_art():
+    """the banner and the floor as float pictures, read once; None without the asset (the plain night then)"""
+    if not _SCENERY:
+        try:
+            import build_screen
+            arrays, _ = build_screen.load_pack(os.path.join(os.path.dirname(os.path.abspath(__file__)), 'assets',
+                                                            'launcher-forest.pack'))
+            _SCENERY.append({k: v.astype(np.float32) for k, v in arrays.items()})
+        except (OSError, ValueError, KeyError):
+            _SCENERY.append(None)
+    return _SCENERY[0]
+
+
 # ---- painting
 class Painter:
     """a picture of w x h (float RGB), at offset (ox, oy) in the window"""
@@ -65,21 +88,154 @@ class Painter:
 
     @classmethod
     def background(cls, w, h, cache={}):
-        key = (w, h, BG_TOP, BG_BOTTOM, GLOW)
+        """the forest night under every page: dark teal, lighter toward the top, darker at the sides (the scenery's banner
+        and floor are painted onto it by Ctx.scenery)"""
+        key = (w, h, BG_TOP, BG_BOTTOM, GLOW, PANEL_HI)
         if key not in cache:
             cache.clear()
             y = np.linspace(0, 1, h, dtype=np.float32)[:, None, None]
             a = rgb(BG_TOP) * (1 - y) + rgb(BG_BOTTOM) * y
             a = np.broadcast_to(a, (h, w, 3)).copy()
-            # (a soft blue light from above the middle, and a darker edge)
             yy = np.linspace(0, 1, h, dtype=np.float32)[:, None]
             xx = np.linspace(-1, 1, w, dtype=np.float32)[None, :]
-            light = np.exp(-((xx / 0.9) ** 2 + ((yy - 0.05) / 0.55) ** 2) * 1.6)
-            a += light[..., None] * rgb(GLOW) * .16
-            vign = np.clip((np.abs(xx) - 0.55) / 0.45, 0, 1) ** 2 * 0.35
+            light = np.exp(-((xx / 0.8) ** 2 + ((yy - 0.35) / 0.5) ** 2) * 1.4)
+            a += light[..., None] * (rgb(PANEL_HI) - rgb(BG_BOTTOM)) * .9
+            vign = np.clip((np.abs(xx) - 0.5) / 0.5, 0, 1) ** 2 * 0.45
             a *= (1 - vign)[..., None]
+            # (faint motes of light, fixed: the night's depth)
+            rng = np.random.default_rng(17)
+            for _ in range(max(12, w * h // 26000)):
+                px, py = rng.uniform(0, w), rng.uniform(0, h)
+                r = rng.uniform(0.8, 2.2) * max(1.0, w / 1672)
+                col = rgb(ICON_INK) if rng.random() < 0.6 else rgb(ACCENT_HI)
+                x0, x1 = int(max(0, px - 4 * r)), int(min(w, px + 4 * r + 1))
+                y0, y1 = int(max(0, py - 4 * r)), int(min(h, py + 4 * r + 1))
+                if x1 > x0 and y1 > y0:
+                    gy, gx = np.mgrid[y0:y1, x0:x1]
+                    d = np.exp(-((gx - px) ** 2 + (gy - py) ** 2) / (2 * r * r))[..., None] * rng.uniform(0.25, 0.7)
+                    a[y0:y1, x0:x1] += (col - a[y0:y1, x0:x1]) * d
             cache[key] = a
         return cls(cache[key].copy())
+
+    def picture(self, src, x, y, w, h, alpha=None, gain=1.0):
+        """src (an H x W x 3 picture) drawn at x, y in w x h (bicubic from build_screen's resampler), times gain, with
+        alpha (an h x w 0..1 array, or None: opaque)"""
+        import build_screen
+        x0, y0 = int(round(x)), int(round(y))
+        w, h = int(round(w)), int(round(h))
+        if w < 2 or h < 2:
+            return
+        pic = build_screen.resize(src, w, h) * gain
+        al = np.ones((h, w), np.float32) if alpha is None else alpha
+        H, W = self.a.shape[:2]
+        dx0, dy0 = max(0, x0 - self.ox), max(0, y0 - self.oy)
+        dx1, dy1 = min(W, x0 + w - self.ox), min(H, y0 + h - self.oy)
+        if dx1 <= dx0 or dy1 <= dy0:
+            return
+        sx0, sy0 = dx0 + self.ox - x0, dy0 + self.oy - y0
+        reg = self.a[dy0:dy1, dx0:dx1]
+        sub = pic[sy0:sy0 + (dy1 - dy0), sx0:sx0 + (dx1 - dx0)]
+        aa = al[sy0:sy0 + (dy1 - dy0), sx0:sx0 + (dx1 - dx0)][..., None]
+        reg += (sub - reg) * aa
+
+    def _box(self, x, y, w, h, pad):
+        H, W = self.a.shape[:2]
+        x0, y0 = max(0, int(x - pad) - self.ox), max(0, int(y - pad) - self.oy)
+        x1, y1 = min(W, int(x + w + pad) + 1 - self.ox), min(H, int(y + h + pad) + 1 - self.oy)
+        if x1 <= x0 or y1 <= y0:
+            return None
+        py = (np.arange(y0, y1, dtype=np.float32) + self.oy + 0.5)[:, None]
+        px = (np.arange(x0, x1, dtype=np.float32) + self.ox + 0.5)[None, :]
+        return slice(y0, y1), slice(x0, x1), px, py
+
+    def gem(self, x, y, r, wings=0.0):
+        """a green gem set in gold at x, y (half its height r); wings: the gold flourish to each side"""
+        b = self._box(x - r - wings, y - r, 2 * (r + wings), 2 * r, 3)
+        if not b:
+            return
+        ys, xs, px, py = b
+        d = np.abs(px - x) / 0.8 + np.abs(py - y) - r
+        gold = np.array([236, 200, 96], np.float32)
+        if wings:
+            wv = np.abs(py - y) - np.clip(1 - np.abs(px - x) / (r + wings), 0, 1) * r * 0.32
+            wing = np.clip(0.5 - wv, 0, 1) * (np.abs(px - x) > r * 0.5) * (np.abs(px - x) < r + wings)
+            self._blend(ys, xs, wing * 0.9, gold)
+        rim = np.clip(0.5 - d, 0, 1)
+        self._blend(ys, xs, rim, gold)
+        inner = np.clip(0.5 - (d + r * 0.28), 0, 1)
+        g = np.clip((py - (y - r)) / (2 * r), 0, 1)
+        col = rgb(ACCENT_HI) * (1 - g[..., None]) + rgb(ACCENT) * g[..., None] * 0.9
+        sub = self.a[ys, xs]
+        sub += (col - sub) * inner[..., None]
+        glow = np.exp(-np.maximum(d, 0) / (r * 0.6)) * (d > 0) * 0.35
+        self._blend(ys, xs, glow, rgb(ACCENT_HI))
+
+    def hexagon(self, cx, cy, r, s):
+        """the page's emblem: a gold hexagon (pointy top) around a dark green inside, glowing"""
+        b = self._box(cx - r, cy - r, 2 * r, 2 * r, 18 * s)
+        if not b:
+            return
+        ys, xs, px, py = b
+        qx, qy = np.abs(px - cx), np.abs(py - cy)
+        d = np.maximum(qx * 0.8660254 + qy * 0.5, qy) - r
+        glow = np.exp(-np.maximum(d, 0) / (11 * s)) * (d > 0) * 0.75
+        self._blend(ys, xs, glow, rgb(ACCENT_HI))
+        outer = np.clip(0.5 - d, 0, 1)
+        g = np.clip((py - (cy - r)) / (2 * r), 0, 1)[..., None]
+        gold = np.array([255, 236, 150], np.float32) * (1 - g) + np.array([196, 150, 56], np.float32) * g
+        sub = self.a[ys, xs]
+        sub += (gold - sub) * outer[..., None]
+        inner = np.clip(0.5 - (d + 5.0 * s), 0, 1)
+        col = rgb(PANEL_HI) * (1 - g) + rgb(CELL) * g
+        sub += (col - sub) * inner[..., None]
+        ring = np.clip(1 - np.abs(d + 7.5 * s) / (1.0 * s), 0, 1) * 0.6
+        self._blend(ys, xs, ring, rgb(ACCENT_HI))
+
+    def frame(self, x, y, w, h, r, s, gold_w=2.4, fill_top=None, fill_bottom=None, alpha=0.88, glow=0.0):
+        """the forest panel: dark glass inside a gold frame (a dark outline, the gold bright above and darker below, a
+        fine inner line), its edge glowing faintly green"""
+        b = self._box(x, y, w, h, 16 * s)
+        if not b:
+            return
+        ys, xs, px, py = b
+        r = min(r, w / 2, h / 2)
+        qx = np.abs(px - (x + w / 2)) - (w / 2 - r)
+        qy = np.abs(py - (y + h / 2)) - (h / 2 - r)
+        d = np.hypot(np.maximum(qx, 0), np.maximum(qy, 0)) + np.minimum(np.maximum(qx, qy), 0) - r
+        if glow:
+            g = glow * np.exp(-np.maximum(d, 0) / (7 * s)) * (d > 0)
+            self._blend(ys, xs, g, rgb(GLOW))
+        t = np.clip((py - y) / max(h, 1), 0, 1)[..., None]
+        top = rgb(fill_top or PANEL)
+        bot = rgb(fill_bottom or CELL)
+        col = top * (1 - t) + bot * t
+        cov = np.clip(0.5 - d, 0, 1) * alpha
+        sub = self.a[ys, xs]
+        sub += (col - sub) * cov[..., None]
+        gw = gold_w * s
+        dark = np.minimum(np.clip(0.5 - (d - 1.0 * s), 0, 1), np.clip(d + gw + 1.6 * s + 0.5, 0, 1))
+        self._blend(ys, xs, dark * 0.8, np.array([12, 10, 4], np.float32))
+        band = np.minimum(np.clip(0.5 - d, 0, 1), np.clip(d + gw + 0.5, 0, 1))
+        gold = np.array([255, 230, 140], np.float32) * (1 - t) + np.array([170, 128, 46], np.float32) * t
+        hl = np.clip(1 - np.abs(d + gw * 0.35) / (gw * 0.4), 0, 1)[..., None]
+        sub += (gold + hl * 40 - sub) * band[..., None]
+        fine = np.clip(1 - np.abs(d + gw + 3.2 * s) / (0.7 * s), 0, 1) * 0.55
+        self._blend(ys, xs, fine, np.array([200, 176, 90], np.float32))
+
+    def light_line(self, x, y, w, s, color=(120, 230, 220), flare=0.75):
+        """a glowing rule: brightest at flare (a point along it, 0..1), fading to its ends"""
+        b = self._box(x, y - 6 * s, w, 12 * s, 2)
+        if not b:
+            return
+        ys, xs, px, py = b
+        u = np.clip((px - x) / max(w, 1), 0, 1)
+        ends = np.clip(np.minimum(u, 1 - u) / 0.12, 0, 1)
+        core = np.clip(1 - np.abs(py - y) / (0.9 * s), 0, 1) * ends * 0.75
+        hal = np.exp(-((py - y) / (3.5 * s)) ** 2) * ends * 0.25
+        fl = np.exp(-((px - (x + w * flare)) / (40 * s)) ** 2) * np.exp(-((py - y) / (3 * s)) ** 2)
+        c = np.array(color, np.float32)
+        self._blend(ys, xs, np.clip(core + hal, 0, 1), c)
+        self._blend(ys, xs, np.clip(fl, 0, 1), (c + 255) / 2)
 
     def crop(self, x, y, w, h):
         x0, y0 = max(0, int(x) - self.ox), max(0, int(y) - self.oy)
@@ -159,18 +315,83 @@ class Ctx:
 
     def font(self, size, weight='regular'):
         st = self.stage
-        fam = {'regular': st.f_text, 'semibold': st.f_semi, 'bold': st.f_bold, 'display': st.f_disp}[weight]
+        if weight == 'serifbold':
+            return (st.f_serif, -max(8, round(size * self.s)), 'bold')
+        fam = {'regular': st.f_text, 'semibold': st.f_semi, 'bold': st.f_bold, 'display': st.f_disp,
+               'serif': st.f_serif}[weight]
         return (fam, -max(8, round(size * self.s)))
 
     def text_width(self, text, size, weight='regular'):
         return self.stage.measure(self.font(size, weight), text)
 
     # (the picture)
-    def panel(self, x, y, w, h, r=14, fill=PANEL, fill2=None, alpha=0.92, border=LINE, bw=1.0, balpha=1.0, glow=None,
-              gr=16, ga=0.0, border2=None):
+    def scenery(self, top, height, bright=1.0):
+        """the forest banner (the Ocarina and the title, assets/launcher-forest.pack) under the window's top row, height
+        tall, as wide as the window (wider windows: its sides continue blurred), fading into the night below; and the
+        plants along the bottom edge. bright: 1 on the main page, dimmer under other pages' contents"""
+        art = scenery_art()
+        if art is None:
+            return
+        s, W, H = self.s, self.W, self.H
+        banner = art['banner']
+        bh0, bw0 = banner.shape[:2]
+        if height > 4:
+            k = height / bh0
+            w = bw0 * k
+            x0 = (W - w) / 2
+            if w < W:   # (the window is wider than the art at this height: its edges, blurred and dark, to the sides)
+                import build_screen
+                small = build_screen.blur(build_screen.resize(banner, max(8, bw0 // 12), max(4, bh0 // 12)), 2)
+                ah = np.ones((int(round(height)), W), np.float32)
+                fade_y = np.clip((np.arange(int(round(height))) + 0.5) / height, 0, 1)
+                ah *= np.clip((1 - fade_y) / 0.45, 0, 1)[:, None]
+                self.p.picture(small, 0, top, W, height, ah, 0.45 * bright)
+            hh, ww = int(round(height)), int(round(w))
+            yy = (np.arange(hh, dtype=np.float32) + 0.5) / hh
+            xx = (np.arange(ww, dtype=np.float32) + 0.5) / ww
+            al = np.clip((1 - yy) / 0.32, 0, 1)[:, None] * np.clip(np.minimum(xx, 1 - xx) / (0.05 if w < W else 1e-6), 0, 1)[None, :]
+            self.p.picture(banner, x0, top, w, height, al, bright)
+        floor = art['floor']
+        fh0, fw0 = floor.shape[:2]
+        fw, fh = W, fh0 * W / fw0
+        yy = (np.arange(int(round(fh)), dtype=np.float32) + 0.5) / max(1, fh)
+        al = np.clip(yy / 0.6, 0, 1)[:, None] * np.ones((1, int(round(fw))), np.float32)
+        self.p.picture(floor, 0, H - fh, fw, fh, al, 0.85)
+
+    def outline(self, top, margin=18):
+        """the thin frame round the page, under the top row (the art's: a gold line, faint)"""
         s = self.s
+        self.p.rrect(margin * s, top, self.W - 2 * margin * s, self.H - top - margin * s, 22 * s, border='#b89a52',
+                     bw=max(1.0, 1.2 * s), balpha=0.55)
+
+    def panel(self, x, y, w, h, r=14, fill=PANEL, fill2=None, alpha=0.92, border=LINE, bw=1.0, balpha=1.0, glow=None,
+              gr=16, ga=0.0, border2=None, ornate=False):
+        """a panel. With the frame's gold border (border LINE, the default) it is the forest's framed glass (ornate: with the
+        green gem at the top); any other border: a plain rounded panel in that colour"""
+        s = self.s
+        if border == LINE and r >= 12:
+            self.p.frame(x, y, w, h, r * s, s, gold_w=3.4 if ornate else 1.6, fill_top=fill, fill_bottom=fill2 or CELL,
+                         alpha=alpha, glow=0.55 if ornate else 0.12)
+            if ornate:
+                self.p.gem(x + w / 2, y + 1 * s, 15 * s, wings=48 * s)
+                self.p.light_line(x + w * 0.2, y + h - 1 * s, w * 0.6, s, (255, 226, 120), 0.5)
+            return
         self.p.rrect(x, y, w, h, r * s, fill=fill, fill2=fill2, alpha=alpha, border=border, border2=border2,
                      bw=max(1.0, bw * s), balpha=balpha, glow=glow, gr=gr * s, ga=ga)
+
+    def field(self, x, y, w, h, r=12, lit=False):
+        """a field or a list row: dark glass with a thin yellow-green edge of light"""
+        s = self.s
+        self.p.rrect(x, y, w, h, r * s, fill=PANEL_HI if lit else CELL, fill2=CELL, alpha=0.82, border=EDGE,
+                     bw=max(1.0, (1.6 if lit else 1.2) * s), balpha=1.0 if lit else 0.85, glow=EDGE, gr=7 * s,
+                     ga=0.42 if lit else 0.22)
+        self.p.light_line(x + 14 * s, y + h - 0.5 * s, w - 28 * s, s, rgb(EDGE), 0.5 if lit else 0.55)
+
+    def section(self, x, y, w, title):
+        """a panel's title (gold-white, in the serif of the frames) with its glowing rule under it"""
+        s = self.s
+        self.text(x, y, title, 24, 'serifbold', '#f4efdc', anchor='w')
+        self.p.light_line(x - 6 * s, y + 24 * s, w, s, rgb(RULE), 0.85)
 
     def hline(self, x, y, w, color=LINE, alpha=0.7):
         self.p.rect(x, y, w, max(1, round(self.s)), color, alpha)
@@ -190,7 +411,7 @@ class Ctx:
         self.ops.append(('image', x, y, photo, anchor))
 
     def entry(self, key, x, y, w, h, var, size=19, mono=False):
-        self.panel(x, y, w, h, r=10, fill=CELL, alpha=0.95, border=LINE, balpha=0.9)
+        self.field(x, y, w, h, r=10)
         pad = 16 * self.s
         self.ops.append(('entry', key, x + pad, y + 3, w - 2 * pad, h - 6, var,
                          ('Consolas', -round(size * self.s)) if mono else self.font(size)))
@@ -204,24 +425,36 @@ class Ctx:
 
     # (controls)
     def button(self, x, y, w, h, text, cmd, kind='secondary', icon=None, size=19, r=12, weight='semibold', color=None):
-        """kind: primary (blue, glowing), secondary (dark glass), pill (link coloured), quiet (text only), danger"""
+        """kind: primary (green glass in gold, glowing; a big one brighter), secondary (dark glass in
+        gold), pill (a rounded label, its edge the colour given or the link's), quiet (text only), danger"""
         s = self.s
+        big = kind == 'primary' and h >= 70 * s
 
         def look(p_ctx, hover):
             if kind == 'primary':
-                p_ctx.panel(x, y, w, h, r=r, fill=ACCENT_HI if hover else BUTTON_TOP, fill2=ACCENT_LO, alpha=1.0,
-                            border=BUTTON_EDGE, border2=ACCENT, bw=1.5, glow=GLOW, gr=18, ga=0.55 if hover else 0.38)
+                p = p_ctx.p
+                rr = min(r * s, h / 2)
+                p.rrect(x, y, w, h, rr, glow=GLOW, gr=(20 if big else 12) * s, ga=0.75 if hover else 0.5)
+                p.frame(x, y, w, h, rr, s, gold_w=4.0 if big else 1.8, fill_top=ACCENT_HI if hover else BUTTON_TOP,
+                        fill_bottom=ACCENT_LO, alpha=1.0, glow=0.6 if hover else 0.35)
+                if big:   # (the glass: a bright core and a light along its top, as the design's emerald)
+                    p.rrect(x + 14 * s, y + 12 * s, w - 28 * s, h - 24 * s, max(1, rr - 10 * s), fill=ACCENT_HI,
+                            alpha=0.22 if hover else 0.15, glow=ACCENT_HI, gr=12 * s, ga=0.25)
+                p.rrect(x + 8 * s, y + 5 * s, w - 16 * s, h * 0.36, rr * 0.7, fill='#e8ffe0', alpha=0.13 if hover else 0.09)
             elif kind == 'pill':
-                p_ctx.panel(x, y, w, h, r=h / s / 2, fill=PANEL_HI if hover else PANEL, alpha=0.95,
-                            border=LINE_HI if hover else LINE, balpha=1.0)
+                edge = color or LINK
+                p_ctx.p.rrect(x, y, w, h, h / 2, fill=PANEL_HI if hover else CELL, alpha=0.85, border=edge,
+                              bw=max(1.0, 1.4 * s), balpha=1.0, glow=edge, gr=6 * s, ga=0.35 if hover else 0.2)
             elif kind == 'quiet':
                 if hover:
-                    p_ctx.panel(x, y, w, h, r=r, fill=PANEL, alpha=0.7, border=LINE, balpha=0.6)
+                    p_ctx.panel(x, y, w, h, r=r, fill=PANEL, alpha=0.7, border=EDGE, balpha=0.5)
             else:
-                p_ctx.panel(x, y, w, h, r=r, fill=PANEL_HI if hover else PANEL, fill2=None, alpha=0.95,
-                            border=LINE_HI if hover else LINE, balpha=1.0, glow=GLOW if hover else None, gr=10, ga=0.18)
+                p_ctx.p.frame(x, y, w, h, min(r * s, h / 2), s, gold_w=1.4, fill_top=PANEL_HI if hover else PANEL,
+                              fill_bottom=CELL, alpha=0.95, glow=0.3 if hover else 0.1)
         look(self, False)
         fg = color or (BUTTON_INK if kind == 'primary' else LINK if kind == 'pill' else TEXT if kind != 'quiet' else SUB)
+        if big:
+            fg, weight = '#fdf6cf', 'serifbold'
         if icon:
             tw = self.text_width(text, size, weight)
             iw = size * 1.15 * s
@@ -235,19 +468,19 @@ class Ctx:
         return self.hot(x, y, w, h, cmd, hover=look)
 
     def dropdown(self, x, y, w, h, values, current, pick, size=19, key=None):
-        self.panel(x, y, w, h, r=10, fill=CELL, alpha=0.95, border=LINE, balpha=0.9)
+        self.field(x, y, w, h, r=12)
         pad = 22 * self.s
         self.text(x + pad, y + h / 2, current, size, color=TEXT, anchor='w', key=key)
-        self.icon(x + w - pad, y + h / 2, 'down', size * 0.8, SUB)
+        self.icon(x + w - pad, y + h / 2, 'down', size * 0.8, TEXT)
 
         def hover(c, on):
-            c.panel(x, y, w, h, r=10, fill=PANEL if on else CELL, alpha=0.95, border=LINE_HI if on else LINE, balpha=1.0)
+            c.field(x, y, w, h, r=12, lit=on)
         return self.hot(x, y, w, h, lambda: self.stage.popup(x, y + h + 4 * self.s, w, values, current, pick, size),
                         hover=hover)
 
     def radio(self, x, y, d, on, cmd=None):
         s = self.s
-        self.panel(x, y, d, d, r=d / s / 2, fill=CELL, alpha=1, border=ACCENT_HI if on else LINE_HI, bw=2)
+        self.panel(x, y, d, d, r=d / s / 2, fill=CELL, alpha=1, border=ACCENT_HI if on else EDGE, bw=2)
         if on:
             k = d * 0.27
             self.panel(x + k, y + k, d - 2 * k, d - 2 * k, r=d / s, fill=ACCENT_HI, alpha=1, border=None, glow=GLOW, gr=6,
@@ -257,16 +490,22 @@ class Ctx:
 
     def check(self, x, y, d, on, cmd):
         self.panel(x, y, d, d, r=6, fill=ACCENT if on else CELL, fill2=ACCENT_LO if on else None, alpha=1,
-                   border=ACCENT_HI if on else LINE_HI, bw=1.5)
+                   border=ACCENT_HI if on else EDGE, bw=1.5)
         if on:
             self.icon(x + d / 2, y + d / 2, 'check', d / self.s * 0.62, TEXT)
 
-    def icon_box(self, x, y, d, name, size=None, color=ACCENT_HI, r=12, fill=CELL):
-        self.panel(x, y, d, d, r=r, fill=fill, alpha=0.95, border=LINE, balpha=0.9)
-        self.icon(x + d / 2, y + d / 2, name, size or d / self.s * 0.45, color)
+    def icon_box(self, x, y, d, name, size=None, color=None, r=12, fill=CELL):
+        """an icon in a small gold-framed box; a big one (a page's heading) in the forest's gold hexagon"""
+        s = self.s
+        if d >= 64 * s:
+            self.p.hexagon(x + d / 2, y + d / 2, d * 0.56, s)
+            self.icon(x + d / 2, y + d / 2, name, size or d / s * 0.42, color or ICON_INK)
+            return
+        self.p.frame(x, y, d, d, r * s, s, gold_w=1.2, fill_top=PANEL, fill_bottom=fill, alpha=0.95)
+        self.icon(x + d / 2, y + d / 2, name, size or d / s * 0.45, color or ICON_INK)
 
     def progress(self, key, x, y, w, h, value):
-        self.panel(x, y, w, h, r=h / self.s / 2, fill='#1a2c52', alpha=1, border=None)
+        self.p.rrect(x, y, w, h, h / 2, fill=CELL, alpha=1, border=LINE, bw=max(1.0, self.s), balpha=0.8)
         self.bars.append((key, x, y, w, h, value))
 
 
@@ -279,6 +518,7 @@ class Stage:
         self.f_semi = font_family('Segoe UI Variable Text Semibold', 'Segoe UI Semibold')
         self.f_bold = font_family('Segoe UI Variable Display Semib', 'Segoe UI Semibold')
         self.f_disp = font_family('Segoe UI Variable Display', 'Segoe UI')
+        self.f_serif = font_family('Cambria', 'Constantia', 'Georgia')   # (the frames' titles and the Play button)
         self.fonts = {}
         self.builder = None
         self.photos = []
@@ -390,7 +630,7 @@ class Stage:
         m = 8
         p = self.ctx.p.crop(x - m, y - m, fw + 2 * m, h + 2 * m)
         p.rrect(x, y, fw, h, h / 2, fill=ACCENT_HI, fill2=ACCENT_LO, alpha=1, glow=GLOW, gr=5, ga=0.35)
-        p.rrect(x + 2, y + 1, max(0, fw - 4), h * 0.4, h * 0.2, fill='#9fd0ff', alpha=0.25)
+        p.rrect(x + 2, y + 1, max(0, fw - 4), h * 0.4, h * 0.2, fill='#d8ffd0', alpha=0.25)
         ph = p.photo(self.c)
         self.photos.append(ph)
         self.bar_items[key] = (x, y, w, h, self.c.create_image(p.ox, p.oy, image=ph, anchor='nw', tags='fg'))
