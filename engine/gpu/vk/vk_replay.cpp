@@ -1680,7 +1680,18 @@ void replay(VkCommandBuffer& cmd, NvnState& s, const uint8_t* p, const uint8_t* 
             break;
         }
         // ---- state ----
-        case NOP_SET_RT: s.rt = payload<nvn_p_set_rt>(a, avail), s.rt_serial++; break;
+        case NOP_SET_RT:
+            s.rt = payload<nvn_p_set_rt>(a, avail), s.rt_serial++;
+            // (ocarina_reborn) the parallel replay's dry pass makes the render targets now, on the replay thread: a target first
+            // met by a later segment was made there, its layout change and clear in that segment's uploads, which the GPU runs
+            // after the earlier segments' draws into it (a frame darker in places at camera cuts). Made here, they are in the
+            // recording submitted before every segment
+            if (dry) {
+                for (int i = 0; i < std::min(s.rt.n, 8); i++)
+                    if (s.rt.color[i]) texture_get(s.rt.color[i], false);
+                if (s.rt.depth) texture_get(s.rt.depth, false);
+            }
+            break;
         case NOP_VIEWPORTS: {
             const auto v = payload<nvn_p_viewports>(a, avail);
             for (int i = 0; i < v.n && v.first + i < 16; i++) std::memcpy(s.viewport[v.first + i], v.v[i], 16);
@@ -2106,8 +2117,15 @@ void split_part(VkCommandBuffer& cmd) {
 // (hookshot) One cause of those is gone: the dry pass did not mark the targets of a clear (NOP_CLEAR_COLOR in replay()). With
 // that, Castle Town's market and eight other places showed no black frame on 3 to 8 threads; the Kakariko walk was not run
 // again, so it stays off. On a 9950X3D the replay's wall time in the market goes from 10.9 ms a frame to 7.75 on 3 threads.
+// (ocarina_reborn) on by default, with the dry pass making every render target (NOP_SET_RT in replay()): half the hardware
+// threads less one, 5 at most, off below 8 threads. RX_VK_PARALLEL=0 turns it off. Wide views of 3000+ draws went from
+// 41-55 fps on the replay thread alone to 49-60
 int par_threads() {
-    static const int n = std::clamp(getenv("RX_VK_PARALLEL") ? atoi(getenv("RX_VK_PARALLEL")) : 0, 0, 8);
+    static const int n = [] {
+        if (const char* e = getenv("RX_VK_PARALLEL")) return std::clamp(atoi(e), 0, 8);
+        const int hw = (int)std::thread::hardware_concurrency();
+        return hw >= 8 ? std::min(5, hw / 2 - 1) : 0;
+    }();
     return n;
 }
 struct ParPool {
