@@ -2139,7 +2139,8 @@ int par_threads() {
     static const int n = [] {
         if (const char* e = getenv("RX_VK_PARALLEL")) return std::clamp(atoi(e), 0, 8);
         const int hw = (int)std::thread::hardware_concurrency();
-        return hw >= 8 ? std::min(5, hw / 2 - 1) : 0;
+        (void)hw;   // (off by default: on a 9800X3D + 7900 XTX it cost 55 -> 42 fps, 2026-11-18)
+        return 0;
     }();
     return n;
 }
