@@ -1468,6 +1468,8 @@ static void oot_update_player_cheats(Ctx *c, uint64_t actor, uint64_t components
        second request met "waits until the current event ends". While an event plays he is let go and lands; the flight
        takes him again, from where he then stands, when it has ended. */
     const int story_event = oot_event_playing(c);
+    void ocr_ocarina_player_update(Ctx *c, uint64_t actor, uint64_t components, int can_refresh);
+    ocr_ocarina_player_update(c, actor, components, !story_event && !rx_option(1, 0));
     /* Sample on every player update, including dialogue; the 250 ms diagnostic map snapshot is too late for UI frames.
        Keep the last state if an event stops stepping Link. The next player update clears it when play resumes. */
     __atomic_store_n(&oot_story_event_active, story_event, __ATOMIC_RELAXED);

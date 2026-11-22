@@ -64,16 +64,26 @@ def load(img_dir):
     path = os.path.join(img_dir, FILE)
     if not os.path.exists(path):
         return []
-    return [int(l, 16) for l in open(path) if l.strip() and not l.startswith("#")]
+    # Longshot 5ca512092dae740c83cc709316925802c64791bc, GPL-3.0-or-later:
+    # an interrupted cache write must not permanently prevent the next build.
+    try:
+        with open(path, encoding="utf-8") as f:
+            starts = [int(l, 16) for l in f if l.strip() and not l.startswith("#")]
+        if any(s <= 0 or s & 3 for s in starts) or starts != sorted(set(starts)):
+            raise ValueError("chunk boundaries must be positive, aligned, and strictly increasing")
+        return starts
+    except (OSError, UnicodeDecodeError, ValueError) as e:
+        print("chunks: %s could not be read (%s); ignoring" % (path, e), flush=True)
+        return []
 
 
 def save(img_dir, starts):
     # (lift.py --standalone writes this under <work>/image while its image.bin goes to <work>/sa/image, and nothing made
     # that folder: a fresh work folder stopped the lift at its last step with FileNotFoundError. make_game.py prepares it)
     os.makedirs(img_dir, exist_ok=True)
-    with open(os.path.join(img_dir, FILE), "w") as f:
-        f.write("# first guest address of each lifted C chunk after the first (nx2/chunks.py)\n")
-        f.write("".join("%08x\n" % s for s in sorted(starts)))
+    text = ("# first guest address of each lifted C chunk after the first (nx2/chunks.py)\n"
+            + "".join("%08x\n" % s for s in sorted(set(starts))))
+    whole_write.write_whole(os.path.join(img_dir, FILE), text, sync=True)
 
 
 # (the dev-loop proposal) chunks of ~4 MB, not 24: a change to two functions compiled their two chunks again, 14 and 24 MB, ~4

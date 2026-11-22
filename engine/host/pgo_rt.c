@@ -124,8 +124,21 @@ static DWORD WINAPI pgo_thread(void *arg) {
 /* (the renderer's copy reads a variable of its own, nx2/build.py: -DPGO_ENV="RX_VK_PGO_FILE") */
 #ifndef PGO_ENV
 #define PGO_ENV "HOS_PGO"
+#define PGO_GAME_DEFAULT_PATH 1   /* (the game's copy only, not the renderer's) */
 #endif
 __attribute__((constructor)) static void pgo_start(void) {
     const char *e = getenv(PGO_ENV);
+#ifdef PGO_GAME_DEFAULT_PATH
+    /* (Ocarina Reborn) the game's counting build started from the launcher, with no HOS_PGO in its environment: the counts go to
+       %LOCALAPPDATA%\Ocarina Reborn\Messung\game.profraw (its .reset/.dump files as above). Only the RX_PGO=gen build has this file */
+    static char fallback[MAX_PATH];
+    if (!e) {
+        const char *la = getenv("LOCALAPPDATA");
+        if (la && snprintf(fallback, sizeof fallback, "%s\\Ocarina Reborn\\Messung", la) < (int)sizeof fallback) {
+            CreateDirectoryA(fallback, NULL);
+            if (snprintf(fallback, sizeof fallback, "%s\\Ocarina Reborn\\Messung\\game.profraw", la) < (int)sizeof fallback) e = fallback;
+        }
+    }
+#endif
     if (e) CreateThread(NULL, 0, pgo_thread, _strdup(e), 0, NULL);
 }

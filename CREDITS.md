@@ -20,3 +20,7 @@ The view-distance memory locations were identified by **hotoni's Graphics-Menu m
 NVIDIA DLSS uses NVIDIA's separate license and setup. AMD runtime license files remain with their components. Media and trademarks retain their respective rights.
 
 Ocarina Reborn is an independently maintained, unofficial community project and is not affiliated with Nintendo.
+
+## Private test changes, 2026-11-22
+
+The 1.1.4-22 test source includes selected changes from Longshot (XInput background polling and atomic chunk metadata), ProjectReLink (synchronization-table growth), and Triforce (an optional reported-memory experiment, off by default). The commit references remain beside the code; the test package's matching source archive contains these modifications. This is a selective update to the existing engine, not a replacement by any of those complete newer engines.

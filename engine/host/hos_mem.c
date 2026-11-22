@@ -411,12 +411,32 @@ static void pages_report_locked(void) {
    free = total - used would wrap to a huge figure and it would map without limit again */
 uint64_t hos_used_memory(uint64_t base) {
     static int old = -1;
-    if (old < 0) old = env_on("HOS_MEMINFO_OLD");
-    if (old) return base;
+    static uint64_t slack;
+    int first = 0;
     LOCK();
+    if (old < 0) {
+        old = env_on("HOS_MEMINFO_OLD");
+        /* (Ocarina Reborn experiment, after Triforce v0.6.0 query_used, 6c7117635cae)
+           Extra room reported for resource-cache pages can prevent repeated eviction/reloading. Default OFF here:
+           it can also make the game retain more actual memory. Never subtract from its program or starting heap,
+           change mapped_bytes, or relax AllocateMemoryPages' real limit. Both QueryMemoryInfo and svc use this answer. */
+        const char *e = getenv("HOS_MEM_QUERY_SLACK_MB");
+        if (e && *e) {
+            char *end;
+            const long mb = strtol(e, &end, 10);
+            if (end != e && !*end && mb >= 0 && mb <= 1024) slack = (uint64_t)mb << 20;
+        }
+        first = 1;
+    }
     const uint64_t mapped = mapped_bytes;
+    const uint64_t heap = hos_heap_size;
     UNLOCK();
-    const uint64_t used = base + hos_heap_size + mapped;
+    if (first)
+        hos_log("mem: guest memory query: %s; resource-cache query slack %llu MB (HOS_MEM_QUERY_SLACK_MB, default 0; actual page accounting unchanged)",
+                old ? "legacy program only" : "program, heap and mapped pages",
+                (unsigned long long)((old ? 0 : slack) >> 20));
+    if (old) return base;
+    const uint64_t used = base + heap + (mapped > slack ? mapped - slack : 0);
     return used < hos_total_memory ? used : hos_total_memory;
 }
 

@@ -754,12 +754,167 @@ void hos_filter_stick(int16_t x, int16_t y, int zone, int32_t out[2]) {
     out[1] = active ? b : 0;
 }
 
-static volatile int xinput_pads_now;   /* (pads_read: the controllers XInput has, while it is polled) */
-int hos_xinput_pads(void) { return xinput_pads_now; }   /* (host/prompts.c: Auto's face) */
+/* Adapted from Longshot c5e1421d213b1be07f86c2b102b757993d4d7df3 (GPL-3.0-or-later).
+   Empty XInput slots can block in the driver; never query them on the game thread.
+   Snapshots expire, and switching to SDL invalidates an in-flight poll as well. */
+static volatile int xinput_pads_now;
+int hos_xinput_pads(void) { return __atomic_load_n(&xinput_pads_now, __ATOMIC_RELAXED); }
+
+static int xinput_poll(int64_t now, uint64_t *out_raw, int32_t s[4]) {
+    static int64_t retry[XUSER_MAX_COUNT];
+    static int was_connected[XUSER_MAX_COUNT];
+    uint64_t raw = 0;
+#ifdef __EMSCRIPTEN__
+    xinput_get = XInputGetState;
+#endif
+    if (!xinput_get) {
+        static int64_t load_retry;
+        if (now >= load_retry) {
+            load_retry = now + 5000000000LL;
+#ifdef _WIN32   /* (hookshot: System32's, not one beside the game, in the current folder or on PATH) */
+            HMODULE x = LoadLibraryExA("xinput1_4.dll", NULL, LOAD_LIBRARY_SEARCH_SYSTEM32);
+            if (!x) x = LoadLibraryExA("xinput9_1_0.dll", NULL, LOAD_LIBRARY_SEARCH_SYSTEM32);
+#else
+            HMODULE x = LoadLibraryA("xinput1_4.dll");
+            if (!x) x = LoadLibraryA("xinput9_1_0.dll");
+#endif
+            if (x) xinput_get = (XInputGetStateFn)GetProcAddress(x, "XInputGetState");
+        }
+    }
+    static const struct { WORD x; int b; } map[] = {
+        {XINPUT_GAMEPAD_A, HOS_PAD_SOUTH}, {XINPUT_GAMEPAD_B, HOS_PAD_EAST}, {XINPUT_GAMEPAD_X, HOS_PAD_WEST},
+        {XINPUT_GAMEPAD_Y, HOS_PAD_NORTH}, {XINPUT_GAMEPAD_LEFT_THUMB, HOS_PAD_LSTICK},
+        {XINPUT_GAMEPAD_RIGHT_THUMB, HOS_PAD_RSTICK}, {XINPUT_GAMEPAD_LEFT_SHOULDER, HOS_PAD_LSHOULDER},
+        {XINPUT_GAMEPAD_RIGHT_SHOULDER, HOS_PAD_RSHOULDER}, {XINPUT_GAMEPAD_START, HOS_PAD_START},
+        {XINPUT_GAMEPAD_BACK, HOS_PAD_BACK}, {XINPUT_GAMEPAD_DPAD_LEFT, HOS_PAD_LEFT},
+        {XINPUT_GAMEPAD_DPAD_UP, HOS_PAD_UP}, {XINPUT_GAMEPAD_DPAD_RIGHT, HOS_PAD_RIGHT},
+        {XINPUT_GAMEPAD_DPAD_DOWN, HOS_PAD_DOWN}};
+    for (int p = 0; p < XUSER_MAX_COUNT && xinput_get; p++) {
+        if (now < retry[p]) continue;
+        XINPUT_STATE xs;
+        if (xinput_get((DWORD)p, &xs) != ERROR_SUCCESS) {
+            if (was_connected[p]) hos_log("hid: controller %d disconnected", p);
+            was_connected[p] = 0;
+            retry[p] = now + 1000000000LL;
+            continue;
+        }
+        if (!was_connected[p]) hos_log("hid: controller %d connected", p);
+        was_connected[p] = 1;
+        const WORD w = xs.Gamepad.wButtons;
+        for (unsigned i = 0; i < sizeof map / sizeof *map; i++)
+            if (w & map[i].x) raw |= 1ULL << map[i].b;
+        if (xs.Gamepad.bLeftTrigger > 64) raw |= 1ULL << HOS_PAD_LTRIGGER;
+        if (xs.Gamepad.bRightTrigger > 64) raw |= 1ULL << HOS_PAD_RTRIGGER;
+        const int16_t thumb[4] = {xs.Gamepad.sThumbLX, xs.Gamepad.sThumbLY, xs.Gamepad.sThumbRX, xs.Gamepad.sThumbRY};
+        int32_t v[4];
+        int rx_option(int id, int otherwise);
+        const int zone = rx_option(11, 0);   /* (the menu's Stick dead zone) */
+        hos_filter_stick(thumb[0], thumb[1], zone, v);
+        hos_filter_stick(thumb[2], thumb[3], zone, v + 2);
+        if (rx_option(16, 0)) v[2] = -v[2];
+        if (rx_option(17, 0)) v[3] = -v[3];
+        stick_max(s, v);
+    }
+    *out_raw |= raw;
+    int any = 0;
+    for (int p = 0; p < XUSER_MAX_COUNT; p++) any |= was_connected[p];
+    return any;
+}
+
+static SRWLOCK xinput_lock = SRWLOCK_INIT;
+static uint64_t xinput_raw;
+static int32_t xinput_stick[4];
+static int64_t xinput_wanted_ns, xinput_sample_ns, xinput_start_retry;
+static unsigned xinput_generation;
+static int xinput_requested, xinput_started;
+#define XINPUT_WANTED_NS 100000000LL
+
+static void xinput_suspend(void) {
+    AcquireSRWLockExclusive(&xinput_lock);
+    if (xinput_requested) ++xinput_generation;
+    xinput_requested = 0;
+    xinput_raw = 0;
+    memset(xinput_stick, 0, sizeof xinput_stick);
+    xinput_sample_ns = 0;
+    __atomic_store_n(&xinput_pads_now, 0, __ATOMIC_RELAXED);
+    ReleaseSRWLockExclusive(&xinput_lock);
+}
+
+#ifndef __EMSCRIPTEN__
+/* The worker lives as long as the host, like the SDL polling worker. It sleeps when idle;
+   the shared lock never covers an XInput call, DLL load, or sleep. */
+static DWORD WINAPI xinput_main(void *arg) {
+    (void)arg;
+    void hos_host_thread_register_self(const char *name);
+    hos_host_thread_register_self("gamepads (XInput)");
+    for (;;) {
+        const int64_t now = hos_now_ns();
+        AcquireSRWLockShared(&xinput_lock);
+        const unsigned generation = xinput_generation;
+        const int wanted = xinput_requested && now - xinput_wanted_ns < XINPUT_WANTED_NS;
+        ReleaseSRWLockShared(&xinput_lock);
+        uint64_t raw = 0;
+        int32_t s[4] = {0};
+        const int connected = wanted ? xinput_poll(now, &raw, s) : 0;
+        const int64_t finished = hos_now_ns();
+        AcquireSRWLockExclusive(&xinput_lock);
+        if (generation == xinput_generation) {
+            /* A later empty slot can stall after an earlier slot was sampled. Never
+               make that old button/stick sample fresh by timestamping completion. */
+            const int current = wanted && xinput_requested && finished - now < XINPUT_WANTED_NS &&
+                                finished - xinput_wanted_ns < XINPUT_WANTED_NS;
+            xinput_raw = current ? raw : 0;
+            if (current) memcpy(xinput_stick, s, sizeof s);
+            else memset(xinput_stick, 0, sizeof xinput_stick);
+            xinput_sample_ns = current ? now : 0;
+            __atomic_store_n(&xinput_pads_now, current ? connected : 0, __ATOMIC_RELAXED);
+        }
+        ReleaseSRWLockExclusive(&xinput_lock);
+        Sleep(wanted && connected ? 2 : 100);
+    }
+    return 0;
+}
+#endif
+
+static void xinput_read(int64_t now, uint64_t *raw, int32_t s[4]) {
+#ifdef __EMSCRIPTEN__
+    const int connected = xinput_poll(now, raw, s);
+    __atomic_store_n(&xinput_pads_now, connected, __ATOMIC_RELAXED);
+#else
+    int start = 0;
+    AcquireSRWLockExclusive(&xinput_lock);
+    if (!xinput_requested || now - xinput_wanted_ns >= XINPUT_WANTED_NS) {
+        ++xinput_generation;
+        xinput_raw = 0;
+        memset(xinput_stick, 0, sizeof xinput_stick);
+        xinput_sample_ns = 0;
+    }
+    xinput_requested = 1;
+    xinput_wanted_ns = now;
+    if (xinput_sample_ns && now - xinput_sample_ns < XINPUT_WANTED_NS) {
+        *raw |= xinput_raw;
+        stick_max(s, xinput_stick);
+    }
+    if (!xinput_started && now >= xinput_start_retry) {
+        xinput_started = start = 1;
+        xinput_start_retry = now + 5000000000LL;
+    }
+    ReleaseSRWLockExclusive(&xinput_lock);
+    if (start) {
+        HANDLE h = CreateThread(NULL, 0, xinput_main, NULL, 0, NULL);
+        if (h) CloseHandle(h);
+        else {
+            AcquireSRWLockExclusive(&xinput_lock);
+            xinput_started = 0;
+            ReleaseSRWLockExclusive(&xinput_lock);
+            hos_log("hid: XInput polling thread could not start; retrying in five seconds");
+        }
+    }
+#endif
+}
 
 static void pads_read(uint64_t *buttons, int32_t stick[4]) {
-    static int64_t next_read, retry[XUSER_MAX_COUNT];
-    static int was_connected[XUSER_MAX_COUNT];
+    static int64_t next_read;
     static uint64_t cached_buttons;
     static int32_t cached_stick[4];
     const int64_t now = hos_now_ns();
@@ -780,68 +935,11 @@ static void pads_read(uint64_t *buttons, int32_t stick[4]) {
         was = n;
         sdl_pads = n;
     }
-#ifdef __EMSCRIPTEN__
-    xinput_get = XInputGetState;
-#endif
-    /* Polling XInput alongside SDL causes double-reads and conflicting button mappings when Steam Input
-       or controller wrappers emulate an XInput controller for a pad SDL is already reading (#1480, #1583).
-       Only poll XInput when SDL has no open controllers, unless HOS_XINPUT=1 is explicitly requested. */
+    /* SDL owns its controllers; avoid reading an emulated XInput copy twice. */
     static int poll_xinput_env = -1;
     if (poll_xinput_env < 0) poll_xinput_env = env_on("HOS_XINPUT");
-    if (!sdl_pads || poll_xinput_env) {
-        if (!xinput_get) {
-            static int64_t load_retry;
-            if (now >= load_retry) {
-                load_retry = now + 5000000000LL;
-#ifdef _WIN32   /* (hookshot: System32's, not one beside the game, in the current folder or on PATH) */
-                HMODULE x = LoadLibraryExA("xinput1_4.dll", NULL, LOAD_LIBRARY_SEARCH_SYSTEM32);
-                if (!x) x = LoadLibraryExA("xinput9_1_0.dll", NULL, LOAD_LIBRARY_SEARCH_SYSTEM32);
-#else
-                HMODULE x = LoadLibraryA("xinput1_4.dll");
-                if (!x) x = LoadLibraryA("xinput9_1_0.dll");
-#endif
-                if (x) xinput_get = (XInputGetStateFn)GetProcAddress(x, "XInputGetState");
-            }
-        }
-        static const struct { WORD x; int b; } map[] = {
-            {XINPUT_GAMEPAD_A, HOS_PAD_SOUTH}, {XINPUT_GAMEPAD_B, HOS_PAD_EAST}, {XINPUT_GAMEPAD_X, HOS_PAD_WEST},
-            {XINPUT_GAMEPAD_Y, HOS_PAD_NORTH}, {XINPUT_GAMEPAD_LEFT_THUMB, HOS_PAD_LSTICK},
-            {XINPUT_GAMEPAD_RIGHT_THUMB, HOS_PAD_RSTICK}, {XINPUT_GAMEPAD_LEFT_SHOULDER, HOS_PAD_LSHOULDER},
-            {XINPUT_GAMEPAD_RIGHT_SHOULDER, HOS_PAD_RSHOULDER}, {XINPUT_GAMEPAD_START, HOS_PAD_START},
-            {XINPUT_GAMEPAD_BACK, HOS_PAD_BACK}, {XINPUT_GAMEPAD_DPAD_LEFT, HOS_PAD_LEFT},
-            {XINPUT_GAMEPAD_DPAD_UP, HOS_PAD_UP}, {XINPUT_GAMEPAD_DPAD_RIGHT, HOS_PAD_RIGHT},
-            {XINPUT_GAMEPAD_DPAD_DOWN, HOS_PAD_DOWN}};
-        for (int p = 0; p < XUSER_MAX_COUNT && xinput_get; p++) {
-            if (now < retry[p]) continue;
-            XINPUT_STATE xs;
-            if (xinput_get((DWORD)p, &xs) != ERROR_SUCCESS) {
-                if (was_connected[p]) hos_log("hid: controller %d disconnected", p);
-                was_connected[p] = 0;
-                int any = 0;
-                for (int q = 0; q < XUSER_MAX_COUNT; q++) any |= was_connected[q];
-                xinput_pads_now = any;
-                retry[p] = now + 1000000000LL;
-                continue;
-            }
-            if (!was_connected[p]) hos_log("hid: controller %d connected", p);
-            was_connected[p] = 1;
-            xinput_pads_now = 1;
-            const WORD w = xs.Gamepad.wButtons;
-            for (unsigned i = 0; i < sizeof map / sizeof *map; i++)
-                if (w & map[i].x) raw |= 1ULL << map[i].b;
-            if (xs.Gamepad.bLeftTrigger > 64) raw |= 1ULL << HOS_PAD_LTRIGGER;
-            if (xs.Gamepad.bRightTrigger > 64) raw |= 1ULL << HOS_PAD_RTRIGGER;
-            const int16_t thumb[4] = {xs.Gamepad.sThumbLX, xs.Gamepad.sThumbLY, xs.Gamepad.sThumbRX, xs.Gamepad.sThumbRY};
-            int32_t v[4];
-            int rx_option(int id, int otherwise);
-            const int zone = rx_option(11, 0);   /* (the menu's Stick dead zone) */
-            hos_filter_stick(thumb[0], thumb[1], zone, v);
-            hos_filter_stick(thumb[2], thumb[3], zone, v + 2);
-            if (rx_option(16, 0)) v[2] = -v[2];
-            if (rx_option(17, 0)) v[3] = -v[3];
-            stick_max(s, v);
-        }
-    }
+    if (!sdl_pads || poll_xinput_env) xinput_read(now, &raw, s);
+    else xinput_suspend();
     InterlockedExchange(&pad_raw_now, (LONG)raw);
     /* Back and Start together open the Insert menu (gpu/vk/vk_menu.cpp, for pads whose Home button the system
        keeps): they reach the game only one at a time */

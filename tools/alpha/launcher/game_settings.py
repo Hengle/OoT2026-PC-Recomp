@@ -161,6 +161,13 @@ SECTIONS = [
     ]),
     # (the game's own Gameplay, Controls and Audio rows: the keys are the in-game menu's, so F1 shows the same choice)
     ('Spiel', 'Gameplay', [
+        ('ocarina_instrument', 'Okarina', 'Ocarina',
+         [(0, 'Original', 'Original'), (1, 'Feen-Okarina', 'Fairy Ocarina'), (2, 'Okarina der Zeit', 'Ocarina of Time')],
+         'Wählt das Instrument, wenn Link die Okarina das nächste Mal hervorholt, als Kind oder Erwachsener. Eine eigene Okarina muss bereits vorhanden sein. Original verwendet das Instrument des Spiels. Inventar und Story-Fortschritt bleiben unverändert.',
+         'Choose the instrument Link uses the next time he takes out an ocarina, as child or adult. Requires an owned ocarina. Original uses the game\'s instrument. Inventory and story progress are unchanged.', ''),
+        ('unlimited_amiibo', 'amiibo unbegrenzt', 'Unlimited amiibo', OFF_ON,
+         'Hebt das tägliche amiibo-Limit auf. Eigene .bin unter amiibo auswählen und im Spiel erneut scannen. Aus stellt die normalen Limits wieder her. Dateien und Systemzeit bleiben unverändert.',
+         'Removes the daily amiibo cooldown. Select your own .bin under amiibo and scan again in-game. Off restores normal limits. Tag files and the system clock are unchanged.', ''),
         ('classic_counters', 'Klassische Zähler (N64)', 'Classic counters (N64)', OFF_ON,   # (engine_v21.py apply_counters)
          'Wie auf dem N64: keine Anzeige über Link beim Aufsammeln, Rubine immer sichtbar. Auch unter F1 → Gameplay.',
          'As on the N64: no count over Link when he picks something up, rupees always shown. Also in F1 → Gameplay.', ''),
@@ -245,6 +252,8 @@ SECTIONS.append(('Aussehen', 'Appearance', []))
 # (what the game uses while the file has no line for the key)
 DEFAULTS = {'texture_saving': 0, 'texture_detail': 1, 'game_speed': 1, 'mouse_sensitivity': 100, 'rumble_strength': 100, 'motion_controls': 1, 'volume': 100, 'anisotropic_filtering': 4, 'soft_shadows': 1, 'pipeline_precompile': 1, 'shader_cache': 1, 'hdr_paper_white': 200, 'hdr_peak_brightness': 1000, 'sharpness': 50, 'frame_pacing': 1}
 DEFAULTS.update(view_distance=1, grass=2, shadow_distance=1)  # engine's Original values when absent from the file
+DEFAULTS['unlimited_amiibo'] = 0
+DEFAULTS['ocarina_instrument'] = 0
 
 # (values an options file can hold that this build cannot run: shown as such when set, never offered)
 UNAVAILABLE = {'dlss': {1: ('DLSS (nicht verfügbar)', 'DLSS (not available)'),

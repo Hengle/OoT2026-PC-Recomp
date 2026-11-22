@@ -1532,6 +1532,24 @@ def build_language(a, out):
     return a.language or kept or (system_language() if a.prepare else None) or "en-US"
 
 
+def game_profile_recording(environ, root=ROOT):
+    """A recording flag may survive an interrupted test, but must not slow a public update."""
+    if environ.get("OCARINA_PGO_GEN") == "1":
+        return True
+    local = environ.get("LOCALAPPDATA")
+    if not local or not os.path.isfile(os.path.join(local, "Ocarina Reborn", "pgo-gen.flag")):
+        return False
+    try:
+        with open(os.path.join(os.path.dirname(root), "build-info.json"), encoding="utf-8-sig") as f:
+            info = json.load(f)
+        private = isinstance(info, dict) and info.get("release_type") == "private-test"
+    except (OSError, ValueError):
+        private = False
+    if not private:
+        print("Ignoring the profile-recording flag: this is not a private test build.", flush=True)
+    return private
+
+
 def profile_readable(prof, any_os=False):
     """(linux) the profile is made by a recent clang (the Windows tools'): an older one, the system's, cannot read it and stops the
     build. Then the game is built without it (a little slower in play), not at all. any_os: asked on Windows too (the renderer's
@@ -2614,6 +2632,16 @@ def main(a=None):
         env["A64_HOT_FUNCS"] = os.path.join(work, "hot_funcs.txt")
     if os.path.exists(os.path.join(work, "ocarina_reborn_pieces.prof")) and profile_readable(os.path.join(work, "ocarina_reborn_pieces.prof")):
         env["RX_PGO"] = os.path.join(work, "ocarina_reborn_pieces.prof")
+    # (Ocarina Reborn) OCARINA_PGO_GEN=1, set by the profile-recording start (tools/alpha/game-profile): the hot pieces count their
+    # branches (RX_PGO=gen, -O1) and HOS_PGO writes the counts; the play profile made from them ships as ocarina_reborn_pieces.prof.
+    # The lift key leaves RX_PGO out (COMPILE_ONLY_ENV): only the hot pieces are compiled again, both ways
+    # (or the file %LOCALAPPDATA%\Ocarina Reborn\pgo-gen.flag, which the recording script makes: the setup's own launcher start has
+    # none of the script's environment, and 1.1.4-20's update was built without the counters for that)
+    # A recording flag left by an interrupted test must not instrument a later public update.
+    if game_profile_recording(os.environ):
+        env["RX_PGO"] = "gen"
+        print("profile recording build: the game's hot code counts its branches, slower until the next update",
+              flush=True)
     vk_profile = vk_profile_for(work, os.environ, root=ROOT)
     if vk_profile:
         env["RX_VK_PGO"] = vk_profile

@@ -17,7 +17,7 @@ constexpr uint64_t kClassMb[kClasses] = {16, 32, 64, 128, 192, 256};   // (cap_b
 constexpr uint64_t kDemandMs = 60000;   // (a class asked for in the last minute is wanted: kept, made again when taken)
 constexpr uint64_t kBurstMs = 3000;     // (takes of a class this close together are one load's: as many are kept ready)
 constexpr int kMaxPerClass = 3;
-constexpr size_t kMaxSpares = 16;
+constexpr size_t kMaxSpares = 16;   // (1.1.4-18 tried 48: the 8 MB misses stayed, with 15 spares, and fps did not change)
 
 inline int class_of(uint64_t size) {
     for (int i = 0; i < kClasses; ++i) if (size == kClassMb[i] * MB) return i;
@@ -97,6 +97,33 @@ inline int least_wanted(const uint64_t* sizes, size_t n, const Demand& d, uint64
         if (best < 0 || at < best_at || (at == best_at && sizes[i] > sizes[best])) best = (int)i, best_at = at;
     }
     return best;
+}
+
+/// (1.1.4-17) A buffer of a class the game took in the last kHotMs is kept as a spare even past the RAM guard's room, while RAM
+/// stays above the reserve + kHotRamMargin and the spares stay within kHotCeiling: destroying it saves nothing, the next capture
+/// of the class makes one again. 2026-11-18 (9800X3D + RX 7900 XTX, Market, 2-3 GB RAM free, so a room of 256 MB): the spares
+/// went back and forth, 64 and 128 MB buffers made on the submitting thread in 6-15 ms and destroyed there again (VMA
+/// FreeDedicatedMemory 4.2% of the game thread in the slow seconds, 0.3% in the 60 fps ones)
+constexpr uint64_t kHotMs = 10000;
+constexpr uint64_t kHotCeiling = 768 * MB;
+constexpr uint64_t kHotRamMargin = 512 * MB;
+inline bool keep_hot(const Demand& d, int c, uint64_t now, uint64_t spare_bytes, uint64_t size, uint64_t avail_phys,
+                     uint64_t avail_commit, uint64_t reserve) {
+    if (c < 0 || c >= kClasses || !d.asked_ms[c] || now < d.asked_ms[c] || now - d.asked_ms[c] >= kHotMs) return false;
+    if (spare_bytes + size > kHotCeiling) return false;
+    // Free physical RAM alone is insufficient when Windows is near its commit limit.
+    return avail_phys > reserve + kHotRamMargin + size && avail_commit > reserve + kHotRamMargin + size;
+}
+
+constexpr uint64_t kSmallFloor = 96 * MB;
+inline bool needs_trim(uint64_t spare, uint64_t inflight, uint64_t small, uint64_t limit) {
+    // Keep the small buffers used every frame, but only up to their intended floor.
+    return spare + inflight > limit && (spare > small || small > kSmallFloor);
+}
+inline bool can_defer_free(uint64_t avail_phys, uint64_t avail_commit, uint64_t reserve) {
+    // Under pressure release retired memory immediately; do not add another queued GiB.
+    return avail_phys > std::max(reserve, 1536 * MB) + kHotRamMargin &&
+           avail_commit > reserve + kHotRamMargin;
 }
 
 /// the class whose spares are furthest short of its target (counting those being made), the bigger one first between equals

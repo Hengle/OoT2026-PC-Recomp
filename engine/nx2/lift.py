@@ -177,6 +177,10 @@ def main():
         ocr_view.install(L, img, next((m["build_id"] for m in meta["modules"] if m["name"] == "main"), ""))
         import ocr_counters   # (Ocarina Reborn: Classic counters, host/ocr_counters.c)
         ocr_counters.install(L, img, next((m["build_id"] for m in meta["modules"] if m["name"] == "main"), ""))
+        import ocr_amiibo_rules   # optional daily-limit policy; no tag/save/clock changes
+        ocr_amiibo_rules.install(L, img, next((m["build_id"] for m in meta["modules"] if m["name"] == "main"), ""))
+        import ocr_ocarina   # selected equipped instrument; preserves inventory/story data
+        ocr_ocarina.install(L, img, next((m["build_id"] for m in meta["modules"] if m["name"] == "main"), ""))
     L.discover(max_insns=a.max_func)
     print("discovered %d functions (%.0fs)" % (len(L.funcs), time.time() - t0))
     last[0] = time.time()

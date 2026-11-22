@@ -51,6 +51,8 @@
 #include "ocr_photo_menu.h"
 #include "ocr_rupee_roll.h"
 namespace mkwvk { int ocr_tunic = 0, ocr_tunic_r = 80, ocr_tunic_g = 160, ocr_tunic_b = 75; }
+namespace mkwvk { int ocr_unlimited_amiibo = 0; }
+namespace mkwvk { int ocr_ocarina_instrument = 0; }
 namespace mkwvk { int ocr_counters = 0; std::atomic<int> ocr_rupees{-1};
 std::atomic<uint64_t> ocr_wallet_visual{0}; }   // (Classic counters row; the wallet, -1: none)
 #define OCR_OPT_RUPEES 4084   /* (Ocarina Reborn) rx_option_set from the game side: the wallet, host/ocr_counters.c */
@@ -1488,6 +1490,11 @@ Row rows[] = {
      "RGB color component (0-255). Enable Custom tunic color, then save and restart. Lighting affects the result.", nullptr, true, true},
     {TAB_GAMEPLAY, "Tunic blue", &ocr_tunic_b, 0, 255, 1, tx_tunic_rgb,
      "RGB color component (0-255). Enable Custom tunic color, then save and restart. Lighting affects the result.", nullptr, true, true},
+    {TAB_GAMEPLAY, "Ocarina", &ocr_ocarina_instrument, 0, 2, 1,
+     +[](int v) -> const char* { static const char* t[] = {"Original", "Fairy Ocarina", "Ocarina of Time"}; return t[std::clamp(v, 0, 2)]; },
+     "Choose the instrument Link uses the next time he takes out an ocarina, as child or adult. Requires an owned ocarina. Original uses the game's instrument. Inventory and story progress are unchanged.", nullptr, false, true},
+    {TAB_GAMEPLAY, "Unlimited amiibo", &ocr_unlimited_amiibo, 0, 1, 1, tx_onoff,
+     "Allows repeated amiibo rewards without the daily cooldown. Use your own .bin and scan again in-game. Off restores normal limits. Tag files and the system clock are unchanged.", nullptr, false, true},
     {TAB_GAMEPLAY, "Load amiibo (.bin)", nullptr, 0, 0, 0, nullptr,
      "Choose your own raw amiibo .bin (532/540/572 bytes), then close F1 and use the in-game amiibo scan. Read-only: rewards, no tag save writes. Normal game limits apply."},
     {TAB_GAMEPLAY, "Remove amiibo", nullptr, 0, 0, 0, nullptr,
@@ -2072,6 +2079,7 @@ const char* ini_key(const Row& r) {
     if (r.value == &opts.dlss) return "dlss";   // (as opts.dlss and RX_VK_DLSS)
     if (r.value == &opts.handheld) return "handheld_profile";   // (the Profile row; host/nn_applet.c reads it at the start)
     if (r.value == &opts.ultrawide) return "ultrawide";   // (the Aspect ratio row; host/hos_main.c reads it at the start)
+    if (r.value == &ocr_ocarina_instrument) return "ocarina_instrument";
     static char k[32];
     size_t n = 0;
     for (const char* p = r.name; *p && n + 1 < sizeof k; p++) k[n++] = *p == ' ' ? '_' : (char)tolower(*p);
@@ -5342,6 +5350,14 @@ bool fps_take(int64_t now, int64_t shown, int64_t game, int64_t* next, int64_t* 
 // (the game's) and the control bridge's menu_setting and menu_setting_set (its own thread). Recursive: a setter reached from
 // inside menu_tick's frame on the same thread does not lock itself out
 std::recursive_mutex menu_mu;
+int menu_unlimited_amiibo() {
+    std::lock_guard lk(menu_mu);
+    return ocr_unlimited_amiibo == 1;
+}
+int menu_ocarina_instrument() {
+    std::lock_guard lk(menu_mu);
+    return ocr_ocarina_instrument >= 0 && ocr_ocarina_instrument <= 2 ? ocr_ocarina_instrument : 0;
+}
 void menu_option_set(int id, int value) {
     if (id == OCR_OPT_DEATHS) { ocr_deaths.store(value, std::memory_order_relaxed); return; }   // (Ocarina Reborn)
     if (id == OCR_OPT_PHOTO_READY) { photo_tools::availability(value); return; }

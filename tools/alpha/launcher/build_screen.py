@@ -1422,7 +1422,8 @@ class BuildScreen:
 
     # ---- the mouse ----------------------------------------------------------------------------------------------------
     def design(self, e):
-        k, ox, oy = self.fit
+        # (a mouse move before the first draw: no fit yet, the pointer is nowhere on the design. 1.1.4-20 logged a traceback here)
+        k, ox, oy = getattr(self, 'fit', None) or (1.0, -1e9, -1e9)
         return (e.x - ox) / k, (e.y - oy) / k
 
     def target_at(self, e):

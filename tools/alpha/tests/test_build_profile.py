@@ -4,6 +4,8 @@ import contextlib
 import hashlib
 import importlib.util
 import io
+import json
+import os
 from pathlib import Path
 import tempfile
 import unittest
@@ -78,6 +80,59 @@ class BuildProfileTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 patch.apply(root)
             self.assertEqual(before, {p: p.read_bytes() for p in (root / 'nx2').iterdir()})
+
+
+class ProfileRecordingTests(unittest.TestCase):
+    def setUp(self):
+        tree = ast.parse((ROOT / 'engine/nx2/make_game.py').read_text(encoding='utf-8'))
+        helper = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == 'game_profile_recording')
+        namespace = {'os': os, 'json': json, 'ROOT': str(ROOT / 'engine')}
+        exec(compile(ast.Module(body=[helper], type_ignores=[]), 'make_game.py', 'exec'), namespace)
+        self.recording = namespace['game_profile_recording']
+        self.folder = tempfile.TemporaryDirectory()
+        self.addCleanup(self.folder.cleanup)
+        self.install = Path(self.folder.name) / 'installation'
+        self.install.mkdir()
+        self.manifest = self.install / 'build-info.json'
+        self.root = str(self.install / 'engine')
+        self.local = Path(self.folder.name) / 'local'
+        self.flag = self.local / 'Ocarina Reborn/pgo-gen.flag'
+        self.flag.parent.mkdir(parents=True)
+        self.env = {'LOCALAPPDATA': str(self.local)}
+
+    def test_private_flag_enables_recording_only_when_present(self):
+        self.manifest.write_text(json.dumps({'release_type': 'private-test'}), encoding='utf-8-sig')
+        self.assertFalse(self.recording(self.env, self.root))
+        self.flag.touch()
+        self.assertTrue(self.recording(self.env, self.root))
+
+    def test_public_flag_is_ignored_without_deleting_recording_control(self):
+        self.manifest.write_text(json.dumps({'release_type': 'public'}), encoding='utf-8')
+        self.flag.touch()
+        with contextlib.redirect_stdout(io.StringIO()) as output:
+            self.assertFalse(self.recording(self.env, self.root))
+        self.assertIn('not a private test build', output.getvalue())
+        self.assertTrue(self.flag.exists())
+
+    def test_missing_or_invalid_manifest_does_not_enable_recording(self):
+        self.flag.touch()
+        for contents in (None, 'not json', '[]', 'null', '{}', '{"release_type": "preview"}'):
+            with self.subTest(manifest=contents), contextlib.redirect_stdout(io.StringIO()):
+                if contents is None:
+                    self.manifest.unlink(missing_ok=True)
+                else:
+                    self.manifest.write_text(contents, encoding='utf-8')
+                self.assertFalse(self.recording(self.env, self.root))
+
+    def test_explicit_recording_request_overrides_manifest_and_needs_no_flag(self):
+        for contents in (None, 'not json', '{"release_type": "public"}', '{"release_type": "private-test"}'):
+            with self.subTest(manifest=contents):
+                if contents is None:
+                    self.manifest.unlink(missing_ok=True)
+                else:
+                    self.manifest.write_text(contents, encoding='utf-8')
+                self.assertTrue(self.recording({'OCARINA_PGO_GEN': '1'}, self.root))
+        self.assertFalse(self.recording({'OCARINA_PGO_GEN': '0'}, self.root))
 
 
 if __name__ == '__main__':

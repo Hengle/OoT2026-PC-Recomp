@@ -145,6 +145,8 @@ int menu_enemy_damage();   // (Ocarina Reborn) 1 to 5
 int menu_player_flight();
 int menu_free_camera();
 int menu_photo_mode();
+int menu_unlimited_amiibo();
+int menu_ocarina_instrument();
 int menu_photo_fov();
 int menu_link_speed();   // (Movement speed in percent, 100 while the tools are off)
 int menu_damage_taken();   // (Damage taken, HOS_OPT_DAMAGE_TAKEN: 1, Normal, while the tools are off)

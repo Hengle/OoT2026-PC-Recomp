@@ -49,7 +49,8 @@ enum { XINPUT_GAMEPAD_DPAD_UP = 1, XINPUT_GAMEPAD_DPAD_DOWN = 2, XINPUT_GAMEPAD_
 typedef struct { WORD wButtons; uint8_t bLeftTrigger, bRightTrigger; int16_t sThumbLX, sThumbLY, sThumbRX, sThumbRY; } XINPUT_GAMEPAD;
 typedef struct { DWORD dwPacketNumber; XINPUT_GAMEPAD Gamepad; } XINPUT_STATE;
 typedef DWORD(WINAPI *XInputGetStateFn)(DWORD, XINPUT_STATE *);
-static XInputGetStateFn xinput_get;   /* (no XInput: SDL has the pads) */
+static void xinput_read(int64_t now, uint64_t *raw, int32_t s[4]) { (void)now; (void)raw; (void)s; }
+static void xinput_suspend(void) {}
 static HMODULE LoadLibraryA(const char *name) { (void)name; return NULL; }
 static void *GetProcAddress(HMODULE m, const char *name) { (void)m; (void)name; return NULL; }
 static LONG InterlockedExchange(volatile LONG *p, LONG v) { LONG o = *p; *p = v; return o; }
@@ -142,7 +143,6 @@ def main():
         block(hid, "static const signed char pad_default[HOS_SW_N] =") + ";",
         block(hid, "static void stick_max("), block(hid, "static uint64_t bound_pad_buttons("), state,
         block(hid, "void hos_filter_stick("),
-        re.search(r"^static volatile int xinput_pads_now;.*$", hid, re.M).group(0),
         block(hid, "static void pads_read("),
         merge, "static void game_pads(uint64_t *buttons, int32_t stick[4]) { (void)pads_merge(buttons, stick); }",
         MAIN))

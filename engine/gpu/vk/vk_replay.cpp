@@ -11,6 +11,8 @@
 // Without a window (HOS_HEADLESS) presents render into an image of their own; RX_VK_SHOTS=<dir> writes every
 // RX_VK_SHOT_EVERY-th one (default 300) there as a PNG.
 #include "threaded_rendering.h"
+#include "../../host/ocr_amiibo_rules.h"
+#include "../../host/ocr_ocarina.h"
 #include <algorithm>
 namespace mkwvk { extern int ocr_counters; }   // (Ocarina Reborn: vk_menu.cpp)
 namespace mkwvk { extern int ocr_view, ocr_grass, ocr_shadows; }   // (Ocarina Reborn: vk_menu.cpp)
@@ -3277,7 +3279,7 @@ bool capture_wait_part(uint64_t value, uint64_t part, uint64_t whole, uint64_t t
     if (count == 1 || count % 3000 == 0)
         logf("[OcarinaReborn/PERF] capture recording waits: %llu, timed out: %llu (full submission retained for direct-memory hazards)",
             (unsigned long long)count, (unsigned long long)timeouts.load());
-    // A timeout already consumed the same 250 ms budget as the original path.
+    // A timeout already consumed the supplied wait budget.
     // Do not add another full-submission wait after it.
     return true;
 }
@@ -6712,6 +6714,8 @@ void fill_replay_table(MkwVkRenderer& t) {
         if (id == 4088) return (int)(::mkwvk::ocr_ov_gpu.load(std::memory_order_relaxed) * 1000.0f);   // (Ocarina Reborn: the GPU's time a frame in us, for the FPS target, host/nn_vi.c)   // (3: the fixed path's scale in 1/10000, vk_menu.cpp; DLAA: full scale, vk_dlss.cpp)
         if (id == 11) return opts.stick_dead_zone;
         if (id == 4200) return menu_photo_mode(); // host/ocr_tools.h
+        if (id == OCR_OPT_UNLIMITED_AMIIBO) return menu_unlimited_amiibo();
+        if (id == OCR_OPT_OCARINA_INSTRUMENT) return menu_ocarina_instrument();
         if (id == 4083) return ocr_counters;   // (Ocarina Reborn: Classic counters, host/ocr_counters.c)
         if (id == OCR_OPT_VIEW) return ocr_view;   // (Ocarina Reborn: host/ocr_view.c)
         if (id == OCR_OPT_GRASS) return ocr_grass;

@@ -64,16 +64,29 @@ typedef struct Table {   /* (the slots, then the keys: cap of each) */
     Obj *slot[];
 } Table;
 static uint64_t *table_keys_of(const Table *t) { return (uint64_t *)(void *)(t->slot + t->cap); }
+/* (ProjectReLink v0.7.9.2) Contiguous liveness metadata avoids reading every scattered object while the shared table
+   lock is held during growth. Only locked probes/rehashes use it; lock-free readers still validate the actual object.
+   All table-resident kind changes pass through alive_set. Existing condition-variable and mutex behavior is unchanged. */
+static uint8_t *table_alive_of(const Table *t) { return (uint8_t *)(void *)(table_keys_of(t) + t->cap); }
+static uint8_t *table_alive;
 static Table *live;
 
 static uint64_t slot_of(uint64_t key, uint64_t c) { return (key * 0x9E3779B97F4A7C15ULL >> 20) & (c - 1); }
 
-static Obj *find_locked(uint64_t key) {
-    if (!table) return NULL;
+static uint64_t find_slot_locked(uint64_t key, uint8_t alive) {
+    if (!table) return ~0ull;
     for (uint64_t i = slot_of(key, cap);; i = (i + 1) & (cap - 1)) {
-        if (!table[i]) return NULL;
-        if (table_keys[i] == key && table[i]->kind) return table[i];
+        if (!table[i]) return ~0ull;
+        if (table_keys[i] == key && table_alive[i] == alive) return i;
     }
+}
+static Obj *find_locked(uint64_t key) {
+    const uint64_t i = find_slot_locked(key, 1);
+    return i == ~0ull ? NULL : table[i];
+}
+static void alive_set(uint64_t i, int kind, int order) {
+    __atomic_store_n(&table[i]->kind, kind, order);
+    table_alive[i] = kind != 0;
 }
 
 /* An object finalized (or initialized again) is a tombstone (kind 0). The same address initialized again reuses it in
@@ -134,43 +147,41 @@ static void bury_locked(Obj *o) {
     grave_count++;
 }
 
-/* the tombstone of this address, if it still has its slot */
-static Obj *find_dead_locked(uint64_t key) {
-    if (!table) return NULL;
-    for (uint64_t i = slot_of(key, cap);; i = (i + 1) & (cap - 1)) {
-        if (!table[i]) return NULL;
-        if (table_keys[i] == key && !table[i]->kind) return table[i];
-    }
-}
-
 static void insert_locked(Obj *o) {
     if (!table || used * 2 >= cap) {
         uint64_t ncap = cap ? cap * 2 : 1 << 16;
-        Table *t = (Table *)calloc(1, sizeof(Table) + ncap * (sizeof(Obj *) + sizeof(uint64_t)));
+        Table *t = (Table *)calloc(1, sizeof(Table) + ncap * (sizeof(Obj *) + sizeof(uint64_t) + 1));
         Obj **nt = t->slot;
         t->cap = ncap;
         uint64_t *nk = table_keys_of(t);
-        for (uint64_t i = 0; i < cap; i++)
-            if (table[i] && table[i]->kind) {
-                uint64_t j = slot_of(table[i]->key, ncap);
+        uint8_t *na = table_alive_of(t);
+        uint64_t kept = 0;
+        for (uint64_t i = 0; i < cap; i++) {
+            if (!table[i]) continue;
+            if (table_alive[i]) {
+                uint64_t j = slot_of(table_keys[i], ncap);
                 while (nt[j]) j = (j + 1) & (ncap - 1);
                 nt[j] = table[i];
-                nk[j] = table[i]->key;
-            } else if (table[i]) {
+                nk[j] = table_keys[i];
+                na[j] = 1;
+                kept++;
+            } else {
                 bury_locked(table[i]);
             }
+        }
         table = nt;
         table_keys = nk;
+        table_alive = na;
         cap = ncap;
-        used = 0;
-        for (uint64_t i = 0; i < cap; i++) used += table[i] != NULL;
+        used = kept;
         __atomic_store_n(&live, t, __ATOMIC_RELEASE);
     }
     uint64_t i = slot_of(o->key, cap);
-    while (table[i] && table[i]->kind) i = (i + 1) & (cap - 1);
+    while (table[i] && table_alive[i]) i = (i + 1) & (cap - 1);
     if (!table[i]) used++;
     else bury_locked(table[i]);   /* (a tombstone of another address) */
     __atomic_store_n(&table_keys[i], o->key, __ATOMIC_RELAXED);   /* (before the object: see find_unlocked) */
+    table_alive[i] = 1;
     __atomic_store_n(&table[i], o, __ATOMIC_RELEASE);
 }
 
@@ -238,15 +249,17 @@ static Obj *obj_lookup(uint64_t key, int kind) {
         if (o && o->kind == kind) return o;
     }
     AcquireSRWLockExclusive(&table_lock);
-    o = find_locked(key);
-    if (o && o->kind != kind) { __atomic_store_n(&o->kind, 0, __ATOMIC_RELEASE); o = NULL; }   /* memory reused for another kind of object */
-    if (!o && (o = find_dead_locked(key))) {
+    uint64_t at = find_slot_locked(key, 1);
+    o = at == ~0ull ? NULL : table[at];
+    if (o && o->kind != kind) { alive_set(at, 0, __ATOMIC_RELEASE); o = NULL; }   /* memory reused for another kind of object */
+    if (!o && (at = find_slot_locked(key, 0)) != ~0ull) {
         /* the same address initialized again (an object on a stack, every frame): its own tombstone, as new (the
            lock and condition variable stay as they are: nothing holds them now) */
+        o = table[at];
         free(o->q);
         free(o->links);
         memset(&o->owner, 0, sizeof *o - offsetof(Obj, owner));
-        __atomic_store_n(&o->kind, kind, __ATOMIC_RELEASE);
+        alive_set(at, kind, __ATOMIC_RELEASE);
     }
     if (!o) {
         if ((o = spares)) {   /* (its old address's caches see the new key: see spares) */
@@ -268,16 +281,16 @@ static Obj *obj_lookup(uint64_t key, int kind) {
 
 static Obj *fresh(uint64_t key, int kind) {
     AcquireSRWLockExclusive(&table_lock);
-    Obj *o = find_locked(key);
-    if (o) __atomic_store_n(&o->kind, 0, __ATOMIC_RELEASE);   /* re-initialized: forget the old one */
+    const uint64_t at = find_slot_locked(key, 1);
+    if (at != ~0ull) alive_set(at, 0, __ATOMIC_RELEASE);   /* re-initialized: forget the old one */
     ReleaseSRWLockExclusive(&table_lock);
     return obj(key, kind);
 }
 
 static void drop(uint64_t key) {
     AcquireSRWLockExclusive(&table_lock);
-    Obj *o = find_locked(key);
-    if (o) __atomic_store_n(&o->kind, 0, __ATOMIC_RELEASE);   /* tombstone (see bury_locked) */
+    const uint64_t at = find_slot_locked(key, 1);
+    if (at != ~0ull) alive_set(at, 0, __ATOMIC_RELEASE);   /* tombstone (see bury_locked) */
     ReleaseSRWLockExclusive(&table_lock);
 }
 

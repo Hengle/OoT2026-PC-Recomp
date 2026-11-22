@@ -1031,6 +1031,48 @@ bool sync_live() {
 std::atomic<bool> cap_shutting_down{false};     // (set under cap_free_mu when the process starts to exit: after it no worker touches cap_free)
 std::mutex cap_free_mu;   // (the submitting threads take buffers from cap_free, the replay gives them back)
 uint64_t cap_free_bytes = 0;   // (cap_free_mu)
+uint64_t cap_avail_phys = 0, cap_avail_commit = 0, cap_ram_reserve = 1ull << 30;   // (cap_free_mu: last memory sample)
+std::atomic<bool> cap_defer_free_ok{false}; // published by cap_spare_max; false on missing/low headroom
+// (Ocarina Reborn, 1.1.4-17) Capture buffers given up are destroyed on a thread of their own, not on the submitting thread that
+// gave them up: a 64-128 MB buffer's vmaDestroyBuffer (VMA FreeDedicatedMemory, AMD's driver) was 4.2% of the game thread in the
+// Market's slow seconds (2026-11-18, 9800X3D + RX 7900 XTX) and 0.3% in its 60 fps ones. Only spares come here (no submission
+// reads them), at most kReapMax of them waiting; past that, or once the process exits, they are destroyed where they were given up.
+std::mutex cap_reap_mu;
+std::condition_variable cap_reap_cv;
+std::vector<FreeBuf> cap_reap_q;   // (cap_reap_mu)
+uint64_t cap_reap_bytes = 0;       // (cap_reap_mu)
+bool cap_reap_started = false;     // (cap_reap_mu)
+constexpr uint64_t kReapMax = 1ull << 30;
+void cap_reaper() {
+    std::unique_lock lk(cap_reap_mu);
+    for (;;) {
+        cap_reap_cv.wait(lk, [] { return !cap_reap_q.empty(); });
+        if (cap_shutting_down.load()) return;   // (the process owns what is left, as ocr_cap_worker's)
+        const FreeBuf f = cap_reap_q.back();
+        cap_reap_q.pop_back();
+        lk.unlock();
+        destroy_buffer(f.buffer, f.alloc);
+        lk.lock();
+        cap_reap_bytes -= std::min(cap_reap_bytes, f.size);
+    }
+}
+void cap_destroy_later(const FreeBuf& f) {
+    {
+        std::lock_guard lk(cap_reap_mu);
+        if (!cap_shutting_down.load() && cap_defer_free_ok.load() && cap_reap_bytes + f.size <= kReapMax) {
+            if (!cap_reap_started) {
+                try { std::thread(cap_reaper).detach(); cap_reap_started = true; } catch (...) {}
+            }
+            if (cap_reap_started) {
+                cap_reap_q.push_back(f);
+                cap_reap_bytes += f.size;
+                cap_reap_cv.notify_one();
+                return;
+            }
+        }
+    }
+    destroy_buffer(f.buffer, f.alloc);
+}
 // (the spare buffers: 12 and, on a card of 6 GB or less, 32 MB of them; RX_VK_CAP_SPARE_MB=<n>: that many, 0: as before.
 // After a load the retired ones, 40-60 MB each, stayed as spares for good)
 uint64_t cap_spare_max() {
@@ -1059,6 +1101,8 @@ uint64_t cap_spare_max() {
         // (Ocarina Reborn, 1.1.4-8: the loads' big spares only while RAM is plentiful. 1.1.4-7 held up to 768 MB as RAM fell to 1 GB
         // free (a Discord stream and a browser beside the game); under 6 GB free the room is 256 MB, under 3 GB idle_limit's)
         if (ms.ullAvailPhys && ms.ullAvailPhys < (6ull << 30)) candidate = std::min<uint64_t>(candidate, 256ull << 20);
+        cap_avail_phys = ms.ullAvailPhys, cap_avail_commit = ms.ullAvailPageFile, cap_ram_reserve = reserve;
+        cap_defer_free_ok = ocr_cap_pool::can_defer_free(cap_avail_phys, cap_avail_commit, reserve);
         limit = state.update(candidate, (uint64_t)std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()).count());
     }
     return limit;
@@ -1088,7 +1132,7 @@ std::vector<uint64_t> cap_free_sizes() {   // (cap_free_mu held)
     for (const auto& f : cap_free) v.push_back(f.size);
     return v;
 }
-constexpr uint64_t kSmallSpare = 32ull << 20, kSmallFloor = 96ull << 20;
+constexpr uint64_t kSmallSpare = 32ull << 20, kSmallFloor = ocr_cap_pool::kSmallFloor;
 uint64_t cap_small_bytes() {   // (cap_free_mu held) the spares of 32 MB and less
     uint64_t n = 0;
     for (const auto& f : cap_free) if (f.size <= kSmallSpare) n += f.size;
@@ -1109,7 +1153,10 @@ void cap_buf_free(VkBuffer buffer, VmaAllocation alloc, void* map, uint64_t size
         // (Ocarina Reborn, 1.1.4-8: the buffers every frame takes, 32 MB and less, keep up to kSmallFloor even when the RAM guard
         // takes the room down to 32 MB: at 32 MB a 16 MB buffer given back did not fit while another was in use, and 1.1.4-7 made
         // one on the submitting thread 6,487 times in 7 minutes, 15 s in all, with 0.8 GB of RAM free)
-        return !keep_old && size <= kSmallSpare && cap_small_bytes() + size <= kSmallFloor;
+        if (!keep_old && size <= kSmallSpare && cap_small_bytes() + size <= kSmallFloor) return true;
+        // (1.1.4-17: a class the game took in the last 10 s, while RAM allows: ocr_cap_pool::keep_hot)
+        return !keep_old && ocr_cap_pool::keep_hot(cap_demand, ocr_cap_pool::class_of(size), now, cap_free_bytes + cap_inflight_bytes,
+                                                   size, cap_avail_phys, cap_avail_commit, cap_ram_reserve);
     };
     std::vector<FreeBuf> given_up;
     if (!keep_old && !fits() && size <= (256ull << 20) && cap_demand.wanted(ocr_cap_pool::class_of(size), now)) {
@@ -1136,8 +1183,11 @@ void cap_buf_free(VkBuffer buffer, VmaAllocation alloc, void* map, uint64_t size
     } else cap_stats.destroyed++;
     cap_stats.destroyed += given_up.size();
     lk.unlock();   // (driver frees must not block capture pool access)
-    if (!keep) destroy_buffer(buffer, alloc);
-    for (const auto& f : given_up) destroy_buffer(f.buffer, f.alloc);
+    if (!keep) {
+        if (from_worker) destroy_buffer(buffer, alloc);   // (the refill worker: off the submitting threads already)
+        else cap_destroy_later({buffer, alloc, map, size});
+    }
+    for (const auto& f : given_up) from_worker ? destroy_buffer(f.buffer, f.alloc) : cap_destroy_later(f);
 }
 void cap_buf_retire(std::map<uint32_t, CapBuf>::iterator it) {
     cap_bytes -= it->second.size;
@@ -1318,14 +1368,21 @@ void cap_trim_spares(std::unique_lock<std::mutex>& lock) {
     std::vector<FreeBuf> retired;
     uint64_t released = 0;
     const uint64_t now = cap_now_ms();
-    while (cap_free_bytes + cap_inflight_bytes > limit && !cap_free.empty() && cap_free_bytes > cap_small_bytes()) {
+    while (!cap_free.empty() && ocr_cap_pool::needs_trim(cap_free_bytes, cap_inflight_bytes, cap_small_bytes(), limit)) {
         // (Ocarina Reborn: the class asked for longest ago first, not the biggest: the 192 MB spare a load just used stays)
         // (1.1.4-8: the small spares within kSmallFloor stay; the big ones go first)
         std::vector<uint64_t> big;
         std::vector<size_t> at;
         const bool small_over = cap_small_bytes() > kSmallFloor;
-        for (size_t k = 0; k < cap_free.size(); ++k)
-            if (cap_free[k].size > kSmallSpare || small_over) big.push_back(cap_free[k].size), at.push_back(k);
+        for (size_t k = 0; k < cap_free.size(); ++k) {
+            const uint64_t sz = cap_free[k].size;
+            // (1.1.4-17: a class the game took in the last 10 s stays while RAM allows; given up, it would be made again on the
+            // submitting thread at its next take)
+            if (ocr_cap_pool::keep_hot(cap_demand, ocr_cap_pool::class_of(sz), now, cap_free_bytes + cap_inflight_bytes - sz, sz,
+                                       cap_avail_phys, cap_avail_commit, cap_ram_reserve))
+                continue;
+            if (sz > kSmallSpare || small_over) big.push_back(sz), at.push_back(k);
+        }
         if (big.empty()) break;
         const int j = ocr_cap_pool::least_wanted(big.data(), big.size(), cap_demand, now, false);
         const size_t i = at[(size_t)j];
@@ -1337,9 +1394,9 @@ void cap_trim_spares(std::unique_lock<std::mutex>& lock) {
     if (retired.empty()) return;
     cap_stats.destroyed += retired.size();
     lock.unlock();
-    for (const auto& f : retired) destroy_buffer(f.buffer, f.alloc);
-    logf("[OcarinaReborn/MEM] released %llu MB of idle capture buffers (limit %llu MB)",
-         (unsigned long long)(released >> 20), (unsigned long long)(limit >> 20));
+    for (const auto& f : retired) cap_destroy_later(f);   // (1.1.4-17: not on the submitting thread that trims)
+    logf("[OcarinaReborn/MEM] retired %llu MB of idle capture buffers (limit %llu MB; deferred frees: %s)",
+         (unsigned long long)(released >> 20), (unsigned long long)(limit >> 20), cap_defer_free_ok.load() ? "on" : "off");
     lock.lock();
 }
 /// (cap_free_mu held) every 30 s with takes in it: what the pool did, in one line
@@ -1347,14 +1404,17 @@ void cap_pool_summary(uint64_t now) {
     static uint64_t next = 0, takes_then = 0;
     if (now < next || cap_stats.takes == takes_then) return;
     next = now + 30000, takes_then = cap_stats.takes;
+    uint64_t pending_free = 0;
+    { std::lock_guard reap_lock(cap_reap_mu); pending_free = cap_reap_bytes; }
     logf("[OcarinaReborn/LOAD] capture pool @%.1f: %llu takes from 16 MB: %llu spares fitting, %llu bigger spares, %llu made on the "
          "submitting thread (%.1f ms, longest %.1f; %llu while a refill ran); %llu refills on the worker (%.1f ms, longest %.1f); "
-         "%llu kept by demand, %llu destroyed; spares %llu MB in %zu (most %llu MB), room %llu MB",
+         "%llu kept by demand, %llu destroyed; spares %llu MB in %zu (most %llu MB), room %llu MB; pending free %llu MB",
          cap_mono_ms(), (unsigned long long)cap_stats.takes, (unsigned long long)cap_stats.hits, (unsigned long long)cap_stats.bigger,
          (unsigned long long)cap_stats.misses, cap_stats.miss_ms, cap_stats.miss_max, (unsigned long long)cap_stats.misses_with_refill_running,
          (unsigned long long)cap_stats.refills, cap_stats.refill_ms, cap_stats.refill_max, (unsigned long long)cap_stats.kept_by_demand,
          (unsigned long long)cap_stats.destroyed, (unsigned long long)(cap_free_bytes >> 20), cap_free.size(),
-         (unsigned long long)(cap_stats.peak_spare_bytes >> 20), (unsigned long long)(cap_spare_max() >> 20));
+         (unsigned long long)(cap_stats.peak_spare_bytes >> 20), (unsigned long long)(cap_spare_max() >> 20),
+         (unsigned long long)(pending_free >> 20));
 }
 bool cap_buf_get(uint64_t need, VkBuffer& buffer, VmaAllocation& alloc, void*& map, uint64_t& size) {
     const uint64_t target = cap_buf_size(need);

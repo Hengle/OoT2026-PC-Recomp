@@ -53,7 +53,7 @@ def main():
     readme = (ROOT / "readme.md").read_text(encoding="utf-8")
 
     check(not re.search(r"HOS_OPT_\w+ = 11\b", api), "a HOS_OPT_ enum also takes option 11")
-    pads = block(hid, "static void pads_read(")
+    pads = block(hid, "static int xinput_poll(")
     check("rx_option(11, 0)" in pads and "hos_filter_stick(thumb[0], thumb[1], zone, v)" in pads and
           "hos_filter_stick(thumb[2], thumb[3], zone, v + 2)" in pads,
           "XInput must filter both sticks with the menu's dead zone")
@@ -133,6 +133,7 @@ int main(void) {
 #define CHECK(x) do { if (!(x)) { fprintf(stderr, "FAIL:%d %s\n", __LINE__, #x); exit(1); } } while (0)
 enum MenuTab { TAB_CONTROLS };
 struct Options { int output_res = 0, vsync = 0, resolution = 0, fps_cap = 0, upscale = 0, dlss = 0, handheld = 0, ultrawide = 0, stick_dead_zone = 0, game_lang = 0; } opts;   // (ultrawide: the Aspect ratio row's key)
+int ocr_ocarina_instrument = 0;   // (another row's explicit ini_key, not under test here)
 static int parse_output(const char* text) { return atoi(text); }   // (the Output row's own parse: not what this checks)
 ''' + block(menu, "struct Row {") + ";\n" + block(menu, "const char* tx_stick_dead_zone(") + "\n" + \
         "Row rows[] = {" + row.group(0) + "};\n" + block(menu, "const char* ini_key(") + r'''

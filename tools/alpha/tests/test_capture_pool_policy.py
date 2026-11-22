@@ -77,7 +77,32 @@ int main() {
     CHECK(most_short(have, r, 2000) == -1);
     r.ask(1, 3000); r.ask(1, 3100); r.ran_out(1, 3100);
     CHECK(most_short(have, r, 3200) == 1);
-    if (!failed) std::puts("capture pool policy: room, demand, pick, give-up order and refill order passed");
+    // hot classes (1.1.4-17): a 128 MB buffer the game took 2 s ago stays while RAM allows, not once RAM is short, the class
+    // cold, the ceiling reached, or for a size of no class
+    Demand h;
+    h.ask(3, 50000);
+    CHECK(keep_hot(h, 3, 52000, 226 * MB, 128 * MB, 2200 * MB, 8 * G, G));
+    CHECK(!keep_hot(h, 3, 52000, 226 * MB, 128 * MB, 1600 * MB, 8 * G, G)); // low physical RAM
+    CHECK(!keep_hot(h, 3, 52000, 226 * MB, 128 * MB, 8 * G, 256 * MB, G)); // free RAM, exhausted commit
+    CHECK(!keep_hot(h, 3, 52000, 226 * MB, 128 * MB, 8 * G, 1664 * MB, G)); // exact commit margin
+    CHECK(keep_hot(h, 3, 52000, 226 * MB, 128 * MB, 8 * G, 1664 * MB + 1, G));
+    CHECK(!keep_hot(h, 3, 50000 + kHotMs, 226 * MB, 128 * MB, 8 * G, 8 * G, G)); // cold
+    CHECK(!keep_hot(h, 3, 52000, 700 * MB, 128 * MB, 8 * G, 8 * G, G)); // ceiling
+    CHECK(!keep_hot(h, 2, 52000, 0, 64 * MB, 8 * G, 8 * G, G)); // never taken
+    CHECK(!keep_hot(h, -1, 52000, 0, 8 * MB, 8 * G, 8 * G, G)); // unknown class
+
+    // A pool containing ONLY small buffers must shrink to its 96 MiB anti-churn floor.
+    uint64_t small = 6 * 32 * MB;
+    while (needs_trim(small, 0, small, 32 * MB)) small -= 32 * MB;
+    CHECK(small == 96 * MB);
+    CHECK(!needs_trim(96 * MB, 32 * MB, 96 * MB, 32 * MB));
+    CHECK(needs_trim(96 * MB + 128 * MB, 0, 96 * MB, 32 * MB));
+    CHECK(!needs_trim(96 * MB, 0, 96 * MB, 768 * MB));
+    CHECK(can_defer_free(8 * G, 8 * G, G));
+    CHECK(!can_defer_free(8 * G, 256 * MB, G));
+    CHECK(!can_defer_free(512 * MB, 8 * G, G));
+    CHECK(!can_defer_free(0, 0, G));
+    if (!failed) std::puts("capture pool policy: demand, trim, hot classes and commit headroom passed");
     return failed;
 }
 '''

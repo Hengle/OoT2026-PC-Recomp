@@ -50,6 +50,9 @@ def stage(runtime, output):
                     str(ROOT / 'tools/alpha/ocarina-icon.png'), str(output / 'engine/work')], check=True)
     if (runtime / 'amd-fsr4').is_dir():
         shutil.copytree(runtime / 'amd-fsr4', output / 'amd-fsr4')
+    # The game's hot functions (addresses only): make_game.py takes engine/work/hot_funcs.txt and builds them at -O2 as
+    # code_hot pieces; without it a player's build compiles every lifted file at -O1 (engine/docs/design.md section 11)
+    shutil.copy2(ROOT / 'tools/alpha/game-profile/hot_funcs.txt', output / 'engine/work/hot_funcs.txt')
     shutil.copy2(ROOT / 'tools/alpha/ocarina_prepare.py', output / 'ocarina_prepare.py')
     shutil.copy2(ROOT / 'tools/alpha/OcarinaReborn.ico', output / 'OcarinaReborn.ico')
     for name in ('CREDITS.md', 'LICENSE-HOOKSHOT'):

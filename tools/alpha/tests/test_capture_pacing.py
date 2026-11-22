@@ -57,26 +57,28 @@ void wait_rec_seq(uint64_t seq, uint64_t ns, int* ok) { ++waits; waited_seq = se
 void logf(const char*, ...) {}
 /* PRODUCTION */
 int main() {
+    constexpr uint64_t timeout = 20000000;
     part_rec[11] = 21;
     if (atoi(getenv("OCR_CAPTURE_PART_WAIT")) == 0) {
-        CHECK(!capture_wait_part(9,11,0)); CHECK(waits==0); return 0;
+        CHECK(!capture_wait_part(9,11,0,timeout)); CHECK(waits==0); return 0;
     }
     // Whole submission 9 is still blocked, but the mirrored pages were written by recording 21.
-    CHECK(capture_wait_part(9,11,0)); CHECK(waits==1 && waited_seq==21 && waited_ns==250000000);
-    CHECK(!capture_wait_part(9,0,0)); // no mirrored-page dependency
-    CHECK(!capture_wait_part(9,12,0)); // mapping not submitted; MUST NOT wait for its publication
-    CHECK(!capture_wait_part(9,11,6)); // direct writes still pending
+    CHECK(capture_wait_part(9,11,0,timeout)); CHECK(waits==1 && waited_seq==21 && waited_ns==timeout);
+    CHECK(!capture_wait_part(9,0,0,timeout)); // no mirrored-page dependency
+    CHECK(!capture_wait_part(9,12,0,timeout)); // mapping not submitted; MUST NOT wait for its publication
+    CHECK(!capture_wait_part(9,11,6,timeout)); // direct writes still pending
     CHECK(waits==1);
-    CHECK(capture_wait_part(9,11,5)); // direct writes are complete
-    in_place=12; CHECK(!capture_wait_part(9,11,0));
-    in_place=11; CHECK(capture_wait_part(9,11,0));
+    CHECK(capture_wait_part(9,11,5,timeout)); // direct writes are complete
+    in_place=12; CHECK(!capture_wait_part(9,11,0,timeout));
+    in_place=11; CHECK(capture_wait_part(9,11,0,timeout));
     in_place=0;
-    asynchronous=true; CHECK(!capture_wait_part(9,11,0)); asynchronous=false;
-    sync_waits=false; CHECK(!capture_wait_part(9,11,0)); sync_waits=true;
-    fences_off=true; CHECK(!capture_wait_part(9,11,0)); fences_off=false;
-    rec_timeline=false; CHECK(!capture_wait_part(9,11,0)); rec_timeline=true;
+    asynchronous=true; CHECK(!capture_wait_part(9,11,0,timeout)); asynchronous=false;
+    sync_waits=false; CHECK(!capture_wait_part(9,11,0,timeout)); sync_waits=true;
+    fences_off=true; CHECK(!capture_wait_part(9,11,0,timeout)); fences_off=false;
+    rec_timeline=false; CHECK(!capture_wait_part(9,11,0,timeout)); rec_timeline=true;
+    CHECK(capture_wait_part(9,11,0,250000000)); CHECK(waited_ns==250000000); // explicit legacy wait budget
     const int before=waits;
-    succeeded=0; CHECK(capture_wait_part(9,11,0)); CHECK(waits==before+1);
+    succeeded=0; CHECK(capture_wait_part(9,11,0,timeout)); CHECK(waits==before+1 && waited_ns==timeout);
     puts("Known recording, missing mapping, direct writes, in-place reads, alternate replay and timeout: passed");
 }
 '''

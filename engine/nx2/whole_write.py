@@ -5,10 +5,13 @@ import os
 import time
 
 
-def write_whole(path, text, newline="\n"):
+def write_whole(path, text, newline="\n", sync=False):
     tmp = path + ".part"
     with open(tmp, "w", encoding="utf-8", newline=newline) as f:
         f.write(text)
+        if sync:   # persistent build metadata: flush before atomic replacement (Longshot 5ca51209)
+            f.flush()
+            os.fsync(f.fileno())
     for attempt in range(20):   # (an antivirus reading the file holds it a moment: Windows refuses the move until it lets go)
         try:
             os.replace(tmp, path)
