@@ -24,3 +24,5 @@ Ocarina Reborn is an independently maintained, unofficial community project and 
 ## Private test changes, 2026-11-22
 
 The 1.1.4-22 test source includes selected changes from Longshot (XInput background polling and atomic chunk metadata), ProjectReLink (synchronization-table growth), and Triforce (an optional reported-memory experiment, off by default). The commit references remain beside the code; the test package's matching source archive contains these modifications. This is a selective update to the existing engine, not a replacement by any of those complete newer engines.
+
+Texture transfer virtual-core handoff adapted from ProjectReLink commit 550bde68b17c19c55fca1e9fb71c41394eaa00cd (GPL-3.0-or-later), host/rx_backend.c.

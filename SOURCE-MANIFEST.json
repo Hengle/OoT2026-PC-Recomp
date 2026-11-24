@@ -1,6 +1,6 @@
 {
-  "version": "1.1.5",
-  "installer_stamp": "20261122-124630",
+  "version": "1.1.6",
+  "installer_stamp": "20261124-095658",
   "engine_base": "v2.3.2",
   "engine_source_sha256": {
     "engine/.gitattributes": "e5f3ddcef39226a920751f1f54d040b0a2fadecf2dfd423d4652c5840c23a7bc",
@@ -1206,7 +1206,7 @@
     "engine/host/nn_diag.c": "41336df9aa26da1c0a338bc0e1f17f5824faf060f1c39165b14150376177b783",
     "engine/host/nn_fs.c": "58a7d8aa096b8cebed6840c400c2f920a5f4cec1c10c66b8cc2634311c4ae6ea",
     "engine/host/nn_gs.c": "4371e6ac0169153e3407701e192d0eaaa53927e9815969256a3b7458a8821731",
-    "engine/host/nn_hid.c": "ffa3788499bc136d31a2ca917f6e4aa3aca3d2e72f48eeaecab784c64e662361",
+    "engine/host/nn_hid.c": "c58d04b6a9314f59b7f223dd4f48c24dd097b11f7d348de94b13b927dc684a6d",
     "engine/host/nn_libc.c": "30c28607bd471170e6fdac8c0d3cf01a69470e72ab92b39788922590cbf28a96",
     "engine/host/nn_os_sync.c": "c67d05be81c231bef9151ba3fe0688a461494f43bd79e853de6575cbaecf88c4",
     "engine/host/nn_syncpt.c": "1b63f27987ae2672fe5d8db51b5d26b6ec5e0c71501fecadba3cefa87d5b819f",
@@ -1257,7 +1257,7 @@
     "engine/host/posix/windows.h": "7b9c98554d9185fe6a9e46867fb0c606090b80befb7d4f6d73e5f350ef8460cd",
     "engine/host/posix/xinput.h": "85dca5cf1bf691f90cbe791ca3820b930aa964b504135b493adbd0b90ffc0995",
     "engine/host/prompts.c": "d00a4b21ade737060bbfc751f72d867d5250c0acc0a9645db5f794f1c2bc251b",
-    "engine/host/rx_backend.c": "c3dd09a4fdde6d31576cfa5446f798d8673e41da6551fe0719139f671a1dbef8",
+    "engine/host/rx_backend.c": "52903669136d1bf95eca0c0777cd461ba9053dcd7c85844c09cc39037cb75a32",
     "engine/host/rx_nowgpu.c": "92bb98d9b7b25f8aaefa4adc82c002212804034c603f6ebd879f07913f88bc99",
     "engine/host/save_backup.c": "1c079a46e0e5510432fc0b12436be750726204e9aad3640b768cffda6bfd2c9b",
     "engine/host/save_backup.h": "c54ecb00b18f7e4acc83be5f5166cfcad360329f66f1289f3a524f4a0dacd85d",
@@ -1275,7 +1275,7 @@
     "engine/nx2/bake_mimo.py": "b177315da9bc466ae25ebc71fabe8d5dc1bb73950e89b6e8cf005761c16a8365",
     "engine/nx2/build.py": "70ea3574dc5cbefa240d7742b0c10dfbc409c694c955b24872c44a327e45efcc",
     "engine/nx2/census.py": "39bc86837009075f8c68fa24ad2c450bed76be22a9534788d64442d88a31653f",
-    "engine/nx2/chunks.py": "7590c9a7a1cc6aa7b2b92aca59f3121b933f395d3dede09421448e98f6074437",
+    "engine/nx2/chunks.py": "85eda8f5569d883847b580ed9508df56bf9a3ae22978183a2fbdbf2e5ee0e904",
     "engine/nx2/diagnostic_symbols.py": "64bf764e54c83f40baa710497e89fb863f1cb4832eb2c364e2a7d0d58eb67f3c",
     "engine/nx2/disasm.py": "70b697075693f7ac20e377f0e3c5305e182ac252c765513b5d8e4e8375d94aba",
     "engine/nx2/disk.py": "488ea3d5dcc9ccdf232aa60a48aaeff386d0f3968a0cca1e4c07ef5fe9903243",
@@ -1363,7 +1363,7 @@
     "engine/nx2/unpack.py": "da033a9da0c8dead1f40a24f9c68640fce508aa28b4a4bc49443f4abbb1fe0b5",
     "engine/nx2/version.py": "6f4eeea3a219b925fe2405ee5642d42ba7652692ab7424ebcb0169dfb001f843",
     "engine/nx2/vkcheck.py": "dcb039e0e4a3e032a12b566d0b508fbff44c035fb2533afe2ddd85abdf3a6a12",
-    "engine/nx2/whole_write.py": "9e49dc0c8e132f1b06761411580bdf84c1048d31e024b90424c8bfe69239b36a",
+    "engine/nx2/whole_write.py": "84868c1264e859eeea9464728847232cf1b5092573b85b376cfef33417fb3f07",
     "engine/nx2/win_manifest.py": "6ea3287545e966cef8636990c2d74f576575f3ad45031fbf9742b2a06b55422f",
     "engine/nx2/xref.py": "4de77961904e9127dd6aaea905805aa2e00b47bb0b77698ba750538bbc277622",
     "engine/nx2/zbic.py": "53764e08af8db8b25d27dcea50cf2a41abbbe224af45f239c6beb52542fea66b",
@@ -1931,7 +1931,7 @@
     "engine/tests/test_os_lifted_siblings.py": "22ef65694ab2a020d869c975af20b7698e96c7061995847cb6bb2c484e3271d3",
     "engine/tests/test_output_resolution.py": "a1a8c5d2b9e811be93e13ac4bd62d41149b0436c96287fa63ced1fe12ad1294b",
     "engine/tests/test_pad_layout.py": "f7da2b3173f7e5e164015d4efb50b8c5f7571711320e5b0c0bd87d1d8a5090c8",
-    "engine/tests/test_pads_after_menu.py": "9f95937b5c31698b8f11dfc45bd937660a9236fefb9f14628e3debea3763dc8a",
+    "engine/tests/test_pads_after_menu.py": "3ed448bc02ee7a3f43aa200930359cc21e22bd516b32a2c5d32588dad1df0dec",
     "engine/tests/test_parallel_dry_marks.py": "1a19f93fb257fa7bfd44aff11a51119ea43e218a422c138fe00720df4c51ed17",
     "engine/tests/test_parallel_emit.py": "adadc2687a5910d025c7731c512c4929c5e1fd0e063faf087608a52f3a92be45",
     "engine/tests/test_parallel_init_order.py": "2760504642c5bf90d8de9191494ad217e1b6926115f8f5c861b997c8a751eaea",
@@ -2131,7 +2131,7 @@
     "engine/tests/test_status_line.cpp": "c66559ba95e125e74144c38cceea4ca681a6d891edc992c0a05918953a05523c",
     "engine/tests/test_status_line.py": "c1c16e7b8bb60fd4f6a02445000ba602433198dc191623477951550a57a03552",
     "engine/tests/test_steam_pads.py": "7fe413cada1d496e2cffcd4cc1b1d3c060548bfc2eb7a5008b1ff7dd5beb1664",
-    "engine/tests/test_stick_dead_zone.py": "193997a972f014b787ae8f140617ff7c0e28fe4256f534305cc0df9592265467",
+    "engine/tests/test_stick_dead_zone.py": "720f87355fe41dc8801116e7055b190a6b46fbb09d5888d0916331a5c3f85115",
     "engine/tests/test_stick_inversion_rest.py": "9ce5e64209922c79fd8a63671a14812117200a922498701d80c89989b3b1c548",
     "engine/tests/test_stick_rest.py": "1ab2ef19ad18fb3dc3be2350cba3ccb10d73b2212db77613dd5c9f978928aa8e",
     "engine/tests/test_sticky_hot_pieces.py": "859d6997924cbc33158debe6bfd7f54f7e2ddfadff740b9b2886c20d7712ef4c",
@@ -2664,15 +2664,11 @@
     "engine/wgpu-native/wgpu-native-meta/webgpu.yml": "f9e2ef6f1b5f91ad1c077c15c6fba5f55e6f52935af2adef40bc5597b06bb5ca",
     "engine/wgpu-native/wgpu-native-meta/wgpu-native-git-tag": "390263a8ff03ba3577a2d161b36b5bceb3efa9b668b9dd8aa225aa308aefd03a"
   },
-  "notes": "Corresponding source for v1.1.5: graphics-buffer reuse and memory-pressure handling, controller responsiveness, optimized hot game code, ocarina selection, optional unlimited amiibo and build recovery. No game data, translated game code or bundled recordings.",
-  "distribution_status": "release 1.1.5; no bundled recordings",
+  "notes": "Corresponding source for v1.1.6: graphics-buffer reuse and memory-pressure handling, controller responsiveness, optimized hot game code, ocarina selection, optional unlimited amiibo and build recovery. No game data, translated game code or bundled recordings.",
+  "distribution_status": "release 1.1.6; no bundled recordings",
   "git_normalized_source_sha256": {
     "engine/gpu/build-shadertool.bat": "9c799d781e874d8f224ee44b54ecc2c21cf7f4d872c62046177129506811ca77",
-    "engine/host/nn_hid.c": "c58d04b6a9314f59b7f223dd4f48c24dd097b11f7d348de94b13b927dc684a6d",
-    "engine/nx2/chunks.py": "85eda8f5569d883847b580ed9508df56bf9a3ae22978183a2fbdbf2e5ee0e904",
-    "engine/nx2/whole_write.py": "84868c1264e859eeea9464728847232cf1b5092573b85b376cfef33417fb3f07",
-    "engine/tests/test_pads_after_menu.py": "3ed448bc02ee7a3f43aa200930359cc21e22bd516b32a2c5d32588dad1df0dec",
-    "engine/tests/test_stick_dead_zone.py": "720f87355fe41dc8801116e7055b190a6b46fbb09d5888d0916331a5c3f85115"
+    "engine/host/rx_backend.c": "51018b940cf0aba43bd90a88f3a95cb6bd612938ab55b0ff0e4031a7dafcb363"
   },
-  "installer_sha256": "20c6ce04f7650788305dce721c9ceca59f0d655f3b7f60ba63adf7867101657f"
+  "installer_sha256": "3ad8c09c9b77d9bb8f846c8126645a7eb004c8be4a1770eec5cebd376021a206"
 }
